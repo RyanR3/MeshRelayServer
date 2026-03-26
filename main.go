@@ -8,6 +8,9 @@ import (
 	"syscall"
 )
 
+// Version is set at build time via -ldflags "-X main.Version=..."
+var Version = "dev"
+
 func main() {
 	// Command line flags
 	pttPort := flag.Int("ptt-port", 5000, "UDP port for PTT communication")
@@ -30,7 +33,7 @@ func main() {
 		config.WebPort = *webPort
 	}
 
-	log.Printf("=== MeshRelay Server Starting ===")
+	log.Printf("=== MeshRelay Server v%s Starting ===", Version)
 	log.Printf("PTT Port: %d", config.PTTPort)
 	log.Printf("Web GUI: http://localhost:%d", config.WebPort)
 	log.Printf("Max Clients: %d", config.MaxClients)

@@ -728,6 +728,130 @@ body {
     background: #333333;
 }
 
+/* Update Banner */
+.update-banner {
+    background: rgba(255, 193, 7, 0.1);
+    border: 1px solid rgba(255, 193, 7, 0.3);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+}
+
+.update-banner-content {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.update-banner-icon {
+    font-size: 24px;
+}
+
+.update-banner-text {
+    flex: 1;
+    color: #FFC107;
+    font-size: 14px;
+}
+
+.update-banner-text strong {
+    display: block;
+    margin-bottom: 2px;
+}
+
+/* Update Modal */
+.modal-wide {
+    min-width: 480px;
+}
+
+.version-compare {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 20px 0;
+}
+
+.version-box {
+    text-align: center;
+    padding: 16px 24px;
+    background: #2A2A2A;
+    border-radius: 10px;
+    min-width: 120px;
+}
+
+.version-box-new {
+    background: rgba(76, 175, 80, 0.15);
+    border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+.version-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #B0B0B0;
+    margin-bottom: 6px;
+    font-weight: 500;
+}
+
+.version-number {
+    font-size: 20px;
+    font-weight: 700;
+    color: #FFFFFF;
+    font-family: 'Monaco', 'Courier New', monospace;
+}
+
+.version-arrow {
+    font-size: 24px;
+    color: #B0B0B0;
+}
+
+.release-notes {
+    background: #0A0A0A;
+    border: 1px solid #2A2A2A;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.release-notes h4 {
+    font-size: 13px;
+    color: #B0B0B0;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+}
+
+.release-notes #update-notes-content {
+    font-size: 13px;
+    color: #CCCCCC;
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+/* Progress Bar */
+.progress-bar-container {
+    width: 100%;
+    background: #2A2A2A;
+    border-radius: 8px;
+    height: 10px;
+    overflow: hidden;
+    margin-bottom: 10px;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #FF5722, #FF9800);
+    border-radius: 8px;
+    transition: width 0.5s ease;
+}
+
+.progress-stage {
+    font-size: 13px;
+    color: #B0B0B0;
+    text-align: center;
+    padding: 4px 0;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .app-layout {

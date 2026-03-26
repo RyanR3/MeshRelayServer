@@ -144,6 +144,32 @@
                     <h2>Settings</h2>
                 </div>
 
+                <!-- Update Banner -->
+                <div id="update-banner" class="update-banner" style="display: none;">
+                    <div class="update-banner-content">
+                        <div class="update-banner-icon">&#x26A0;</div>
+                        <div class="update-banner-text">
+                            <strong>Update Available!</strong>
+                            <span id="update-banner-version"></span>
+                        </div>
+                        <button class="btn-primary" onclick="showUpdateModal()">View Update</button>
+                    </div>
+                </div>
+
+                <!-- Version & Updates -->
+                <div class="panel" style="margin-bottom: 20px;">
+                    <h3>Server Version</h3>
+                    <div class="settings-row" style="margin-bottom: 12px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Current Version</div>
+                            <div class="settings-description" id="current-version">Loading...</div>
+                        </div>
+                        <button class="btn-secondary" id="check-updates-btn" onclick="checkForUpdates()">Check for Updates</button>
+                    </div>
+                    <div id="update-check-result" style="display: none;"></div>
+                </div>
+
+                <!-- Authentication -->
                 <div class="panel">
                     <h3>Authentication</h3>
                     <div class="settings-row">
@@ -226,6 +252,48 @@
             <input type="password" id="adminConfirmPassword" placeholder="Confirm Password">
             <div class="modal-actions">
                 <button class="btn-primary" onclick="changeAdminPassword()">Change Password</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Update Modal -->
+    <div id="updateModal" class="modal">
+        <div class="modal-content modal-wide">
+            <h2>Server Update</h2>
+
+            <!-- Version Compare (shown before update starts) -->
+            <div id="update-info" class="version-compare">
+                <div class="version-box">
+                    <div class="version-label">Current</div>
+                    <div class="version-number" id="update-current-version">—</div>
+                </div>
+                <div class="version-arrow">&#x27A1;</div>
+                <div class="version-box version-box-new">
+                    <div class="version-label">New</div>
+                    <div class="version-number" id="update-new-version">—</div>
+                </div>
+            </div>
+
+            <div id="update-release-notes" class="release-notes" style="display: none;">
+                <h4>Release Notes</h4>
+                <div id="update-notes-content"></div>
+            </div>
+
+            <!-- Progress (shown during update) -->
+            <div id="update-progress" style="display: none;">
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="update-progress-bar" style="width: 0%"></div>
+                </div>
+                <div class="progress-stage" id="update-stage">Preparing...</div>
+            </div>
+
+            <!-- Error / Success messages -->
+            <div id="update-error" class="status-message error" style="display: none;"></div>
+            <div id="update-success" class="status-message success" style="display: none;"></div>
+
+            <div class="modal-actions" id="update-modal-actions">
+                <button class="btn-primary" id="update-apply-btn" onclick="applyUpdate()">Update Server</button>
+                <button class="btn-secondary" id="update-close-btn" onclick="closeModal('updateModal')">Cancel</button>
             </div>
         </div>
     </div>

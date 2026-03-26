@@ -23,6 +23,7 @@ function navigateTo(pageName) {
         fetchUsers();
     } else if (pageName === 'settings') {
         fetchAuthStatus();
+        fetchVersionInfo();
     }
 }
 
@@ -583,6 +584,221 @@ function logout() {
         });
 }
 
+// --- Server Update ---
+
+let latestRelease = null;
+
+function fetchVersionInfo() {
+    fetch('/api/version')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('current-version').textContent = data.version || 'Unknown';
+        })
+        .catch(err => console.error('Error fetching version:', err));
+}
+
+function checkForUpdates() {
+    const btn = document.getElementById('check-updates-btn');
+    const resultEl = document.getElementById('update-check-result');
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+    resultEl.style.display = 'none';
+
+    fetch('/api/update/check', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.textContent = 'Check for Updates';
+            resultEl.style.display = 'block';
+
+            if (data.error) {
+                resultEl.className = 'status-message error';
+                resultEl.textContent = data.error;
+                return;
+            }
+
+            if (data.update_available) {
+                latestRelease = data;
+                resultEl.className = 'status-message warning';
+                resultEl.innerHTML = `Update available: <strong>${data.latest_version}</strong> (current: ${data.current_version})`;
+
+                // Show update banner
+                document.getElementById('update-banner').style.display = 'block';
+                document.getElementById('update-banner-version').textContent =
+                    `${data.current_version} → ${data.latest_version}`;
+            } else {
+                resultEl.className = 'status-message success';
+                resultEl.textContent = 'You are running the latest version.';
+                document.getElementById('update-banner').style.display = 'none';
+            }
+        })
+        .catch(err => {
+            btn.disabled = false;
+            btn.textContent = 'Check for Updates';
+            resultEl.style.display = 'block';
+            resultEl.className = 'status-message error';
+            resultEl.textContent = 'Failed to check for updates: ' + err.message;
+        });
+}
+
+function showUpdateModal() {
+    if (!latestRelease) return;
+
+    document.getElementById('update-current-version').textContent = latestRelease.current_version;
+    document.getElementById('update-new-version').textContent = latestRelease.latest_version;
+
+    // Show release notes if available
+    const notesEl = document.getElementById('update-release-notes');
+    const notesContent = document.getElementById('update-notes-content');
+    if (latestRelease.release_notes) {
+        notesContent.textContent = latestRelease.release_notes;
+        notesEl.style.display = 'block';
+    } else {
+        notesEl.style.display = 'none';
+    }
+
+    // Reset modal state
+    document.getElementById('update-info').style.display = 'flex';
+    document.getElementById('update-progress').style.display = 'none';
+    document.getElementById('update-error').style.display = 'none';
+    document.getElementById('update-success').style.display = 'none';
+    document.getElementById('update-apply-btn').style.display = 'inline-block';
+    document.getElementById('update-apply-btn').disabled = false;
+    document.getElementById('update-close-btn').textContent = 'Cancel';
+
+    showModal('updateModal');
+}
+
+function applyUpdate() {
+    if (!latestRelease) return;
+
+    const applyBtn = document.getElementById('update-apply-btn');
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Updating...';
+
+    document.getElementById('update-progress').style.display = 'block';
+    document.getElementById('update-error').style.display = 'none';
+
+    fetch('/api/update/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            download_url: latestRelease.download_url,
+            web_download_url: latestRelease.web_download_url || '',
+            version: latestRelease.latest_version
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            showUpdateError(data.error);
+            return;
+        }
+        // Start polling for progress
+        startUpdatePolling();
+    })
+    .catch(err => {
+        showUpdateError('Failed to start update: ' + err.message);
+    });
+}
+
+let updatePollTimer = null;
+
+function startUpdatePolling() {
+    if (updatePollTimer) clearInterval(updatePollTimer);
+
+    updatePollTimer = setInterval(() => {
+        fetch('/api/update/status')
+            .then(r => r.json())
+            .then(status => {
+                const bar = document.getElementById('update-progress-bar');
+                const stage = document.getElementById('update-stage');
+
+                bar.style.width = status.progress + '%';
+                stage.textContent = formatStage(status.stage) + (status.message ? ' — ' + status.message : '');
+
+                if (status.error) {
+                    clearInterval(updatePollTimer);
+                    updatePollTimer = null;
+                    showUpdateError(status.error);
+                    return;
+                }
+
+                if (!status.in_progress && status.stage === 'restarting') {
+                    clearInterval(updatePollTimer);
+                    updatePollTimer = null;
+                    stage.textContent = 'Server restarting... Reconnecting shortly.';
+                    bar.style.width = '100%';
+                    waitForServerRestart();
+                }
+            })
+            .catch(() => {
+                // Server may be restarting — wait and try to reconnect
+                clearInterval(updatePollTimer);
+                updatePollTimer = null;
+                document.getElementById('update-stage').textContent = 'Server restarting...';
+                document.getElementById('update-progress-bar').style.width = '100%';
+                waitForServerRestart();
+            });
+    }, 1000);
+}
+
+function waitForServerRestart() {
+    const applyBtn = document.getElementById('update-apply-btn');
+    applyBtn.style.display = 'none';
+
+    let attempts = 0;
+    const maxAttempts = 30;
+
+    const checkInterval = setInterval(() => {
+        attempts++;
+        fetch('/api/version')
+            .then(r => r.json())
+            .then(data => {
+                clearInterval(checkInterval);
+                const successEl = document.getElementById('update-success');
+                successEl.textContent = 'Update complete! Now running ' + data.version;
+                successEl.style.display = 'block';
+                document.getElementById('update-progress').style.display = 'none';
+                document.getElementById('update-close-btn').textContent = 'Close';
+                document.getElementById('current-version').textContent = data.version;
+                document.getElementById('update-banner').style.display = 'none';
+                document.getElementById('update-check-result').style.display = 'none';
+                latestRelease = null;
+                addLog('Server updated to ' + data.version, 'success');
+            })
+            .catch(() => {
+                if (attempts >= maxAttempts) {
+                    clearInterval(checkInterval);
+                    showUpdateError('Server did not come back after restart. Check server manually.');
+                }
+            });
+    }, 2000);
+}
+
+function showUpdateError(message) {
+    const applyBtn = document.getElementById('update-apply-btn');
+    applyBtn.disabled = false;
+    applyBtn.textContent = 'Retry Update';
+    document.getElementById('update-progress').style.display = 'none';
+
+    const errorEl = document.getElementById('update-error');
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+    addLog('Update failed: ' + message, 'error');
+}
+
+function formatStage(stage) {
+    const stages = {
+        'downloading': 'Downloading update',
+        'downloading_web': 'Downloading web files',
+        'backing_up': 'Creating backup',
+        'installing': 'Installing update',
+        'restarting': 'Restarting server'
+    };
+    return stages[stage] || stage || 'Preparing';
+}
+
 // Wrap fetch to handle 401 globally
 const originalFetch = window.fetch;
 window.fetch = function(url, options) {
@@ -603,6 +819,7 @@ document.addEventListener('DOMContentLoaded', () => {
         connectWebSocket();
         fetchAuthStatus();
         fetchUsers();
+        fetchVersionInfo();
 
         // Set up navigation click handlers
         document.querySelectorAll('.nav-item').forEach(item => {

@@ -14,6 +14,10 @@ fi
 echo "Go version:"
 go version
 
+# Determine version from git tag
+VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+echo "Building version: $VERSION"
+
 echo ""
 echo "Tidying dependencies..."
 go mod tidy
@@ -23,12 +27,16 @@ echo "Downloading dependencies..."
 go mod download
 
 echo ""
-echo "Building server..."
-go build -o ptt-server
+echo "Building server (macOS)..."
+go build -ldflags "-X main.Version=${VERSION}" -o ptt-server
+
+echo ""
+echo "Building server (Linux amd64)..."
+GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${VERSION}" -o ptt-server-linux
 
 if [ $? -eq 0 ]; then
     echo ""
-    echo "✓ Build successful!"
+    echo "Build successful! Version: $VERSION"
     echo ""
     echo "Run the server with:"
     echo "  ./ptt-server"
@@ -37,6 +45,6 @@ if [ $? -eq 0 ]; then
     echo "  http://localhost:8080"
 else
     echo ""
-    echo "✗ Build failed"
+    echo "Build failed"
     exit 1
 fi

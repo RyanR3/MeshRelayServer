@@ -1,10 +1,16 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,6 +52,10 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/auth/status", s.handleAuthStatus).Methods("GET")
 	api.HandleFunc("/auth/toggle", s.handleAuthToggle).Methods("POST")
 	api.HandleFunc("/admin/change-password", s.handleAdminChangePassword).Methods("POST")
+	api.HandleFunc("/version", s.handleVersion).Methods("GET")
+	api.HandleFunc("/update/check", s.handleUpdateCheck).Methods("POST")
+	api.HandleFunc("/update/apply", s.handleUpdateApply).Methods("POST")
+	api.HandleFunc("/update/status", s.handleUpdateStatus).Methods("GET")
 
 	// WebSocket for real-time updates
 	r.HandleFunc("/ws", s.handleWebSocket)
@@ -424,4 +434,341 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	log.Printf("Web admin password changed for: %s", username)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
+}
+
+// --- Update Management ---
+
+type GitHubRelease struct {
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"version": Version})
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/RyanR3/MeshRelayServer/releases/latest")
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to reach GitHub: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"current_version":  Version,
+			"latest_version":   Version,
+			"update_available": false,
+			"message":          "No releases found on GitHub",
+		})
+		return
+	}
+
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("GitHub API returned %d: %s", resp.StatusCode, string(bodyBytes))})
+		return
+	}
+
+	var release GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse GitHub response"})
+		return
+	}
+
+	latestVersion := strings.TrimPrefix(release.TagName, "v")
+	currentVersion := strings.TrimPrefix(Version, "v")
+	updateAvailable := latestVersion != currentVersion && Version != "dev"
+
+	var binaryURL, webURL string
+	for _, asset := range release.Assets {
+		if asset.Name == "ptt-server-linux" || asset.Name == "ptt-server" {
+			binaryURL = asset.BrowserDownloadURL
+		}
+		if asset.Name == "web.tar.gz" {
+			webURL = asset.BrowserDownloadURL
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"current_version":  Version,
+		"latest_version":   release.TagName,
+		"update_available": updateAvailable,
+		"release_notes":    release.Body,
+		"release_url":      release.HTMLURL,
+		"binary_url":       binaryURL,
+		"web_url":          webURL,
+		"assets_found":     binaryURL != "",
+	})
+}
+
+func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	s.updateStatus.mu.RLock()
+	if s.updateStatus.InProgress {
+		s.updateStatus.mu.RUnlock()
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Update already in progress"})
+		return
+	}
+	s.updateStatus.mu.RUnlock()
+
+	var req struct {
+		BinaryURL string `json:"binary_url"`
+		WebURL    string `json:"web_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BinaryURL == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "binary_url is required"})
+		return
+	}
+
+	if !strings.HasPrefix(req.BinaryURL, "https://github.com/RyanR3/MeshRelayServer/") {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid download URL"})
+		return
+	}
+
+	go s.performUpdate(req.BinaryURL, req.WebURL)
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "update_started"})
+}
+
+func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	s.updateStatus.mu.RLock()
+	defer s.updateStatus.mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.updateStatus)
+}
+
+func (s *Server) setUpdateStatus(stage string, progress int, message string, errMsg string) {
+	s.updateStatus.mu.Lock()
+	defer s.updateStatus.mu.Unlock()
+	s.updateStatus.Stage = stage
+	s.updateStatus.Progress = progress
+	s.updateStatus.Message = message
+	s.updateStatus.Error = errMsg
+	if stage == "error" || stage == "done" {
+		s.updateStatus.InProgress = false
+	}
+}
+
+func (s *Server) performUpdate(binaryURL, webURL string) {
+	s.updateStatus.mu.Lock()
+	s.updateStatus.InProgress = true
+	s.updateStatus.Error = ""
+	s.updateStatus.mu.Unlock()
+
+	log.Printf("Starting server update...")
+
+	execPath, err := os.Executable()
+	if err != nil {
+		s.setUpdateStatus("error", 0, "", "Failed to determine executable path: "+err.Error())
+		return
+	}
+	installDir := filepath.Dir(execPath)
+
+	// Stage 1: Download binary
+	s.setUpdateStatus("downloading", 10, "Downloading new binary...", "")
+	log.Printf("Downloading binary from: %s", binaryURL)
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(binaryURL)
+	if err != nil {
+		s.setUpdateStatus("error", 10, "", "Failed to download binary: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		s.setUpdateStatus("error", 10, "", fmt.Sprintf("Download failed with status %d", resp.StatusCode))
+		return
+	}
+
+	tmpBinary := filepath.Join(installDir, "ptt-server.new")
+	outFile, err := os.Create(tmpBinary)
+	if err != nil {
+		s.setUpdateStatus("error", 10, "", "Failed to create temp file: "+err.Error())
+		return
+	}
+	if _, err := io.Copy(outFile, resp.Body); err != nil {
+		outFile.Close()
+		os.Remove(tmpBinary)
+		s.setUpdateStatus("error", 20, "", "Failed to write binary: "+err.Error())
+		return
+	}
+	outFile.Close()
+	os.Chmod(tmpBinary, 0755)
+
+	// Stage 2: Download web files
+	var tmpWebDir string
+	if webURL != "" {
+		s.setUpdateStatus("downloading", 30, "Downloading web files...", "")
+		log.Printf("Downloading web files from: %s", webURL)
+
+		tmpWebDir = filepath.Join(installDir, "web.new")
+		if err := downloadAndExtractTarGz(webURL, tmpWebDir); err != nil {
+			os.Remove(tmpBinary)
+			s.setUpdateStatus("error", 30, "", "Failed to download web files: "+err.Error())
+			return
+		}
+	}
+
+	// Stage 3: Backup
+	s.setUpdateStatus("backing_up", 50, "Creating backup...", "")
+	log.Printf("Creating backup...")
+
+	backupDir := filepath.Join(installDir, "backups", time.Now().Format("20060102-150405"))
+	os.MkdirAll(backupDir, 0755)
+
+	currentBinary := filepath.Join(installDir, "ptt-server")
+	copyFile(currentBinary, filepath.Join(backupDir, "ptt-server"))
+
+	webDir := filepath.Join(installDir, "web")
+	if _, err := os.Stat(webDir); err == nil {
+		copyDir(webDir, filepath.Join(backupDir, "web"))
+	}
+
+	// Stage 4: Install
+	s.setUpdateStatus("installing", 70, "Installing update...", "")
+	log.Printf("Installing update...")
+
+	if err := os.Rename(tmpBinary, currentBinary); err != nil {
+		if err := copyFile(tmpBinary, currentBinary); err != nil {
+			s.setUpdateStatus("error", 70, "", "Failed to replace binary: "+err.Error())
+			return
+		}
+		os.Remove(tmpBinary)
+	}
+	os.Chmod(currentBinary, 0755)
+
+	if tmpWebDir != "" {
+		entries, _ := os.ReadDir(tmpWebDir)
+		for _, entry := range entries {
+			src := filepath.Join(tmpWebDir, entry.Name())
+			dst := filepath.Join(webDir, entry.Name())
+			if entry.IsDir() {
+				copyDir(src, dst)
+			} else {
+				copyFile(src, dst)
+			}
+		}
+		os.RemoveAll(tmpWebDir)
+	}
+
+	// Stage 5: Restart
+	s.setUpdateStatus("restarting", 90, "Restarting server...", "")
+	log.Printf("Restarting server via systemd...")
+
+	cmd := exec.Command("sudo", "systemctl", "restart", "ptt-server")
+	if err := cmd.Start(); err != nil {
+		log.Printf("systemctl restart failed: %v", err)
+		s.setUpdateStatus("done", 100, "Update installed. Please restart the server manually.", "")
+		return
+	}
+
+	s.setUpdateStatus("done", 100, "Update installed. Server is restarting...", "")
+}
+
+func downloadAndExtractTarGz(url string, destDir string) error {
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+	}
+
+	os.MkdirAll(destDir, 0755)
+
+	gzReader, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("gzip error: %w", err)
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		name := strings.TrimPrefix(header.Name, "web/")
+		if name == "" || name == "." {
+			continue
+		}
+
+		target := filepath.Join(destDir, name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			os.MkdirAll(target, 0755)
+		case tar.TypeReg:
+			os.MkdirAll(filepath.Dir(target), 0755)
+			f, err := os.Create(target)
+			if err != nil {
+				return err
+			}
+			io.Copy(f, tarReader)
+			f.Close()
+		}
+	}
+
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+
+		return copyFile(path, target)
+	})
 }
