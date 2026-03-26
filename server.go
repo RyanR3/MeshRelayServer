@@ -1,0 +1,853 @@
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"sync"
+	"time"
+)
+
+type Client struct {
+	Username      string
+	Addr          *net.UDPAddr
+	Channel       int
+	LastHeartbeat time.Time
+	ConnectedAt   time.Time
+}
+
+type Channel struct {
+	ID      int
+	Name    string
+	Clients map[string]*Client
+	mu      sync.RWMutex
+}
+
+type UserAccount struct {
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
+	CreatedAt    string `json:"created_at"`
+}
+
+type Server struct {
+	config            *Config
+	conn              *net.UDPConn
+	clients           map[string]*Client      // username -> client
+	channels          map[int]*Channel        // channel ID -> channel
+	groups            map[string]*GroupPacket  // groupID -> group
+	users             map[string]*UserAccount  // username -> account
+	authenticatedAddrs map[string]bool         // addr string -> authenticated
+	webAdmins          map[string]*WebAdmin    // username -> admin account (web dashboard)
+	webSessions        map[string]string       // session token -> username
+	mu                sync.RWMutex
+	shutdown          chan struct{}
+	stats             *Stats
+}
+
+type Stats struct {
+	PacketsReceived uint64
+	PacketsSent     uint64
+	BytesReceived   uint64
+	BytesSent       uint64
+	StartTime       time.Time
+	mu              sync.RWMutex
+}
+
+func NewServer(config *Config) *Server {
+	// Create default channels (0-19, matching Android app)
+	channels := make(map[int]*Channel)
+	for i := 0; i < 20; i++ {
+		channels[i] = &Channel{
+			ID:      i,
+			Name:    fmt.Sprintf("Channel %d", i),
+			Clients: make(map[string]*Client),
+		}
+	}
+
+	s := &Server{
+		config:            config,
+		clients:           make(map[string]*Client),
+		channels:          channels,
+		groups:            make(map[string]*GroupPacket),
+		users:             make(map[string]*UserAccount),
+		authenticatedAddrs: make(map[string]bool),
+		webAdmins:          make(map[string]*WebAdmin),
+		webSessions:        make(map[string]string),
+		shutdown:          make(chan struct{}),
+		stats: &Stats{
+			StartTime: time.Now(),
+		},
+	}
+
+	s.loadUsers()
+	s.loadWebAdmins()
+	return s
+}
+
+func (s *Server) StartPTT() error {
+	addr := &net.UDPAddr{
+		Port: s.config.PTTPort,
+		IP:   net.IPv4zero,
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind UDP port: %w", err)
+	}
+
+	s.conn = conn
+	log.Printf("MeshRelay server listening on UDP port %d", s.config.PTTPort)
+
+	// Start heartbeat checker
+	go s.heartbeatChecker()
+
+	// Start receiving packets
+	buffer := make([]byte, 65507) // Max UDP packet size
+
+	for {
+		select {
+		case <-s.shutdown:
+			return nil
+		default:
+			n, addr, err := conn.ReadFromUDP(buffer)
+			if err != nil {
+				if s.isShuttingDown() {
+					return nil
+				}
+				log.Printf("Error reading UDP packet: %v", err)
+				continue
+			}
+
+			// Update stats
+			s.stats.mu.Lock()
+			s.stats.PacketsReceived++
+			s.stats.BytesReceived += uint64(n)
+			s.stats.mu.Unlock()
+
+			// Process packet in goroutine
+			go s.handlePacket(buffer[:n], addr)
+		}
+	}
+}
+
+func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
+	packetType, payload, err := ParsePacket(data)
+	if err != nil {
+		log.Printf("Error parsing packet from %s: %v", addr, err)
+		return
+	}
+
+	switch packetType {
+	case PacketTypeAudio:
+		s.handleAudioPacket(payload.(*AudioPacket), addr)
+	case PacketTypeDirectAudio:
+		s.handleDirectAudioPacket(payload.(*DirectAudioPacket), addr)
+	case PacketTypeText:
+		s.handleTextPacket(payload.(*TextMessagePacket), addr)
+	case PacketTypeHeartbeat:
+		s.handleHeartbeat(payload.(*HeartbeatPacket), addr)
+	case PacketTypeJoin:
+		s.handleJoin(payload.(*JoinPacket), addr)
+	case PacketTypeLeave:
+		s.handleLeave(addr)
+	case PacketTypeGroupCreate:
+		s.handleGroupCreate(payload.(*GroupPacket), addr)
+	case PacketTypeGroupUpdate:
+		s.handleGroupUpdate(payload.(*GroupPacket), addr)
+	case PacketTypeAuthRequest:
+		s.handleAuthRequest(payload.(*AuthRequestPacket), addr)
+	}
+}
+
+func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	s.mu.RLock()
+	client, exists := s.clients[packet.Username]
+	s.mu.RUnlock()
+
+	if !exists {
+		log.Printf("Audio from unknown client: %s (%s)", packet.Username, addr)
+		return
+	}
+
+	// Update client's last heartbeat
+	client.LastHeartbeat = time.Now()
+
+	// Get client's channel
+	channel := s.channels[client.Channel]
+	if channel == nil {
+		return
+	}
+
+	// Broadcast audio to all clients in the same channel (except sender)
+	channel.mu.RLock()
+	defer channel.mu.RUnlock()
+
+	// Prepend packet type to the serialized data
+	audioData := append([]byte{PacketTypeAudio}, SerializeAudioPacket(packet)...)
+
+	for _, otherClient := range channel.Clients {
+		if otherClient.Username != client.Username {
+			s.sendPacket(audioData, otherClient.Addr)
+		}
+	}
+
+	log.Printf("Relayed audio from %s to %d clients in channel %d (%d bytes)",
+		packet.Username, len(channel.Clients)-1, client.Channel, len(packet.AudioData))
+}
+
+func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	s.mu.RLock()
+	sender, senderExists := s.clients[packet.Sender]
+	recipient, recipientExists := s.clients[packet.Recipient]
+	s.mu.RUnlock()
+
+	if !senderExists {
+		log.Printf("Direct audio from unknown sender: %s (%s)", packet.Sender, addr)
+		return
+	}
+
+	if !recipientExists {
+		log.Printf("Direct audio to unknown recipient: %s from %s", packet.Recipient, packet.Sender)
+		return
+	}
+
+	// Update sender's last heartbeat
+	sender.LastHeartbeat = time.Now()
+
+	// Create packet with type prepended
+	audioData, err := CreateDirectAudioPacket(packet)
+	if err != nil {
+		log.Printf("Error creating direct audio packet: %v", err)
+		return
+	}
+
+	// Send only to the specific recipient
+	s.sendPacket(audioData, recipient.Addr)
+
+	log.Printf("Relayed direct audio from %s to %s (%d bytes)",
+		packet.Sender, packet.Recipient, len(packet.AudioData))
+}
+
+func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	s.mu.RLock()
+	client, exists := s.clients[packet.Sender]
+	s.mu.RUnlock()
+
+	if !exists {
+		log.Printf("Text message from unknown client: %s (%s)", packet.Sender, addr)
+		return
+	}
+
+	// Update client's last heartbeat
+	client.LastHeartbeat = time.Now()
+
+	// Get client's channel
+	channel := s.channels[client.Channel]
+	if channel == nil {
+		return
+	}
+
+	// Broadcast message to all clients in the same channel
+	channel.mu.RLock()
+	defer channel.mu.RUnlock()
+
+	// Prepend packet type to the serialized data
+	textData := append([]byte{PacketTypeText}, SerializeTextPacket(packet)...)
+
+	for _, otherClient := range channel.Clients {
+		s.sendPacket(textData, otherClient.Addr)
+	}
+
+	log.Printf("Relayed text message from %s to %d clients in channel %d",
+		packet.Sender, len(channel.Clients)-1, client.Channel)
+}
+
+func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	s.mu.RLock()
+	client, exists := s.clients[packet.Username]
+	s.mu.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	// Update client's last heartbeat
+	client.LastHeartbeat = time.Now()
+
+	// Get client's channel
+	channel := s.channels[client.Channel]
+	if channel == nil {
+		return
+	}
+
+	// Create heartbeat packet
+	heartbeatData, err := CreateHeartbeatPacket(packet.Username)
+	if err != nil {
+		log.Printf("Error creating heartbeat packet: %v", err)
+		return
+	}
+
+	// Relay heartbeat to all other clients in the same channel (not to sender)
+	relayCount := 0
+	for _, otherClient := range channel.Clients {
+		if otherClient.Username != packet.Username {
+			s.sendPacket(heartbeatData, otherClient.Addr)
+			relayCount++
+		}
+	}
+
+	if relayCount > 0 {
+		log.Printf("Relayed heartbeat from %s to %d clients in channel %d",
+			packet.Username, relayCount, client.Channel)
+	}
+}
+
+func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if client already exists
+	client, exists := s.clients[packet.Username]
+
+	if exists {
+		// Client is rejoining, possibly switching channels
+		oldChannel := s.channels[client.Channel]
+		if oldChannel != nil {
+			oldChannel.mu.Lock()
+			delete(oldChannel.Clients, client.Username)
+			oldChannel.mu.Unlock()
+		}
+
+		client.Channel = packet.Channel
+		client.Addr = addr
+		client.LastHeartbeat = time.Now()
+	} else {
+		// New client
+		client = &Client{
+			Username:      packet.Username,
+			Addr:          addr,
+			Channel:       packet.Channel,
+			LastHeartbeat: time.Now(),
+			ConnectedAt:   time.Now(),
+		}
+		s.clients[packet.Username] = client
+	}
+
+	// Add client to new channel
+	channel := s.channels[packet.Channel]
+	if channel != nil {
+		channel.mu.Lock()
+		channel.Clients[client.Username] = client
+		channel.mu.Unlock()
+		log.Printf("Client %s joined channel %d from %s", packet.Username, packet.Channel, addr)
+	}
+}
+
+func (s *Server) handleLeave(addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Find client by address
+	var clientToRemove *Client
+	for _, client := range s.clients {
+		if client.Addr.String() == addr.String() {
+			clientToRemove = client
+			break
+		}
+	}
+
+	if clientToRemove != nil {
+		s.removeClient(clientToRemove)
+	}
+}
+
+func (s *Server) removeClient(client *Client) {
+	// Remove from channel
+	channel := s.channels[client.Channel]
+	if channel != nil {
+		channel.mu.Lock()
+		delete(channel.Clients, client.Username)
+		channel.mu.Unlock()
+	}
+
+	// Remove from authenticated addresses
+	if client.Addr != nil {
+		delete(s.authenticatedAddrs, client.Addr.String())
+	}
+
+	// Remove from clients map
+	delete(s.clients, client.Username)
+	log.Printf("Client %s left channel %d", client.Username, client.Channel)
+}
+
+func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
+	_, err := s.conn.WriteToUDP(data, addr)
+	if err != nil {
+		log.Printf("Error sending packet to %s: %v", addr, err)
+		return
+	}
+
+	// Update stats
+	s.stats.mu.Lock()
+	s.stats.PacketsSent++
+	s.stats.BytesSent += uint64(len(data))
+	s.stats.mu.Unlock()
+}
+
+func (s *Server) heartbeatChecker() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.shutdown:
+			return
+		case <-ticker.C:
+			s.checkHeartbeats()
+		}
+	}
+}
+
+func (s *Server) checkHeartbeats() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	timeout := 30 * time.Second
+
+	var toRemove []*Client
+	for _, client := range s.clients {
+		if now.Sub(client.LastHeartbeat) > timeout {
+			toRemove = append(toRemove, client)
+		}
+	}
+
+	for _, client := range toRemove {
+		log.Printf("Client %s timed out (no heartbeat for %v)", client.Username, timeout)
+		s.removeClient(client)
+	}
+}
+
+func (s *Server) isShuttingDown() bool {
+	select {
+	case <-s.shutdown:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) Shutdown() {
+	close(s.shutdown)
+	if s.conn != nil {
+		s.conn.Close()
+	}
+}
+
+// GetStats returns current server statistics
+func (s *Server) GetStats() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.stats.mu.RLock()
+	defer s.stats.mu.RUnlock()
+
+	uptime := time.Since(s.stats.StartTime)
+
+	return map[string]interface{}{
+		"total_clients":     len(s.clients),
+		"packets_received":  s.stats.PacketsReceived,
+		"packets_sent":      s.stats.PacketsSent,
+		"bytes_received":    s.stats.BytesReceived,
+		"bytes_sent":        s.stats.BytesSent,
+		"uptime_seconds":    int(uptime.Seconds()),
+		"start_time":        s.stats.StartTime,
+	}
+}
+
+// GetClients returns list of connected clients
+func (s *Server) GetClients() []map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	clients := make([]map[string]interface{}, 0, len(s.clients))
+	for _, client := range s.clients {
+		clients = append(clients, map[string]interface{}{
+			"username":       client.Username,
+			"address":        client.Addr.String(),
+			"channel":        client.Channel,
+			"connected_at":   client.ConnectedAt,
+			"last_heartbeat": client.LastHeartbeat,
+		})
+	}
+
+	return clients
+}
+
+// GetChannels returns list of channels with client counts
+func (s *Server) GetChannels() []map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	channels := make([]map[string]interface{}, 0, len(s.channels))
+	for _, channel := range s.channels {
+		channel.mu.RLock()
+		channels = append(channels, map[string]interface{}{
+			"id":           channel.ID,
+			"name":         channel.Name,
+			"client_count": len(channel.Clients),
+		})
+		channel.mu.RUnlock()
+	}
+
+	return channels
+}
+
+func (s *Server) handleGroupCreate(packet *GroupPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	log.Printf("Group create from %s: %s (creator: %s, members: %v)", addr, packet.GroupName, packet.Creator, packet.Members)
+
+	// Store group
+	s.mu.Lock()
+	s.groups[packet.GroupID] = packet
+	s.mu.Unlock()
+
+	// Relay to all connected clients so they can sync the new group
+	s.mu.RLock()
+	relayData, err := CreateGroupPacket(PacketTypeGroupCreate, packet)
+	if err != nil {
+		log.Printf("Error creating group packet: %v", err)
+		s.mu.RUnlock()
+		return
+	}
+
+	relayCount := 0
+	for _, client := range s.clients {
+		s.sendPacket(relayData, client.Addr)
+		relayCount++
+	}
+	s.mu.RUnlock()
+
+	log.Printf("Relayed group create to %d clients", relayCount)
+}
+
+func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+
+	log.Printf("Group update from %s: %s (members: %v)", addr, packet.GroupName, packet.Members)
+
+	// Update stored group
+	s.mu.Lock()
+	s.groups[packet.GroupID] = packet
+	s.mu.Unlock()
+
+	// Relay to all connected clients so they can sync the updated group
+	s.mu.RLock()
+	relayData, err := CreateGroupPacket(PacketTypeGroupUpdate, packet)
+	if err != nil {
+		log.Printf("Error creating group update packet: %v", err)
+		s.mu.RUnlock()
+		return
+	}
+
+	relayCount := 0
+	for _, client := range s.clients {
+		s.sendPacket(relayData, client.Addr)
+		relayCount++
+	}
+	s.mu.RUnlock()
+
+	log.Printf("Relayed group update to %d clients", relayCount)
+}
+
+func (s *Server) GetGroups() []map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	groups := make([]map[string]interface{}, 0, len(s.groups))
+	for _, group := range s.groups {
+		groups = append(groups, map[string]interface{}{
+			"id":           group.GroupID,
+			"name":         group.GroupName,
+			"creator":      group.Creator,
+			"member_count": len(group.Members),
+			"members":      group.Members,
+		})
+	}
+
+	return groups
+}
+
+// --- Authentication ---
+
+func (s *Server) isAuthenticated(addr *net.UDPAddr) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authenticatedAddrs[addr.String()]
+}
+
+func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[packet.Username]
+	if !exists {
+		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
+		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Unknown user"})
+		s.sendPacket(resp, addr)
+		return
+	}
+
+	if user.PasswordHash != packet.PasswordHash {
+		log.Printf("Auth failed: wrong password for user %s from %s", packet.Username, addr)
+		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid password"})
+		s.sendPacket(resp, addr)
+		return
+	}
+
+	// Remove old authenticated address for this user (in case they reconnected from a new port)
+	if existingClient, ok := s.clients[packet.Username]; ok {
+		oldAddr := existingClient.Addr.String()
+		if oldAddr != addr.String() {
+			delete(s.authenticatedAddrs, oldAddr)
+			log.Printf("Cleaned up stale auth for user %s (old addr: %s)", packet.Username, oldAddr)
+		}
+	}
+
+	s.authenticatedAddrs[addr.String()] = true
+	log.Printf("Auth success: user %s from %s", packet.Username, addr)
+	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: "Authenticated"})
+	s.sendPacket(resp, addr)
+}
+
+// --- User Management ---
+
+func (s *Server) loadUsers() {
+	file, err := os.Open(s.config.UsersFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("No users file found at %s, starting with empty user list", s.config.UsersFile)
+			return
+		}
+		log.Printf("Error loading users file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	var users []*UserAccount
+	if err := json.NewDecoder(file).Decode(&users); err != nil {
+		log.Printf("Error parsing users file: %v", err)
+		return
+	}
+
+	for _, user := range users {
+		s.users[user.Username] = user
+	}
+	log.Printf("Loaded %d user accounts", len(s.users))
+}
+
+func (s *Server) saveUsers() error {
+	users := make([]*UserAccount, 0, len(s.users))
+	for _, user := range s.users {
+		users = append(users, user)
+	}
+
+	file, err := os.Create(s.config.UsersFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(users)
+}
+
+func hashPassword(password string) string {
+	h := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(h[:])
+}
+
+func (s *Server) AddUser(username, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[username]; exists {
+		return fmt.Errorf("user %s already exists", username)
+	}
+
+	s.users[username] = &UserAccount{
+		Username:     username,
+		PasswordHash: hashPassword(password),
+		CreatedAt:    time.Now().Format(time.RFC3339),
+	}
+
+	if err := s.saveUsers(); err != nil {
+		delete(s.users, username)
+		return err
+	}
+
+	log.Printf("Created user account: %s", username)
+	return nil
+}
+
+func (s *Server) UpdatePassword(username, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[username]
+	if !exists {
+		return fmt.Errorf("user %s not found", username)
+	}
+
+	user.PasswordHash = hashPassword(password)
+
+	if err := s.saveUsers(); err != nil {
+		return err
+	}
+
+	log.Printf("Updated password for user: %s", username)
+	return nil
+}
+
+func (s *Server) RemoveUser(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[username]; !exists {
+		return fmt.Errorf("user %s not found", username)
+	}
+
+	delete(s.users, username)
+
+	if err := s.saveUsers(); err != nil {
+		return err
+	}
+
+	log.Printf("Removed user account: %s", username)
+	return nil
+}
+
+func (s *Server) GetUsers() []map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	users := make([]map[string]interface{}, 0, len(s.users))
+	for _, user := range s.users {
+		users = append(users, map[string]interface{}{
+			"username":   user.Username,
+			"created_at": user.CreatedAt,
+		})
+	}
+	return users
+}
+
+// ---- Web Admin / Dashboard Auth ----
+
+type WebAdmin struct {
+	Username           string `json:"username"`
+	PasswordHash       string `json:"password_hash"`
+	MustChangePassword bool   `json:"must_change_password"`
+}
+
+func (s *Server) loadWebAdmins() {
+	file, err := os.Open(s.config.WebAdminsFile)
+	if err != nil {
+		// File doesn't exist — create default admin account
+		log.Printf("No web admins file found, creating default admin account")
+		s.createDefaultAdmin()
+		return
+	}
+	defer file.Close()
+
+	var admins []WebAdmin
+	if err := json.NewDecoder(file).Decode(&admins); err != nil {
+		log.Printf("Error reading web admins file: %v, creating default", err)
+		s.createDefaultAdmin()
+		return
+	}
+
+	for i := range admins {
+		s.webAdmins[admins[i].Username] = &admins[i]
+	}
+	log.Printf("Loaded %d web admin account(s)", len(s.webAdmins))
+}
+
+func (s *Server) createDefaultAdmin() {
+	s.webAdmins["admin"] = &WebAdmin{
+		Username:           "admin",
+		PasswordHash:       hashPassword("admin"),
+		MustChangePassword: true,
+	}
+	if err := s.saveWebAdmins(); err != nil {
+		log.Printf("Error saving default web admin: %v", err)
+	}
+	log.Printf("Created default web admin account: admin (password: admin)")
+}
+
+func (s *Server) saveWebAdmins() error {
+	admins := make([]WebAdmin, 0, len(s.webAdmins))
+	for _, admin := range s.webAdmins {
+		admins = append(admins, *admin)
+	}
+
+	file, err := os.Create(s.config.WebAdminsFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(admins)
+}
+
+func (s *Server) generateSessionToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (s *Server) validateWebSession(token string) bool {
+	if token == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.webSessions[token]
+	return ok
+}

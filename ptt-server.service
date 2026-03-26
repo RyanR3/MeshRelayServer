@@ -1,0 +1,16 @@
+[Unit]
+Description=PTT Relay Server
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/PTTServer
+ExecStart=/home/YOUR_USERNAME/PTTServer/ptt-server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
