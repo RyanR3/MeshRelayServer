@@ -728,6 +728,27 @@ body {
     background: #333333;
 }
 
+/* Dashboard Version */
+.dashboard-version {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.version-tag {
+    font-size: 13px;
+    color: #B0B0B0;
+    background: #2A2A2A;
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-family: 'Monaco', 'Courier New', monospace;
+}
+
+.btn-sm {
+    padding: 6px 14px;
+    font-size: 12px;
+}
+
 /* Update Banner */
 .update-banner {
     background: rgba(255, 193, 7, 0.1);

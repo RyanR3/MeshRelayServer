@@ -592,52 +592,79 @@ function fetchVersionInfo() {
     fetch('/api/version')
         .then(r => r.json())
         .then(data => {
-            document.getElementById('current-version').textContent = data.version || 'Unknown';
+            const ver = data.version || 'Unknown';
+            document.getElementById('current-version').textContent = ver;
+            const dashVer = document.getElementById('dashboard-version');
+            if (dashVer) dashVer.textContent = ver;
         })
         .catch(err => console.error('Error fetching version:', err));
 }
 
 function checkForUpdates() {
-    const btn = document.getElementById('check-updates-btn');
+    // Disable both buttons (settings + dashboard)
+    const settingsBtn = document.getElementById('check-updates-btn');
+    const dashboardBtn = document.getElementById('dashboard-check-updates-btn');
     const resultEl = document.getElementById('update-check-result');
-    btn.disabled = true;
-    btn.textContent = 'Checking...';
-    resultEl.style.display = 'none';
+
+    if (settingsBtn) { settingsBtn.disabled = true; settingsBtn.textContent = 'Checking...'; }
+    if (dashboardBtn) { dashboardBtn.disabled = true; dashboardBtn.textContent = 'Checking...'; }
+    if (resultEl) resultEl.style.display = 'none';
 
     fetch('/api/update/check', { method: 'POST' })
         .then(r => r.json())
         .then(data => {
-            btn.disabled = false;
-            btn.textContent = 'Check for Updates';
-            resultEl.style.display = 'block';
+            if (settingsBtn) { settingsBtn.disabled = false; settingsBtn.textContent = 'Check for Updates'; }
+            if (dashboardBtn) { dashboardBtn.disabled = false; dashboardBtn.textContent = 'Check for Updates'; }
+            if (resultEl) resultEl.style.display = 'block';
 
             if (data.error) {
-                resultEl.className = 'status-message error';
-                resultEl.textContent = data.error;
+                if (resultEl) {
+                    resultEl.className = 'status-message error';
+                    resultEl.textContent = data.error;
+                }
                 return;
             }
 
             if (data.update_available) {
                 latestRelease = data;
-                resultEl.className = 'status-message warning';
-                resultEl.innerHTML = `Update available: <strong>${data.latest_version}</strong> (current: ${data.current_version})`;
+                if (resultEl) {
+                    resultEl.className = 'status-message warning';
+                    resultEl.innerHTML = `Update available: <strong>${data.latest_version}</strong> (current: ${data.current_version})`;
+                }
 
-                // Show update banner
-                document.getElementById('update-banner').style.display = 'block';
-                document.getElementById('update-banner-version').textContent =
-                    `${data.current_version} → ${data.latest_version}`;
+                const versionText = `${data.current_version} → ${data.latest_version}`;
+
+                // Show both update banners
+                const settingsBanner = document.getElementById('update-banner');
+                if (settingsBanner) {
+                    settingsBanner.style.display = 'block';
+                    document.getElementById('update-banner-version').textContent = versionText;
+                }
+                const dashBanner = document.getElementById('dashboard-update-banner');
+                if (dashBanner) {
+                    dashBanner.style.display = 'block';
+                    document.getElementById('dashboard-update-banner-version').textContent = versionText;
+                }
             } else {
-                resultEl.className = 'status-message success';
-                resultEl.textContent = 'You are running the latest version.';
-                document.getElementById('update-banner').style.display = 'none';
+                if (resultEl) {
+                    resultEl.className = 'status-message success';
+                    resultEl.textContent = 'You are running the latest version.';
+                }
+                // Hide both banners
+                const settingsBanner = document.getElementById('update-banner');
+                if (settingsBanner) settingsBanner.style.display = 'none';
+                const dashBanner = document.getElementById('dashboard-update-banner');
+                if (dashBanner) dashBanner.style.display = 'none';
             }
         })
         .catch(err => {
-            btn.disabled = false;
-            btn.textContent = 'Check for Updates';
-            resultEl.style.display = 'block';
-            resultEl.className = 'status-message error';
-            resultEl.textContent = 'Failed to check for updates: ' + err.message;
+            if (settingsBtn) { settingsBtn.disabled = false; settingsBtn.textContent = 'Check for Updates'; }
+            if (dashboardBtn) { dashboardBtn.disabled = false; dashboardBtn.textContent = 'Check for Updates'; }
+            if (resultEl) {
+                resultEl.style.display = 'block';
+                resultEl.className = 'status-message error';
+                resultEl.textContent = 'Failed to check for updates: ' + err.message;
+            }
         });
 }
 
@@ -762,7 +789,11 @@ function waitForServerRestart() {
                 document.getElementById('update-progress').style.display = 'none';
                 document.getElementById('update-close-btn').textContent = 'Close';
                 document.getElementById('current-version').textContent = data.version;
+                const dashVer = document.getElementById('dashboard-version');
+                if (dashVer) dashVer.textContent = data.version;
                 document.getElementById('update-banner').style.display = 'none';
+                const dashBanner = document.getElementById('dashboard-update-banner');
+                if (dashBanner) dashBanner.style.display = 'none';
                 document.getElementById('update-check-result').style.display = 'none';
                 latestRelease = null;
                 addLog('Server updated to ' + data.version, 'success');

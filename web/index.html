@@ -46,6 +46,22 @@
             <div class="page active" id="page-dashboard">
                 <div class="page-header">
                     <h2>Dashboard</h2>
+                    <div class="dashboard-version">
+                        <span id="dashboard-version" class="version-tag">Loading...</span>
+                        <button class="btn-secondary btn-sm" id="dashboard-check-updates-btn" onclick="checkForUpdates()">Check for Updates</button>
+                    </div>
+                </div>
+
+                <!-- Dashboard Update Banner -->
+                <div id="dashboard-update-banner" class="update-banner" style="display: none;">
+                    <div class="update-banner-content">
+                        <div class="update-banner-icon">&#x26A0;</div>
+                        <div class="update-banner-text">
+                            <strong>Update Available!</strong>
+                            <span id="dashboard-update-banner-version"></span>
+                        </div>
+                        <button class="btn-primary" onclick="showUpdateModal()">Update Now</button>
+                    </div>
                 </div>
 
                 <!-- Stats Cards -->
