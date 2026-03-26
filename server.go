@@ -34,6 +34,15 @@ type UserAccount struct {
 	CreatedAt    string `json:"created_at"`
 }
 
+type UpdateStatus struct {
+	InProgress bool   `json:"in_progress"`
+	Stage      string `json:"stage"`
+	Progress   int    `json:"progress"`
+	Message    string `json:"message"`
+	Error      string `json:"error,omitempty"`
+	mu         sync.RWMutex
+}
+
 type Server struct {
 	config            *Config
 	conn              *net.UDPConn
@@ -47,6 +56,7 @@ type Server struct {
 	mu                sync.RWMutex
 	shutdown          chan struct{}
 	stats             *Stats
+	updateStatus      *UpdateStatus
 }
 
 type Stats struct {
@@ -82,6 +92,7 @@ func NewServer(config *Config) *Server {
 		stats: &Stats{
 			StartTime: time.Now(),
 		},
+		updateStatus: &UpdateStatus{},
 	}
 
 	s.loadUsers()
@@ -491,6 +502,7 @@ func (s *Server) GetStats() map[string]interface{} {
 		"bytes_sent":        s.stats.BytesSent,
 		"uptime_seconds":    int(uptime.Seconds()),
 		"start_time":        s.stats.StartTime,
+		"version":           Version,
 	}
 }
 
