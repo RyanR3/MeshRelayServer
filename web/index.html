@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshRelay</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <img src="logo.png" alt="MeshRelay" class="sidebar-logo">
+                <h1>MeshRelay</h1>
+                <div class="connection-status">
+                    <span id="status-indicator" class="status-dot"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
+            </div>
+            <ul class="nav-menu">
+                <li class="nav-item active" data-page="dashboard">
+                    <span class="nav-icon">&#x1F4CA;</span>
+                    <span>Dashboard</span>
+                </li>
+                <li class="nav-item" data-page="users">
+                    <span class="nav-icon">&#x1F465;</span>
+                    <span>Users</span>
+                </li>
+                <li class="nav-item" data-page="settings">
+                    <span class="nav-icon">&#x2699;</span>
+                    <span>Settings</span>
+                </li>
+                <li class="nav-item" id="nav-logout" style="margin-top: auto; border-top: 1px solid #2A2A2A; padding-top: 8px;">
+                    <span class="nav-icon">&#x1F6AA;</span>
+                    <span>Logout</span>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+
+            <!-- Dashboard Page -->
+            <div class="page active" id="page-dashboard">
+                <div class="page-header">
+                    <h2>Dashboard</h2>
+                </div>
+
+                <!-- Stats Cards -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">&#x1F465;</div>
+                        <div class="stat-content">
+                            <div class="stat-label">Connected Clients</div>
+                            <div class="stat-value" id="total-clients">0</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">&#x23F1;</div>
+                        <div class="stat-content">
+                            <div class="stat-label">Uptime</div>
+                            <div class="stat-value" id="uptime">0h 0m</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">&#x1F4E4;</div>
+                        <div class="stat-content">
+                            <div class="stat-label">Packets Sent</div>
+                            <div class="stat-value" id="packets-sent">0</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">&#x1F4E5;</div>
+                        <div class="stat-content">
+                            <div class="stat-label">Packets Received</div>
+                            <div class="stat-value" id="packets-received">0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Content Grid -->
+                <div class="content-grid">
+                    <!-- Channels Panel -->
+                    <div class="panel">
+                        <h3>Channels</h3>
+                        <div class="channel-list" id="channel-list">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <!-- Clients Panel -->
+                    <div class="panel">
+                        <h3>Connected Clients</h3>
+                        <div class="client-list" id="client-list">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <!-- Logs Panel -->
+                    <div class="panel full-width">
+                        <h3>Server Logs</h3>
+                        <div class="log-container" id="log-container">
+                            <div class="log-entry info">Server dashboard loaded</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Users Page -->
+            <div class="page" id="page-users">
+                <div class="page-header">
+                    <h2>User Management</h2>
+                    <button class="btn-create" onclick="showCreateUserModal()">+ Create User</button>
+                </div>
+
+                <div id="user-status" class="status-message" style="display: none;"></div>
+
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-table-body">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+                <div id="users-empty" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">&#x1F510;</div>
+                    <div>No user accounts</div>
+                </div>
+            </div>
+
+            <!-- Settings Page -->
+            <div class="page" id="page-settings">
+                <div class="page-header">
+                    <h2>Settings</h2>
+                </div>
+
+                <div class="panel">
+                    <h3>Authentication</h3>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">Require Authentication</div>
+                            <div class="settings-description">When enabled, clients must provide valid credentials to connect</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="auth-toggle" onchange="toggleAuth()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Create User Modal -->
+    <div id="createUserModal" class="modal">
+        <div class="modal-content">
+            <h2>Create New User</h2>
+            <input type="text" id="newUsername" placeholder="Username">
+            <input type="password" id="newPassword" placeholder="Password">
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="createUser()">Create</button>
+                <button class="btn-secondary" onclick="closeModal('createUserModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Password Modal -->
+    <div id="editPasswordModal" class="modal">
+        <div class="modal-content">
+            <h2>Change Password</h2>
+            <p class="modal-subtitle">Changing password for <strong id="editPasswordUser"></strong></p>
+            <input type="password" id="editNewPassword" placeholder="New Password">
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="updatePassword()">Save</button>
+                <button class="btn-secondary" onclick="closeModal('editPasswordModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- QR Code Modal -->
+    <div id="qrCodeModal" class="modal">
+        <div class="modal-content">
+            <h2 id="qrCodeTitle">QR Code Login</h2>
+            <p class="modal-subtitle">Scan this QR code with the MeshRelay app to login</p>
+            <div class="qr-code-container">
+                <div id="qrCodeCanvas"></div>
+            </div>
+            <div class="qr-credentials">
+                <div class="qr-field">
+                    <div class="qr-label">Server</div>
+                    <div id="qrServer" class="qr-value"></div>
+                </div>
+                <div class="qr-field">
+                    <div class="qr-label">Username</div>
+                    <div id="qrUsername" class="qr-value"></div>
+                </div>
+                <div class="qr-field">
+                    <div class="qr-label">Password</div>
+                    <div id="qrPassword" class="qr-value mono"></div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeModal('qrCodeModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Admin Password Modal (forced on first login) -->
+    <div id="changeAdminPasswordModal" class="modal">
+        <div class="modal-content">
+            <h2>Change Your Password</h2>
+            <p class="modal-subtitle">You must change your password before continuing</p>
+            <div id="adminPasswordError" class="status-message error" style="display: none;"></div>
+            <input type="password" id="adminNewPassword" placeholder="New Password">
+            <input type="password" id="adminConfirmPassword" placeholder="Confirm Password">
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="changeAdminPassword()">Change Password</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

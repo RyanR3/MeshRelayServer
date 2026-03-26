@@ -1,0 +1,632 @@
+// WebSocket connection
+let ws = null;
+let reconnectInterval = null;
+
+// Currently editing user
+let editingUsername = '';
+
+// --- Page Navigation ---
+
+function navigateTo(pageName) {
+    // Update nav items
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.page === pageName);
+    });
+
+    // Update pages
+    document.querySelectorAll('.page').forEach(page => {
+        page.classList.toggle('active', page.id === 'page-' + pageName);
+    });
+
+    // Refresh data when switching to certain pages
+    if (pageName === 'users') {
+        fetchUsers();
+    } else if (pageName === 'settings') {
+        fetchAuthStatus();
+    }
+}
+
+// Connect to WebSocket
+function connectWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        updateConnectionStatus(true);
+        addLog('Connected to server', 'success');
+
+        if (reconnectInterval) {
+            clearInterval(reconnectInterval);
+            reconnectInterval = null;
+        }
+    };
+
+    ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'update') {
+            updateDashboard(message.data);
+        }
+    };
+
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        updateConnectionStatus(false);
+        addLog('Disconnected from server', 'warning');
+
+        // Attempt to reconnect every 3 seconds
+        if (!reconnectInterval) {
+            reconnectInterval = setInterval(connectWebSocket, 3000);
+        }
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        addLog('Connection error', 'error');
+    };
+}
+
+// Update connection status indicator
+function updateConnectionStatus(connected) {
+    const indicator = document.getElementById('status-indicator');
+    const text = document.getElementById('status-text');
+
+    if (connected) {
+        indicator.classList.add('connected');
+        text.textContent = 'Connected';
+    } else {
+        indicator.classList.remove('connected');
+        text.textContent = 'Disconnected';
+    }
+}
+
+// Update all dashboard elements
+function updateDashboard(data) {
+    updateStats(data.stats);
+    updateChannels(data.channels);
+    updateClients(data.clients);
+}
+
+// Update statistics cards
+function updateStats(stats) {
+    document.getElementById('total-clients').textContent = stats.total_clients || 0;
+    document.getElementById('uptime').textContent = formatUptime(stats.uptime_seconds || 0);
+    document.getElementById('packets-sent').textContent = formatNumber(stats.packets_sent || 0);
+    document.getElementById('packets-received').textContent = formatNumber(stats.packets_received || 0);
+}
+
+// Update channels list
+function updateChannels(channels) {
+    const channelList = document.getElementById('channel-list');
+
+    if (!channels || channels.length === 0) {
+        channelList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F4E1;</div><div>No active channels</div></div>';
+        return;
+    }
+
+    // Sort channels by ID
+    channels.sort((a, b) => a.id - b.id);
+
+    // Only show channels with clients
+    const activeChannels = channels.filter(ch => ch.client_count > 0);
+
+    if (activeChannels.length === 0) {
+        channelList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F4E1;</div><div>No active channels</div></div>';
+        return;
+    }
+
+    channelList.innerHTML = activeChannels.map(channel => `
+        <div class="channel-item">
+            <div class="channel-name">Channel ${channel.id}</div>
+            <div class="channel-count">${channel.client_count} ${channel.client_count === 1 ? 'client' : 'clients'}</div>
+        </div>
+    `).join('');
+}
+
+// Update clients list
+function updateClients(clients) {
+    const clientList = document.getElementById('client-list');
+
+    if (!clients || clients.length === 0) {
+        clientList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F465;</div><div>No connected clients</div></div>';
+        return;
+    }
+
+    // Sort clients by connection time (newest first)
+    clients.sort((a, b) => new Date(b.connected_at) - new Date(a.connected_at));
+
+    clientList.innerHTML = clients.map(client => {
+        const connectedTime = timeSince(new Date(client.connected_at));
+        return `
+            <div class="client-item">
+                <div class="client-username">
+                    ${escapeHtml(client.username)}
+                    <span class="client-channel">Ch ${client.channel}</span>
+                </div>
+                <div class="client-info">
+                    ${client.address} • Connected ${connectedTime}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// Add log entry
+function addLog(message, type = 'info') {
+    const logContainer = document.getElementById('log-container');
+    const time = new Date().toLocaleTimeString();
+
+    const logEntry = document.createElement('div');
+    logEntry.className = `log-entry ${type}`;
+    logEntry.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(message)}`;
+
+    logContainer.appendChild(logEntry);
+    logContainer.scrollTop = logContainer.scrollHeight;
+
+    // Keep only last 100 log entries
+    while (logContainer.children.length > 100) {
+        logContainer.removeChild(logContainer.firstChild);
+    }
+}
+
+// Helper Functions
+
+function formatUptime(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+
+    if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+    } else {
+        return `${minutes}m`;
+    }
+}
+
+function formatNumber(num) {
+    if (num >= 1000000) {
+        return (num / 1000000).toFixed(1) + 'M';
+    } else if (num >= 1000) {
+        return (num / 1000).toFixed(1) + 'K';
+    } else {
+        return num.toString();
+    }
+}
+
+function timeSince(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+
+    const intervals = {
+        year: 31536000,
+        month: 2592000,
+        week: 604800,
+        day: 86400,
+        hour: 3600,
+        minute: 60
+    };
+
+    for (const [name, secondsInInterval] of Object.entries(intervals)) {
+        const interval = Math.floor(seconds / secondsInInterval);
+        if (interval >= 1) {
+            return `${interval} ${name}${interval !== 1 ? 's' : ''} ago`;
+        }
+    }
+
+    return 'just now';
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// --- Modal Management ---
+
+function showModal(id) {
+    document.getElementById(id).classList.add('active');
+}
+
+function closeModal(id) {
+    document.getElementById(id).classList.remove('active');
+}
+
+// Close modal on backdrop click
+document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('modal')) {
+        e.target.classList.remove('active');
+    }
+});
+
+// --- Status Messages ---
+
+function showStatus(elementId, message, type) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    el.textContent = message;
+    el.className = `status-message ${type}`;
+    el.style.display = 'block';
+
+    // Auto-hide after 5 seconds
+    setTimeout(() => {
+        el.style.display = 'none';
+    }, 5000);
+}
+
+// --- User Management ---
+
+function fetchAuthStatus() {
+    fetch('/api/auth/status')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('auth-toggle').checked = data.auth_enabled;
+        })
+        .catch(err => console.error('Error fetching auth status:', err));
+}
+
+function fetchUsers() {
+    fetch('/api/users')
+        .then(r => r.json())
+        .then(users => renderUsersTable(users))
+        .catch(err => console.error('Error fetching users:', err));
+}
+
+function renderUsersTable(users) {
+    const tbody = document.getElementById('users-table-body');
+    const emptyState = document.getElementById('users-empty');
+    const table = document.querySelector('.data-table');
+
+    if (!users || users.length === 0) {
+        tbody.innerHTML = '';
+        table.style.display = 'none';
+        emptyState.style.display = 'block';
+        return;
+    }
+
+    table.style.display = 'table';
+    emptyState.style.display = 'none';
+
+    tbody.innerHTML = users.map(user => {
+        const created = user.created_at ? new Date(user.created_at).toLocaleString() : 'Unknown';
+        const safeUsername = escapeHtml(user.username);
+        return `
+            <tr>
+                <td><strong>${safeUsername}</strong></td>
+                <td>${created}</td>
+                <td>
+                    <div class="actions-cell">
+                        <button class="btn-action qr" onclick="showQRCode('${safeUsername}')">QR Code</button>
+                        <button class="btn-action edit" onclick="showEditPassword('${safeUsername}')">Edit</button>
+                        <button class="btn-action delete" onclick="deleteUser('${safeUsername}')">Delete</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+// --- Create User ---
+
+function showCreateUserModal() {
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newPassword').value = '';
+    showModal('createUserModal');
+    document.getElementById('newUsername').focus();
+}
+
+function createUser() {
+    const usernameEl = document.getElementById('newUsername');
+    const passwordEl = document.getElementById('newPassword');
+    const username = usernameEl.value.trim();
+    const password = passwordEl.value;
+
+    if (!username || !password) {
+        showStatus('user-status', 'Username and password are required', 'warning');
+        return;
+    }
+
+    fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+    })
+    .then(r => r.text().then(text => ({ status: r.status, ok: r.ok, body: text })))
+    .then(({ status, ok, body }) => {
+        let data;
+        try {
+            data = JSON.parse(body);
+        } catch (e) {
+            throw new Error(`Server returned invalid JSON (${status}): ${body.substring(0, 100)}`);
+        }
+
+        if (!ok) {
+            throw new Error(data.error || `Server error (${status})`);
+        }
+
+        closeModal('createUserModal');
+        showStatus('user-status', `User "${username}" created successfully`, 'success');
+        addLog(`User "${username}" created`, 'success');
+        fetchUsers();
+
+        // Show QR code for the new user
+        showQRCodeWithData(username, password);
+    })
+    .catch(err => {
+        showStatus('user-status', `Failed to create user: ${err.message}`, 'error');
+        addLog(`Failed to create user: ${err.message}`, 'error');
+    });
+}
+
+// --- Edit Password ---
+
+function showEditPassword(username) {
+    editingUsername = username;
+    document.getElementById('editPasswordUser').textContent = username;
+    document.getElementById('editNewPassword').value = '';
+    showModal('editPasswordModal');
+    document.getElementById('editNewPassword').focus();
+}
+
+function updatePassword() {
+    const password = document.getElementById('editNewPassword').value;
+
+    if (!password) {
+        showStatus('user-status', 'Password cannot be empty', 'warning');
+        return;
+    }
+
+    fetch(`/api/users/${encodeURIComponent(editingUsername)}/password`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+    })
+    .then(r => r.text().then(text => ({ status: r.status, ok: r.ok, body: text })))
+    .then(({ status, ok, body }) => {
+        let data;
+        try {
+            data = JSON.parse(body);
+        } catch (e) {
+            throw new Error(`Server returned invalid JSON (${status}): ${body.substring(0, 100)}`);
+        }
+
+        if (!ok) {
+            throw new Error(data.error || `Server error (${status})`);
+        }
+
+        closeModal('editPasswordModal');
+        showStatus('user-status', `Password updated for "${editingUsername}"`, 'success');
+        addLog(`Password updated for "${editingUsername}"`, 'success');
+    })
+    .catch(err => {
+        showStatus('user-status', `Failed to update password: ${err.message}`, 'error');
+        addLog(`Failed to update password: ${err.message}`, 'error');
+    });
+}
+
+// --- Delete User ---
+
+function deleteUser(username) {
+    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+
+    fetch(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' })
+    .then(r => {
+        if (!r.ok) {
+            return r.text().then(text => {
+                try {
+                    const d = JSON.parse(text);
+                    throw new Error(d.error || 'Failed');
+                } catch (e) {
+                    if (e.message && e.message !== 'Failed') throw e;
+                    throw new Error(`Server error (${r.status})`);
+                }
+            });
+        }
+        return r.json();
+    })
+    .then(() => {
+        showStatus('user-status', `User "${username}" deleted`, 'success');
+        addLog(`User "${username}" deleted`, 'success');
+        fetchUsers();
+    })
+    .catch(err => {
+        showStatus('user-status', `Failed to delete user: ${err.message}`, 'error');
+        addLog(`Failed to delete user: ${err.message}`, 'error');
+    });
+}
+
+// --- QR Code ---
+
+function showQRCode(username) {
+    // Show QR with server address and username (no password since we don't store plaintext)
+    const serverUrl = window.location.hostname + ':5000';
+    document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
+    document.getElementById('qrServer').textContent = serverUrl;
+    document.getElementById('qrUsername').textContent = username;
+    document.getElementById('qrPassword').textContent = '(set in app)';
+
+    const container = document.getElementById('qrCodeCanvas');
+    container.innerHTML = '';
+
+    const qrData = JSON.stringify({
+        server: serverUrl,
+        username: username
+    });
+
+    new QRCode(container, {
+        text: qrData,
+        width: 200,
+        height: 200,
+        colorDark: '#000000',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.H
+    });
+
+    showModal('qrCodeModal');
+}
+
+function showQRCodeWithData(username, password) {
+    const serverUrl = window.location.hostname + ':5000';
+    document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
+    document.getElementById('qrServer').textContent = serverUrl;
+    document.getElementById('qrUsername').textContent = username;
+    document.getElementById('qrPassword').textContent = password;
+
+    const container = document.getElementById('qrCodeCanvas');
+    container.innerHTML = '';
+
+    const qrData = JSON.stringify({
+        server: serverUrl,
+        username: username,
+        password: password
+    });
+
+    new QRCode(container, {
+        text: qrData,
+        width: 200,
+        height: 200,
+        colorDark: '#000000',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.H
+    });
+
+    showModal('qrCodeModal');
+}
+
+// --- Auth Toggle ---
+
+function toggleAuth() {
+    fetch('/api/auth/toggle', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        const status = data.auth_enabled ? 'enabled' : 'disabled';
+        addLog(`Authentication ${status}`, 'info');
+    })
+    .catch(err => {
+        addLog(`Failed to toggle auth: ${err.message}`, 'error');
+        fetchAuthStatus();
+    });
+}
+
+// --- Session & Auth ---
+
+function checkSession() {
+    return fetch('/api/session')
+        .then(r => {
+            if (!r.ok) {
+                window.location.href = '/login.html';
+                return false;
+            }
+            return r.json();
+        })
+        .then(data => {
+            if (!data) return false;
+            if (data.must_change_password) {
+                showForcePasswordChange();
+            }
+            return true;
+        })
+        .catch(() => {
+            window.location.href = '/login.html';
+            return false;
+        });
+}
+
+function showForcePasswordChange() {
+    const modal = document.getElementById('changeAdminPasswordModal');
+    if (modal) {
+        modal.style.display = 'flex';
+        document.getElementById('adminNewPassword').focus();
+    }
+}
+
+function changeAdminPassword() {
+    const newPass = document.getElementById('adminNewPassword').value;
+    const confirmPass = document.getElementById('adminConfirmPassword').value;
+    const errorEl = document.getElementById('adminPasswordError');
+
+    if (!newPass || newPass.length < 4) {
+        errorEl.textContent = 'Password must be at least 4 characters';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (newPass !== confirmPass) {
+        errorEl.textContent = 'Passwords do not match';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    fetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: newPass })
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok) {
+            errorEl.textContent = data.error || 'Failed to change password';
+            errorEl.style.display = 'block';
+            return;
+        }
+        document.getElementById('changeAdminPasswordModal').style.display = 'none';
+    })
+    .catch(() => {
+        errorEl.textContent = 'Connection error';
+        errorEl.style.display = 'block';
+    });
+}
+
+function logout() {
+    fetch('/api/logout', { method: 'POST' })
+        .finally(() => {
+            window.location.href = '/login.html';
+        });
+}
+
+// Wrap fetch to handle 401 globally
+const originalFetch = window.fetch;
+window.fetch = function(url, options) {
+    return originalFetch(url, options).then(response => {
+        if (response.status === 401 && !url.toString().includes('/api/session') && !url.toString().includes('/api/login')) {
+            window.location.href = '/login.html';
+        }
+        return response;
+    });
+};
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+    // Check session first, then initialize
+    checkSession().then(valid => {
+        if (!valid) return;
+
+        connectWebSocket();
+        fetchAuthStatus();
+        fetchUsers();
+
+        // Set up navigation click handlers
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const page = item.dataset.page;
+                if (page) navigateTo(page);
+            });
+        });
+
+        // Logout button
+        const logoutBtn = document.getElementById('nav-logout');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', logout);
+        }
+
+        // Allow Enter key to submit modals
+        document.getElementById('newPassword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') createUser();
+        });
+        document.getElementById('editNewPassword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') updatePassword();
+        });
+        document.getElementById('adminConfirmPassword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') changeAdminPassword();
+        });
+    });
+});

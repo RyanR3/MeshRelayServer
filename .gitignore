@@ -1,0 +1,14 @@
+# Compiled binaries
+ptt-server
+ptt-server-linux
+
+# Runtime data files (server-specific)
+users.json
+web_admins.json
+
+# Config (contains server-specific settings)
+config.json
+
+# Backups
+backups/
+.DS_Store

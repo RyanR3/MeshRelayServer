@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshRelay - Login</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #000000;
+            color: #FFFFFF;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-card {
+            background: #0A0A0A;
+            border: 1px solid #2A2A2A;
+            border-radius: 12px;
+            padding: 40px;
+            width: 380px;
+            text-align: center;
+        }
+        .login-logo {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            margin-bottom: 16px;
+        }
+        .login-card h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .login-card p {
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .login-input {
+            width: 100%;
+            padding: 12px 16px;
+            background: #1A1A1A;
+            border: 1px solid #333;
+            border-radius: 8px;
+            color: #FFF;
+            font-size: 14px;
+            margin-bottom: 12px;
+            outline: none;
+        }
+        .login-input:focus {
+            border-color: #4A9EFF;
+        }
+        .login-input::placeholder {
+            color: #666;
+        }
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background: #4A9EFF;
+            color: #FFF;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+        .login-btn:hover {
+            background: #3A8EEF;
+        }
+        .login-btn:disabled {
+            background: #333;
+            cursor: not-allowed;
+        }
+        .login-error {
+            background: rgba(255, 60, 60, 0.1);
+            border: 1px solid rgba(255, 60, 60, 0.3);
+            color: #FF6B6B;
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 12px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <img src="logo.png" alt="MeshRelay" class="login-logo">
+        <h1>MeshRelay</h1>
+        <p>Sign in to access the dashboard</p>
+        <div id="error" class="login-error"></div>
+        <input type="text" id="username" class="login-input" placeholder="Username" autocomplete="username">
+        <input type="password" id="password" class="login-input" placeholder="Password" autocomplete="current-password">
+        <button id="loginBtn" class="login-btn" onclick="login()">Sign In</button>
+    </div>
+    <script>
+        function login() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const errorEl = document.getElementById('error');
+            const btn = document.getElementById('loginBtn');
+
+            if (!username || !password) {
+                errorEl.textContent = 'Username and password are required';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Signing in...';
+            errorEl.style.display = 'none';
+
+            fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            })
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) {
+                    errorEl.textContent = data.error || 'Login failed';
+                    errorEl.style.display = 'block';
+                    btn.disabled = false;
+                    btn.textContent = 'Sign In';
+                    return;
+                }
+                window.location.href = '/';
+            })
+            .catch(() => {
+                errorEl.textContent = 'Connection error';
+                errorEl.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Sign In';
+            });
+        }
+
+        document.getElementById('password').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') login();
+        });
+        document.getElementById('username').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('password').focus();
+        });
+
+        // If already logged in, redirect to dashboard
+        fetch('/api/session').then(r => {
+            if (r.ok) window.location.href = '/';
+        });
+
+        document.getElementById('username').focus();
+    </script>
+</body>
+</html>
