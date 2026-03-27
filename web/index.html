@@ -185,6 +185,22 @@
                     <div id="update-check-result" style="display: none;"></div>
                 </div>
 
+                <!-- GitHub Token -->
+                <div class="panel" style="margin-bottom: 20px;">
+                    <h3>GitHub Access</h3>
+                    <div class="settings-row" style="margin-bottom: 12px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Personal Access Token</div>
+                            <div class="settings-description">Required for update checks on private repositories. <span id="gh-token-status"></span></div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px; padding: 0 16px 16px;">
+                        <input type="password" id="github-token-input" placeholder="ghp_xxxxxxxxxxxx" style="flex: 1; margin-bottom: 0;">
+                        <button class="btn-primary" onclick="saveGitHubToken()">Save</button>
+                        <button class="btn-secondary" onclick="clearGitHubToken()">Clear</button>
+                    </div>
+                </div>
+
                 <!-- Authentication -->
                 <div class="panel">
                     <h3>Authentication</h3>
