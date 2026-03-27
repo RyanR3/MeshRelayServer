@@ -324,13 +324,18 @@ function renderUsersTable(users) {
         const safeUsername = escapeHtml(user.username);
         const agencyCol = currentRole === 'super_admin' ? `<td><span class="agency-badge">${escapeHtml(user.agency_id || 'default')}</span></td>` : '';
         const role = user.role || 'user';
-        const roleLabel = role === 'super_admin' ? 'Super Admin' : role === 'admin' ? 'Admin' : 'User';
-        const roleClass = role === 'super_admin' ? 'role-super-admin' : role === 'admin' ? 'role-admin' : 'role-user';
+        const superAdminOpt = currentRole === 'super_admin' ? `<option value="super_admin" ${role === 'super_admin' ? 'selected' : ''}>Super Admin</option>` : '';
         return `
             <tr>
                 <td><strong>${safeUsername}</strong></td>
                 ${agencyCol}
-                <td><span class="role-badge ${roleClass}">${roleLabel}</span></td>
+                <td>
+                    <select class="role-select" onchange="updateUserRole('${safeUsername}', this.value)" data-current="${role}">
+                        <option value="user" ${role === 'user' ? 'selected' : ''}>User</option>
+                        <option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin</option>
+                        ${superAdminOpt}
+                    </select>
+                </td>
                 <td>${created}</td>
                 <td>
                     <div class="actions-cell">
@@ -492,6 +497,28 @@ function deleteUser(username) {
     .catch(err => {
         showStatus('user-status', `Failed to delete user: ${err.message}`, 'error');
         addLog(`Failed to delete user: ${err.message}`, 'error');
+    });
+}
+
+// --- Update User Role ---
+
+function updateUserRole(username, newRole) {
+    fetch(`/api/users/${encodeURIComponent(username)}/role`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: newRole })
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed');
+        const roleLabel = newRole === 'super_admin' ? 'Super Admin' : newRole === 'admin' ? 'Admin' : 'User';
+        showStatus('user-status', `Role updated to "${roleLabel}" for "${username}"`, 'success');
+        addLog(`Role updated for "${username}" to ${roleLabel}`, 'success');
+    })
+    .catch(err => {
+        showStatus('user-status', `Failed to update role: ${err.message}`, 'error');
+        addLog(`Failed to update role: ${err.message}`, 'error');
+        fetchUsers(); // Revert the dropdown
     });
 }
 

@@ -49,6 +49,7 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/users", s.handleCreateUser).Methods("POST")
 	api.HandleFunc("/users/{username}", s.handleDeleteUser).Methods("DELETE")
 	api.HandleFunc("/users/{username}/password", s.handleUpdatePassword).Methods("PUT")
+	api.HandleFunc("/users/{username}/role", s.handleUpdateRole).Methods("PUT")
 	api.HandleFunc("/auth/status", s.handleAuthStatus).Methods("GET")
 	api.HandleFunc("/auth/toggle", s.requireSuperAdmin(s.handleAuthToggle)).Methods("POST")
 	api.HandleFunc("/admin/change-password", s.handleAdminChangePassword).Methods("POST")
@@ -487,6 +488,62 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+
+	session := s.getSession(r)
+
+	// Agency admins can only change roles within their agency, and cannot set super_admin
+	if session != nil && session.Role == "agency_admin" {
+		s.mu.RLock()
+		user, exists := s.users[username]
+		s.mu.RUnlock()
+		if !exists || user.AgencyID != session.AgencyID {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"cannot edit users outside your agency"}`))
+			return
+		}
+	}
+
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Role == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"role is required"}`))
+		return
+	}
+
+	// Only super admins can set super_admin role
+	if req.Role == "super_admin" && (session == nil || session.Role != "super_admin") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"only super admins can assign super admin role"}`))
+		return
+	}
+
+	if req.Role != "user" && req.Role != "admin" && req.Role != "super_admin" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"role must be user, admin, or super_admin"}`))
+		return
+	}
+
+	if err := s.UpdateUserRole(username, req.Role); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": req.Role})
 }
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
