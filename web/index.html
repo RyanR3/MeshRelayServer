@@ -24,6 +24,10 @@
                     <span class="nav-icon">&#x1F4CA;</span>
                     <span>Dashboard</span>
                 </li>
+                <li class="nav-item super-admin-only" data-page="agencies">
+                    <span class="nav-icon">&#x1F3E2;</span>
+                    <span>Agencies</span>
+                </li>
                 <li class="nav-item" data-page="users">
                     <span class="nav-icon">&#x1F465;</span>
                     <span>Users</span>
@@ -127,11 +131,45 @@
                 </div>
             </div>
 
+            <!-- Agencies Page (super_admin only) -->
+            <div class="page" id="page-agencies">
+                <div class="page-header">
+                    <h2>Agency Management</h2>
+                    <button class="btn-create" onclick="showCreateAgencyModal()">+ Create Agency</button>
+                </div>
+
+                <div id="agency-status" class="status-message" style="display: none;"></div>
+
+                <table class="data-table" id="agencies-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>ID</th>
+                            <th>Users</th>
+                            <th>Admin</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="agencies-table-body">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+                <div id="agencies-empty" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">&#x1F3E2;</div>
+                    <div>No agencies</div>
+                </div>
+            </div>
+
             <!-- Users Page -->
             <div class="page" id="page-users">
                 <div class="page-header">
                     <h2>User Management</h2>
-                    <button class="btn-create" onclick="showCreateUserModal()">+ Create User</button>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <select id="users-agency-filter" class="agency-filter super-admin-only" onchange="fetchUsers()">
+                            <option value="">All Agencies</option>
+                        </select>
+                        <button class="btn-create" onclick="showCreateUserModal()">+ Create User</button>
+                    </div>
                 </div>
 
                 <div id="user-status" class="status-message" style="display: none;"></div>
@@ -140,6 +178,7 @@
                     <thead>
                         <tr>
                             <th>Username</th>
+                            <th class="super-admin-only">Agency</th>
                             <th>Created</th>
                             <th>Actions</th>
                         </tr>
@@ -224,11 +263,43 @@
     <div id="createUserModal" class="modal">
         <div class="modal-content">
             <h2>Create New User</h2>
+            <select id="newUserAgency" class="super-admin-only">
+                <option value="">Select Agency</option>
+            </select>
             <input type="text" id="newUsername" placeholder="Username">
             <input type="password" id="newPassword" placeholder="Password">
             <div class="modal-actions">
                 <button class="btn-primary" onclick="createUser()">Create</button>
                 <button class="btn-secondary" onclick="closeModal('createUserModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Agency Modal -->
+    <div id="createAgencyModal" class="modal">
+        <div class="modal-content">
+            <h2>Create New Agency</h2>
+            <input type="text" id="newAgencyName" placeholder="Agency Name">
+            <input type="text" id="newAgencyId" placeholder="Agency ID (lowercase, no spaces)">
+            <input type="number" id="newAgencyMaxUsers" placeholder="Max Users" value="100">
+            <input type="number" id="newAgencyMaxChannels" placeholder="Max Channels" value="20">
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="createAgency()">Create</button>
+                <button class="btn-secondary" onclick="closeModal('createAgencyModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Agency Admin Modal -->
+    <div id="createAgencyAdminModal" class="modal">
+        <div class="modal-content">
+            <h2>Create Agency Admin</h2>
+            <p class="modal-subtitle">Creating admin for <strong id="agencyAdminAgencyName"></strong></p>
+            <input type="text" id="agencyAdminUsername" placeholder="Admin Username">
+            <input type="password" id="agencyAdminPassword" placeholder="Admin Password">
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="createAgencyAdmin()">Create</button>
+                <button class="btn-secondary" onclick="closeModal('createAgencyAdminModal')">Cancel</button>
             </div>
         </div>
     </div>

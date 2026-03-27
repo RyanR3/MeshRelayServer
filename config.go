@@ -14,6 +14,7 @@ type Config struct {
 	AuthEnabled   bool   `json:"auth_enabled"`
 	UsersFile     string `json:"users_file"`
 	WebAdminsFile string `json:"web_admins_file"`
+	AgenciesFile  string `json:"agencies_file"`
 	GitHubToken   string `json:"github_token,omitempty"`
 }
 
@@ -27,6 +28,7 @@ func DefaultConfig() *Config {
 		AuthEnabled:   false,
 		UsersFile:     "users.json",
 		WebAdminsFile: "web_admins.json",
+		AgenciesFile:  "agencies.json",
 	}
 }
 

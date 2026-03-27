@@ -873,6 +873,55 @@ body {
     padding: 4px 0;
 }
 
+/* Agency Badge */
+.agency-badge {
+    display: inline-block;
+    background: rgba(33, 150, 243, 0.15);
+    color: #2196F3;
+    border: 1px solid rgba(33, 150, 243, 0.3);
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+/* Agency Filter Dropdown */
+.agency-filter {
+    padding: 8px 12px;
+    background: #1A1A1A;
+    border: 1px solid #2A2A2A;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+}
+
+.agency-filter:focus {
+    border-color: #FF5722;
+}
+
+/* Modal select dropdown */
+.modal-content select {
+    width: 100%;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    background: #0A0A0A;
+    border: 1px solid #2A2A2A;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    cursor: pointer;
+}
+
+.modal-content select:focus {
+    border-color: #FF5722;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .app-layout {

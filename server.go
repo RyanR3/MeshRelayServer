@@ -9,12 +9,14 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Client struct {
 	Username      string
+	AgencyID      string
 	Addr          *net.UDPAddr
 	Channel       int
 	LastHeartbeat time.Time
@@ -28,9 +30,18 @@ type Channel struct {
 	mu      sync.RWMutex
 }
 
+type Agency struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	CreatedAt   string `json:"created_at"`
+	MaxUsers    int    `json:"max_users"`
+	MaxChannels int    `json:"max_channels"`
+}
+
 type UserAccount struct {
 	Username     string `json:"username"`
 	PasswordHash string `json:"password_hash"`
+	AgencyID     string `json:"agency_id"`
 	CreatedAt    string `json:"created_at"`
 }
 
@@ -43,17 +54,24 @@ type UpdateStatus struct {
 	mu         sync.RWMutex
 }
 
+type WebSession struct {
+	Username string
+	Role     string
+	AgencyID string
+}
+
 type Server struct {
 	config            *Config
 	configFile        string
 	conn              *net.UDPConn
-	clients           map[string]*Client      // username -> client
-	channels          map[int]*Channel        // channel ID -> channel
-	groups            map[string]*GroupPacket  // groupID -> group
-	users             map[string]*UserAccount  // username -> account
-	authenticatedAddrs map[string]bool         // addr string -> authenticated
-	webAdmins          map[string]*WebAdmin    // username -> admin account (web dashboard)
-	webSessions        map[string]string       // session token -> username
+	clients           map[string]*Client        // username -> client
+	channels          map[string]*Channel       // "agencyID:channelNum" -> channel
+	groups            map[string]*GroupPacket    // groupID -> group
+	users             map[string]*UserAccount    // username -> account
+	agencies          map[string]*Agency         // agencyID -> agency
+	authenticatedAddrs map[string]bool           // addr string -> authenticated
+	webAdmins          map[string]*WebAdmin      // username -> admin account (web dashboard)
+	webSessions        map[string]*WebSession    // session token -> session
 	mu                sync.RWMutex
 	shutdown          chan struct{}
 	stats             *Stats
@@ -69,27 +87,37 @@ type Stats struct {
 	mu              sync.RWMutex
 }
 
-func NewServer(config *Config, configFile string) *Server {
-	// Create default channels (0-19, matching Android app)
-	channels := make(map[int]*Channel)
+// channelKey builds the map key for agency-scoped channels.
+func channelKey(agencyID string, channelNum int) string {
+	return fmt.Sprintf("%s:%d", agencyID, channelNum)
+}
+
+// ensureAgencyChannels creates channels 0-19 for an agency if they don't exist.
+func (s *Server) ensureAgencyChannels(agencyID string) {
 	for i := 0; i < 20; i++ {
-		channels[i] = &Channel{
-			ID:      i,
-			Name:    fmt.Sprintf("Channel %d", i),
-			Clients: make(map[string]*Client),
+		key := channelKey(agencyID, i)
+		if _, exists := s.channels[key]; !exists {
+			s.channels[key] = &Channel{
+				ID:      i,
+				Name:    fmt.Sprintf("Channel %d", i),
+				Clients: make(map[string]*Client),
+			}
 		}
 	}
+}
 
+func NewServer(config *Config, configFile string) *Server {
 	s := &Server{
 		config:            config,
 		configFile:        configFile,
 		clients:           make(map[string]*Client),
-		channels:          channels,
+		channels:          make(map[string]*Channel),
 		groups:            make(map[string]*GroupPacket),
 		users:             make(map[string]*UserAccount),
+		agencies:          make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]bool),
 		webAdmins:          make(map[string]*WebAdmin),
-		webSessions:        make(map[string]string),
+		webSessions:        make(map[string]*WebSession),
 		shutdown:          make(chan struct{}),
 		stats: &Stats{
 			StartTime: time.Now(),
@@ -97,8 +125,18 @@ func NewServer(config *Config, configFile string) *Server {
 		updateStatus: &UpdateStatus{},
 	}
 
+	s.loadAgencies()
 	s.loadUsers()
 	s.loadWebAdmins()
+
+	// Migrate to agency model if needed (creates default agency, backfills users/admins)
+	s.migrateToAgencies()
+
+	// Ensure channels exist for all agencies
+	for agencyID := range s.agencies {
+		s.ensureAgencyChannels(agencyID)
+	}
+
 	return s
 }
 
@@ -194,8 +232,9 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
 
-	// Get client's channel
-	channel := s.channels[client.Channel]
+	// Get client's agency-scoped channel
+	key := channelKey(client.AgencyID, client.Channel)
+	channel := s.channels[key]
 	if channel == nil {
 		return
 	}
@@ -213,8 +252,8 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		}
 	}
 
-	log.Printf("Relayed audio from %s to %d clients in channel %d (%d bytes)",
-		packet.Username, len(channel.Clients)-1, client.Channel, len(packet.AudioData))
+	log.Printf("Relayed audio from %s [%s] to %d clients in channel %d (%d bytes)",
+		packet.Username, client.AgencyID, len(channel.Clients)-1, client.Channel, len(packet.AudioData))
 }
 
 func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UDPAddr) {
@@ -237,6 +276,12 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 		return
 	}
 
+	// Enforce same-agency isolation
+	if sender.AgencyID != recipient.AgencyID {
+		log.Printf("Direct audio blocked: %s [%s] -> %s [%s] (cross-agency)", packet.Sender, sender.AgencyID, packet.Recipient, recipient.AgencyID)
+		return
+	}
+
 	// Update sender's last heartbeat
 	sender.LastHeartbeat = time.Now()
 
@@ -250,8 +295,8 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 	// Send only to the specific recipient
 	s.sendPacket(audioData, recipient.Addr)
 
-	log.Printf("Relayed direct audio from %s to %s (%d bytes)",
-		packet.Sender, packet.Recipient, len(packet.AudioData))
+	log.Printf("Relayed direct audio from %s to %s [%s] (%d bytes)",
+		packet.Sender, packet.Recipient, sender.AgencyID, len(packet.AudioData))
 }
 
 func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) {
@@ -271,8 +316,9 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
 
-	// Get client's channel
-	channel := s.channels[client.Channel]
+	// Get client's agency-scoped channel
+	key := channelKey(client.AgencyID, client.Channel)
+	channel := s.channels[key]
 	if channel == nil {
 		return
 	}
@@ -288,8 +334,8 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 		s.sendPacket(textData, otherClient.Addr)
 	}
 
-	log.Printf("Relayed text message from %s to %d clients in channel %d",
-		packet.Sender, len(channel.Clients)-1, client.Channel)
+	log.Printf("Relayed text message from %s [%s] to %d clients in channel %d",
+		packet.Sender, client.AgencyID, len(channel.Clients)-1, client.Channel)
 }
 
 func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
@@ -308,8 +354,9 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
 
-	// Get client's channel
-	channel := s.channels[client.Channel]
+	// Get client's agency-scoped channel
+	key := channelKey(client.AgencyID, client.Channel)
+	channel := s.channels[key]
 	if channel == nil {
 		return
 	}
@@ -331,8 +378,8 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	}
 
 	if relayCount > 0 {
-		log.Printf("Relayed heartbeat from %s to %d clients in channel %d",
-			packet.Username, relayCount, client.Channel)
+		log.Printf("Relayed heartbeat from %s [%s] to %d clients in channel %d",
+			packet.Username, client.AgencyID, relayCount, client.Channel)
 	}
 }
 
@@ -344,12 +391,19 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Determine agency from user account (default to "default" if not found)
+	agencyID := "default"
+	if user, ok := s.users[packet.Username]; ok {
+		agencyID = user.AgencyID
+	}
+
 	// Check if client already exists
 	client, exists := s.clients[packet.Username]
 
 	if exists {
 		// Client is rejoining, possibly switching channels
-		oldChannel := s.channels[client.Channel]
+		oldKey := channelKey(client.AgencyID, client.Channel)
+		oldChannel := s.channels[oldKey]
 		if oldChannel != nil {
 			oldChannel.mu.Lock()
 			delete(oldChannel.Clients, client.Username)
@@ -357,12 +411,14 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		}
 
 		client.Channel = packet.Channel
+		client.AgencyID = agencyID
 		client.Addr = addr
 		client.LastHeartbeat = time.Now()
 	} else {
 		// New client
 		client = &Client{
 			Username:      packet.Username,
+			AgencyID:      agencyID,
 			Addr:          addr,
 			Channel:       packet.Channel,
 			LastHeartbeat: time.Now(),
@@ -371,13 +427,14 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		s.clients[packet.Username] = client
 	}
 
-	// Add client to new channel
-	channel := s.channels[packet.Channel]
+	// Add client to agency-scoped channel
+	key := channelKey(agencyID, packet.Channel)
+	channel := s.channels[key]
 	if channel != nil {
 		channel.mu.Lock()
 		channel.Clients[client.Username] = client
 		channel.mu.Unlock()
-		log.Printf("Client %s joined channel %d from %s", packet.Username, packet.Channel, addr)
+		log.Printf("Client %s [%s] joined channel %d from %s", packet.Username, agencyID, packet.Channel, addr)
 	}
 }
 
@@ -404,8 +461,9 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 }
 
 func (s *Server) removeClient(client *Client) {
-	// Remove from channel
-	channel := s.channels[client.Channel]
+	// Remove from agency-scoped channel
+	key := channelKey(client.AgencyID, client.Channel)
+	channel := s.channels[key]
 	if channel != nil {
 		channel.mu.Lock()
 		delete(channel.Clients, client.Username)
@@ -419,7 +477,7 @@ func (s *Server) removeClient(client *Client) {
 
 	// Remove from clients map
 	delete(s.clients, client.Username)
-	log.Printf("Client %s left channel %d", client.Username, client.Channel)
+	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
 }
 
 func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
@@ -486,8 +544,8 @@ func (s *Server) Shutdown() {
 	}
 }
 
-// GetStats returns current server statistics
-func (s *Server) GetStats() map[string]interface{} {
+// GetStats returns current server statistics, optionally filtered by agency.
+func (s *Server) GetStats(agencyFilter string) map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -496,8 +554,19 @@ func (s *Server) GetStats() map[string]interface{} {
 
 	uptime := time.Since(s.stats.StartTime)
 
+	clientCount := 0
+	if agencyFilter == "" {
+		clientCount = len(s.clients)
+	} else {
+		for _, c := range s.clients {
+			if c.AgencyID == agencyFilter {
+				clientCount++
+			}
+		}
+	}
+
 	return map[string]interface{}{
-		"total_clients":     len(s.clients),
+		"total_clients":     clientCount,
 		"packets_received":  s.stats.PacketsReceived,
 		"packets_sent":      s.stats.PacketsSent,
 		"bytes_received":    s.stats.BytesReceived,
@@ -508,15 +577,19 @@ func (s *Server) GetStats() map[string]interface{} {
 	}
 }
 
-// GetClients returns list of connected clients
-func (s *Server) GetClients() []map[string]interface{} {
+// GetClients returns list of connected clients, optionally filtered by agency.
+func (s *Server) GetClients(agencyFilter string) []map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	clients := make([]map[string]interface{}, 0, len(s.clients))
 	for _, client := range s.clients {
+		if agencyFilter != "" && client.AgencyID != agencyFilter {
+			continue
+		}
 		clients = append(clients, map[string]interface{}{
 			"username":       client.Username,
+			"agency_id":      client.AgencyID,
 			"address":        client.Addr.String(),
 			"channel":        client.Channel,
 			"connected_at":   client.ConnectedAt,
@@ -527,17 +600,27 @@ func (s *Server) GetClients() []map[string]interface{} {
 	return clients
 }
 
-// GetChannels returns list of channels with client counts
-func (s *Server) GetChannels() []map[string]interface{} {
+// GetChannels returns list of channels with client counts, optionally filtered by agency.
+func (s *Server) GetChannels(agencyFilter string) []map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	channels := make([]map[string]interface{}, 0, len(s.channels))
-	for _, channel := range s.channels {
+	channels := make([]map[string]interface{}, 0)
+	for key, channel := range s.channels {
+		// Parse agencyID from key "agencyID:channelNum"
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		chAgencyID := parts[0]
+		if agencyFilter != "" && chAgencyID != agencyFilter {
+			continue
+		}
 		channel.mu.RLock()
 		channels = append(channels, map[string]interface{}{
 			"id":           channel.ID,
 			"name":         channel.Name,
+			"agency_id":    chAgencyID,
 			"client_count": len(channel.Clients),
 		})
 		channel.mu.RUnlock()
@@ -558,8 +641,13 @@ func (s *Server) handleGroupCreate(packet *GroupPacket, addr *net.UDPAddr) {
 	s.groups[packet.GroupID] = packet
 	s.mu.Unlock()
 
-	// Relay to all connected clients so they can sync the new group
+	// Determine creator's agency
 	s.mu.RLock()
+	creatorAgency := "default"
+	if creator, ok := s.clients[packet.Creator]; ok {
+		creatorAgency = creator.AgencyID
+	}
+
 	relayData, err := CreateGroupPacket(PacketTypeGroupCreate, packet)
 	if err != nil {
 		log.Printf("Error creating group packet: %v", err)
@@ -567,14 +655,17 @@ func (s *Server) handleGroupCreate(packet *GroupPacket, addr *net.UDPAddr) {
 		return
 	}
 
+	// Relay only to clients in the same agency
 	relayCount := 0
 	for _, client := range s.clients {
-		s.sendPacket(relayData, client.Addr)
-		relayCount++
+		if client.AgencyID == creatorAgency {
+			s.sendPacket(relayData, client.Addr)
+			relayCount++
+		}
 	}
 	s.mu.RUnlock()
 
-	log.Printf("Relayed group create to %d clients", relayCount)
+	log.Printf("Relayed group create to %d clients [%s]", relayCount, creatorAgency)
 }
 
 func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
@@ -589,8 +680,13 @@ func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
 	s.groups[packet.GroupID] = packet
 	s.mu.Unlock()
 
-	// Relay to all connected clients so they can sync the updated group
+	// Determine creator's agency
 	s.mu.RLock()
+	creatorAgency := "default"
+	if creator, ok := s.clients[packet.Creator]; ok {
+		creatorAgency = creator.AgencyID
+	}
+
 	relayData, err := CreateGroupPacket(PacketTypeGroupUpdate, packet)
 	if err != nil {
 		log.Printf("Error creating group update packet: %v", err)
@@ -598,14 +694,17 @@ func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
 		return
 	}
 
+	// Relay only to clients in the same agency
 	relayCount := 0
 	for _, client := range s.clients {
-		s.sendPacket(relayData, client.Addr)
-		relayCount++
+		if client.AgencyID == creatorAgency {
+			s.sendPacket(relayData, client.Addr)
+			relayCount++
+		}
 	}
 	s.mu.RUnlock()
 
-	log.Printf("Relayed group update to %d clients", relayCount)
+	log.Printf("Relayed group update to %d clients [%s]", relayCount, creatorAgency)
 }
 
 func (s *Server) GetGroups() []map[string]interface{} {
@@ -716,29 +815,6 @@ func hashPassword(password string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *Server) AddUser(username, password string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, exists := s.users[username]; exists {
-		return fmt.Errorf("user %s already exists", username)
-	}
-
-	s.users[username] = &UserAccount{
-		Username:     username,
-		PasswordHash: hashPassword(password),
-		CreatedAt:    time.Now().Format(time.RFC3339),
-	}
-
-	if err := s.saveUsers(); err != nil {
-		delete(s.users, username)
-		return err
-	}
-
-	log.Printf("Created user account: %s", username)
-	return nil
-}
-
 func (s *Server) UpdatePassword(username, password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -776,14 +852,18 @@ func (s *Server) RemoveUser(username string) error {
 	return nil
 }
 
-func (s *Server) GetUsers() []map[string]interface{} {
+func (s *Server) GetUsers(agencyFilter string) []map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	users := make([]map[string]interface{}, 0, len(s.users))
 	for _, user := range s.users {
+		if agencyFilter != "" && user.AgencyID != agencyFilter {
+			continue
+		}
 		users = append(users, map[string]interface{}{
 			"username":   user.Username,
+			"agency_id":  user.AgencyID,
 			"created_at": user.CreatedAt,
 		})
 	}
@@ -795,6 +875,8 @@ func (s *Server) GetUsers() []map[string]interface{} {
 type WebAdmin struct {
 	Username           string `json:"username"`
 	PasswordHash       string `json:"password_hash"`
+	Role               string `json:"role"`                  // "super_admin" or "agency_admin"
+	AgencyID           string `json:"agency_id,omitempty"`   // empty for super_admin
 	MustChangePassword bool   `json:"must_change_password"`
 }
 
@@ -825,6 +907,7 @@ func (s *Server) createDefaultAdmin() {
 	s.webAdmins["admin"] = &WebAdmin{
 		Username:           "admin",
 		PasswordHash:       hashPassword("admin"),
+		Role:               "super_admin",
 		MustChangePassword: true,
 	}
 	if err := s.saveWebAdmins(); err != nil {
@@ -864,4 +947,128 @@ func (s *Server) validateWebSession(token string) bool {
 	defer s.mu.RUnlock()
 	_, ok := s.webSessions[token]
 	return ok
+}
+
+// --- Agency Management ---
+
+func (s *Server) loadAgencies() {
+	file, err := os.Open(s.config.AgenciesFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("No agencies file found, will run migration on first load")
+			return
+		}
+		log.Printf("Error loading agencies file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	var agencies []*Agency
+	if err := json.NewDecoder(file).Decode(&agencies); err != nil {
+		log.Printf("Error parsing agencies file: %v", err)
+		return
+	}
+
+	for _, agency := range agencies {
+		s.agencies[agency.ID] = agency
+	}
+	log.Printf("Loaded %d agencies", len(s.agencies))
+}
+
+func (s *Server) saveAgencies() error {
+	agencies := make([]*Agency, 0, len(s.agencies))
+	for _, agency := range s.agencies {
+		agencies = append(agencies, agency)
+	}
+
+	file, err := os.Create(s.config.AgenciesFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(agencies)
+}
+
+// migrateToAgencies runs once if no agencies exist, creating a "default" agency
+// and backfilling all existing users and web admins.
+func (s *Server) migrateToAgencies() {
+	if len(s.agencies) > 0 {
+		return
+	}
+
+	log.Printf("Running agency migration: creating default agency...")
+
+	// Create default agency
+	s.agencies["default"] = &Agency{
+		ID:          "default",
+		Name:        "Default Agency",
+		CreatedAt:   time.Now().Format(time.RFC3339),
+		MaxUsers:    100,
+		MaxChannels: 20,
+	}
+
+	// Backfill users with agency_id
+	for _, user := range s.users {
+		if user.AgencyID == "" {
+			user.AgencyID = "default"
+		}
+	}
+	if len(s.users) > 0 {
+		if err := s.saveUsers(); err != nil {
+			log.Printf("Error saving migrated users: %v", err)
+		}
+	}
+
+	// Backfill web admins with role
+	for _, admin := range s.webAdmins {
+		if admin.Role == "" {
+			admin.Role = "super_admin"
+		}
+	}
+	if len(s.webAdmins) > 0 {
+		if err := s.saveWebAdmins(); err != nil {
+			log.Printf("Error saving migrated web admins: %v", err)
+		}
+	}
+
+	if err := s.saveAgencies(); err != nil {
+		log.Printf("Error saving agencies: %v", err)
+	}
+
+	log.Printf("Agency migration complete: %d users and %d admins updated", len(s.users), len(s.webAdmins))
+}
+
+func (s *Server) AddUser(username, password, agencyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[username]; exists {
+		return fmt.Errorf("user %s already exists", username)
+	}
+
+	if agencyID == "" {
+		agencyID = "default"
+	}
+
+	if _, exists := s.agencies[agencyID]; !exists {
+		return fmt.Errorf("agency %s not found", agencyID)
+	}
+
+	s.users[username] = &UserAccount{
+		Username:     username,
+		PasswordHash: hashPassword(password),
+		AgencyID:     agencyID,
+		CreatedAt:    time.Now().Format(time.RFC3339),
+	}
+
+	if err := s.saveUsers(); err != nil {
+		delete(s.users, username)
+		return err
+	}
+
+	log.Printf("Created user account: %s (agency: %s)", username, agencyID)
+	return nil
 }
