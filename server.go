@@ -827,11 +827,61 @@ func (s *Server) UpdatePassword(username, password string) error {
 
 	user.PasswordHash = hashPassword(password)
 
+	// Also update web admin password if they have one
+	if admin, ok := s.webAdmins[username]; ok {
+		admin.PasswordHash = hashPassword(password)
+		s.saveWebAdmins()
+	}
+
 	if err := s.saveUsers(); err != nil {
 		return err
 	}
 
 	log.Printf("Updated password for user: %s", username)
+	return nil
+}
+
+func (s *Server) UpdateUserRole(username, newRole string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[username]
+	if !exists {
+		return fmt.Errorf("user %s not found", username)
+	}
+
+	oldRole := user.Role
+	user.Role = newRole
+
+	// Handle web admin entry changes
+	if newRole == "admin" {
+		s.webAdmins[username] = &WebAdmin{
+			Username:           username,
+			PasswordHash:       user.PasswordHash,
+			Role:               "agency_admin",
+			AgencyID:           user.AgencyID,
+			MustChangePassword: false,
+		}
+		s.saveWebAdmins()
+	} else if newRole == "super_admin" {
+		s.webAdmins[username] = &WebAdmin{
+			Username:           username,
+			PasswordHash:       user.PasswordHash,
+			Role:               "super_admin",
+			MustChangePassword: false,
+		}
+		s.saveWebAdmins()
+	} else if oldRole == "admin" || oldRole == "super_admin" {
+		// Downgraded from admin/super_admin to user — remove web admin
+		delete(s.webAdmins, username)
+		s.saveWebAdmins()
+	}
+
+	if err := s.saveUsers(); err != nil {
+		return err
+	}
+
+	log.Printf("Updated role for user %s: %s -> %s", username, oldRole, newRole)
 	return nil
 }
 
@@ -1010,6 +1060,13 @@ func (s *Server) saveAgencies() error {
 // migrateToAgencies runs once if no agencies exist, creating a "default" agency
 // and backfilling all existing users and web admins.
 func (s *Server) migrateToAgencies() {
+	// Rename "Default Agency" to "Watchtower" if it still has the old name
+	if agency, ok := s.agencies["default"]; ok && agency.Name == "Default Agency" {
+		agency.Name = "Watchtower"
+		s.saveAgencies()
+		log.Printf("Renamed default agency to 'Watchtower'")
+	}
+
 	if len(s.agencies) > 0 {
 		return
 	}

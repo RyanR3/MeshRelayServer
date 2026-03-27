@@ -902,6 +902,23 @@ body {
     border: 1px solid rgba(156, 39, 176, 0.3);
 }
 
+/* Role Select Dropdown (in table) */
+.role-select {
+    padding: 4px 8px;
+    background: #2A2A2A;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #FFFFFF;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    outline: none;
+}
+
+.role-select:focus {
+    border-color: #FF5722;
+}
+
 /* Agency Badge */
 .agency-badge {
     display: inline-block;
