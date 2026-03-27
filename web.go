@@ -355,6 +355,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		AgencyID string `json:"agency_id"`
+		Role     string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -370,16 +371,35 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine agency based on role
+	// Determine agency based on session role
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
 		req.AgencyID = session.AgencyID
+		// Agency admins can only create users, not other admins or super_admins
+		if req.Role == "super_admin" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"cannot create super admin users"}`))
+			return
+		}
 	}
 	if req.AgencyID == "" {
 		req.AgencyID = "default"
 	}
 
-	if err := s.AddUser(req.Username, req.Password, req.AgencyID); err != nil {
+	// Only super admins can create super_admin users
+	if req.Role == "super_admin" && (session == nil || session.Role != "super_admin") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"only super admins can create super admin users"}`))
+		return
+	}
+
+	if req.Role == "" {
+		req.Role = "user"
+	}
+
+	if err := s.AddUser(req.Username, req.Password, req.AgencyID, req.Role); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -388,7 +408,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username, "agency_id": req.AgencyID})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username, "agency_id": req.AgencyID, "role": req.Role})
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -560,17 +580,23 @@ func (s *Server) handleGetAgencies(w http.ResponseWriter, r *http.Request) {
 	for _, agency := range s.agencies {
 		// Count users in this agency
 		userCount := 0
+		adminUsername := ""
 		for _, user := range s.users {
 			if user.AgencyID == agency.ID {
 				userCount++
+				// Find agency admin from users with admin role
+				if user.Role == "admin" && adminUsername == "" {
+					adminUsername = user.Username
+				}
 			}
 		}
-		// Find agency admin
-		adminUsername := ""
-		for _, admin := range s.webAdmins {
-			if admin.AgencyID == agency.ID && admin.Role == "agency_admin" {
-				adminUsername = admin.Username
-				break
+		// Also check webAdmins for legacy agency admins
+		if adminUsername == "" {
+			for _, admin := range s.webAdmins {
+				if admin.AgencyID == agency.ID && admin.Role == "agency_admin" {
+					adminUsername = admin.Username
+					break
+				}
 			}
 		}
 		agencies = append(agencies, map[string]interface{}{

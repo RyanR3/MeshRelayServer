@@ -323,10 +323,14 @@ function renderUsersTable(users) {
         const created = user.created_at ? new Date(user.created_at).toLocaleString() : 'Unknown';
         const safeUsername = escapeHtml(user.username);
         const agencyCol = currentRole === 'super_admin' ? `<td><span class="agency-badge">${escapeHtml(user.agency_id || 'default')}</span></td>` : '';
+        const role = user.role || 'user';
+        const roleLabel = role === 'super_admin' ? 'Super Admin' : role === 'admin' ? 'Admin' : 'User';
+        const roleClass = role === 'super_admin' ? 'role-super-admin' : role === 'admin' ? 'role-admin' : 'role-user';
         return `
             <tr>
                 <td><strong>${safeUsername}</strong></td>
                 ${agencyCol}
+                <td><span class="role-badge ${roleClass}">${roleLabel}</span></td>
                 <td>${created}</td>
                 <td>
                     <div class="actions-cell">
@@ -345,9 +349,15 @@ function renderUsersTable(users) {
 function showCreateUserModal() {
     document.getElementById('newUsername').value = '';
     document.getElementById('newPassword').value = '';
+    document.getElementById('newUserRole').value = 'user';
     // Populate agency dropdown for super admins
     if (currentRole === 'super_admin') {
         populateAgencyDropdown('newUserAgency');
+    }
+    // Show/hide super_admin option based on role
+    const superAdminOption = document.querySelector('#newUserRole option[value="super_admin"]');
+    if (superAdminOption) {
+        superAdminOption.style.display = currentRole === 'super_admin' ? '' : 'none';
     }
     showModal('createUserModal');
     document.getElementById('newUsername').focus();
@@ -370,6 +380,10 @@ function createUser() {
         if (agencySelect && agencySelect.value) {
             body.agency_id = agencySelect.value;
         }
+    }
+    const roleSelect = document.getElementById('newUserRole');
+    if (roleSelect && roleSelect.value) {
+        body.role = roleSelect.value;
     }
 
     fetch('/api/users', {
@@ -687,17 +701,14 @@ function renderAgenciesTable(agencies) {
     tbody.innerHTML = agencies.map(agency => {
         const safeName = escapeHtml(agency.name);
         const safeId = escapeHtml(agency.id);
-        const adminText = agency.admin ? escapeHtml(agency.admin) : '<em>None</em>';
         const isDefault = agency.id === 'default';
         return `
             <tr>
                 <td><strong>${safeName}</strong></td>
                 <td><code>${safeId}</code></td>
                 <td>${agency.user_count || 0}</td>
-                <td>${adminText}</td>
                 <td>
                     <div class="actions-cell">
-                        ${!agency.admin ? `<button class="btn-action edit" onclick="showCreateAgencyAdminModal('${safeId}', '${safeName}')">Add Admin</button>` : ''}
                         ${!isDefault ? `<button class="btn-action delete" onclick="deleteAgency('${safeId}')">Delete</button>` : ''}
                     </div>
                 </td>
