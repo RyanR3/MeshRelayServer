@@ -66,10 +66,11 @@ type AuthResponsePacket struct {
 	Message string
 }
 
-// ChannelSwitchPacket represents a server-to-client channel switch command
+// ChannelSwitchPacket notifies a PTT client about a mutual aid channel
 type ChannelSwitchPacket struct {
 	Channel     int
 	ChannelName string
+	Active      bool // true = add channel, false = remove channel
 }
 
 // GroupPacket represents a group create/update packet
@@ -578,6 +579,12 @@ func SerializeChannelSwitch(packet *ChannelSwitchPacket) []byte {
 
 	// Write packet type
 	buf.WriteByte(PacketTypeChannelSwitch)
+	// Write active flag (1 = add, 0 = remove)
+	if packet.Active {
+		buf.WriteByte(0x01)
+	} else {
+		buf.WriteByte(0x00)
+	}
 	// Write channel number
 	binary.Write(buf, binary.BigEndian, int32(packet.Channel))
 	// Write channel name length

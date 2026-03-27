@@ -1314,44 +1314,30 @@ func (s *Server) hasMutualAidLink(agencyA, agencyB string) bool {
 	return false
 }
 
-// forceChannelSwitch moves all connected clients in the given agencies to the target channel
-// and sends them a ChannelSwitchPacket so their PTT app switches too.
+// notifyMutualAidChannel sends a ChannelSwitchPacket to all connected clients in both
+// agencies, telling the PTT app to add or remove a mutual aid channel from its list.
 // Must be called with s.mu held.
-func (s *Server) forceChannelSwitch(agencyA, agencyB string, targetChannel int, channelName string) {
-	switchPacket := SerializeChannelSwitch(&ChannelSwitchPacket{
-		Channel:     targetChannel,
+func (s *Server) notifyMutualAidChannel(agencyA, agencyB string, channel int, channelName string, active bool) {
+	pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
+		Channel:     channel,
 		ChannelName: channelName,
+		Active:      active,
 	})
 
+	count := 0
 	for _, client := range s.clients {
 		if client.AgencyID != agencyA && client.AgencyID != agencyB {
 			continue
 		}
-
-		// Remove from old channel
-		oldKey := channelKey(client.AgencyID, client.Channel)
-		if oldCh := s.channels[oldKey]; oldCh != nil {
-			oldCh.mu.Lock()
-			delete(oldCh.Clients, client.Username)
-			oldCh.mu.Unlock()
-		}
-
-		// Update client channel
-		client.Channel = targetChannel
-
-		// Add to new channel
-		newKey := channelKey(client.AgencyID, targetChannel)
-		if newCh := s.channels[newKey]; newCh != nil {
-			newCh.mu.Lock()
-			newCh.Clients[client.Username] = client
-			newCh.mu.Unlock()
-		}
-
-		// Send channel switch packet to PTT client
-		s.sendPacket(switchPacket, client.Addr)
+		s.sendPacket(pkt, client.Addr)
+		count++
 	}
 
-	log.Printf("Force channel switch: agencies [%s, %s] -> channel %d (%s)", agencyA, agencyB, targetChannel, channelName)
+	action := "added"
+	if !active {
+		action = "removed"
+	}
+	log.Printf("Mutual aid channel %s: notified %d clients in [%s, %s] about channel %d (%s)", action, count, agencyA, agencyB, channel, channelName)
 }
 
 // pickMutualAidChannel picks the highest unused channel number (starting from 19 down)
