@@ -1003,8 +1003,8 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mutualAidLinks[linkID] = link
 
-	// Force all clients in both agencies onto the mutual aid channel
-	s.forceChannelSwitch(req.AgencyA, req.AgencyB, channel, req.ChannelName)
+	// Notify all clients in both agencies about the new mutual aid channel
+	s.notifyMutualAidChannel(req.AgencyA, req.AgencyB, channel, req.ChannelName, true)
 	s.mu.Unlock()
 
 	if err := s.saveMutualAid(); err != nil {
@@ -1034,11 +1034,12 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 	agencyA := link.AgencyA
 	agencyB := link.AgencyB
 	oldChannel := link.Channel
+	channelName := link.ChannelName
 
 	delete(s.mutualAidLinks, id)
 
-	// Switch clients on the mutual aid channel back to channel 0
-	s.forceChannelSwitch(agencyA, agencyB, 0, "Channel 0")
+	// Notify clients to remove the mutual aid channel from their list
+	s.notifyMutualAidChannel(agencyA, agencyB, oldChannel, channelName, false)
 	s.mu.Unlock()
 
 	s.saveMutualAid()
