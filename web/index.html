@@ -211,7 +211,7 @@
                         <tr>
                             <th>Agency A</th>
                             <th>Agency B</th>
-                            <th>Channel</th>
+                            <th>Channel Name</th>
                             <th>Status</th>
                             <th>Created</th>
                             <th>Actions</th>
@@ -402,8 +402,8 @@
             <select id="mutualAidAgencyB">
                 <option value="">Select Agency</option>
             </select>
-            <label class="modal-field-label">Shared Channel (0-19)</label>
-            <input type="number" id="mutualAidChannel" placeholder="Channel" value="0" min="0" max="19">
+            <label class="modal-field-label">Channel Name</label>
+            <input type="text" id="mutualAidChannelName" placeholder="e.g. Fire Response">
             <div class="modal-actions">
                 <button class="btn-primary" onclick="createMutualAidLink()">Create Link</button>
                 <button class="btn-secondary" onclick="closeModal('createMutualAidModal')">Cancel</button>

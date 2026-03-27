@@ -17,8 +17,9 @@ const (
 	PacketTypeGroupCreate byte = 0x05
 	PacketTypeGroupUpdate byte = 0x06
 	PacketTypeDirectAudio byte = 0x07
-	PacketTypeAuthRequest  byte = 0x08
-	PacketTypeAuthResponse byte = 0x09
+	PacketTypeAuthRequest   byte = 0x08
+	PacketTypeAuthResponse  byte = 0x09
+	PacketTypeChannelSwitch byte = 0x0A
 )
 
 // AudioPacket represents an audio packet
@@ -63,6 +64,12 @@ type AuthRequestPacket struct {
 type AuthResponsePacket struct {
 	Success bool
 	Message string
+}
+
+// ChannelSwitchPacket represents a server-to-client channel switch command
+type ChannelSwitchPacket struct {
+	Channel     int
+	ChannelName string
 }
 
 // GroupPacket represents a group create/update packet
@@ -563,6 +570,22 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 		Username:     string(usernameBytes),
 		PasswordHash: string(hashBytes),
 	}, nil
+}
+
+// SerializeChannelSwitch serializes a channel switch packet for transmission
+func SerializeChannelSwitch(packet *ChannelSwitchPacket) []byte {
+	buf := new(bytes.Buffer)
+
+	// Write packet type
+	buf.WriteByte(PacketTypeChannelSwitch)
+	// Write channel number
+	binary.Write(buf, binary.BigEndian, int32(packet.Channel))
+	// Write channel name length
+	binary.Write(buf, binary.BigEndian, int16(len(packet.ChannelName)))
+	// Write channel name
+	buf.WriteString(packet.ChannelName)
+
+	return buf.Bytes()
 }
 
 // SerializeAuthResponse serializes an auth response for transmission

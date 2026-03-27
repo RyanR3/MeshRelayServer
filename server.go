@@ -47,13 +47,14 @@ type UserAccount struct {
 }
 
 type MutualAidLink struct {
-	ID        string `json:"id"`
-	AgencyA   string `json:"agency_a"`
-	AgencyB   string `json:"agency_b"`
-	Channel   int    `json:"channel"`
-	CreatedAt string `json:"created_at"`
-	CreatedBy string `json:"created_by"`
-	Active    bool   `json:"active"`
+	ID          string `json:"id"`
+	AgencyA     string `json:"agency_a"`
+	AgencyB     string `json:"agency_b"`
+	Channel     int    `json:"channel"`
+	ChannelName string `json:"channel_name"`
+	CreatedAt   string `json:"created_at"`
+	CreatedBy   string `json:"created_by"`
+	Active      bool   `json:"active"`
 }
 
 type UpdateStatus struct {
@@ -1311,4 +1312,61 @@ func (s *Server) hasMutualAidLink(agencyA, agencyB string) bool {
 		}
 	}
 	return false
+}
+
+// forceChannelSwitch moves all connected clients in the given agencies to the target channel
+// and sends them a ChannelSwitchPacket so their PTT app switches too.
+// Must be called with s.mu held.
+func (s *Server) forceChannelSwitch(agencyA, agencyB string, targetChannel int, channelName string) {
+	switchPacket := SerializeChannelSwitch(&ChannelSwitchPacket{
+		Channel:     targetChannel,
+		ChannelName: channelName,
+	})
+
+	for _, client := range s.clients {
+		if client.AgencyID != agencyA && client.AgencyID != agencyB {
+			continue
+		}
+
+		// Remove from old channel
+		oldKey := channelKey(client.AgencyID, client.Channel)
+		if oldCh := s.channels[oldKey]; oldCh != nil {
+			oldCh.mu.Lock()
+			delete(oldCh.Clients, client.Username)
+			oldCh.mu.Unlock()
+		}
+
+		// Update client channel
+		client.Channel = targetChannel
+
+		// Add to new channel
+		newKey := channelKey(client.AgencyID, targetChannel)
+		if newCh := s.channels[newKey]; newCh != nil {
+			newCh.mu.Lock()
+			newCh.Clients[client.Username] = client
+			newCh.mu.Unlock()
+		}
+
+		// Send channel switch packet to PTT client
+		s.sendPacket(switchPacket, client.Addr)
+	}
+
+	log.Printf("Force channel switch: agencies [%s, %s] -> channel %d (%s)", agencyA, agencyB, targetChannel, channelName)
+}
+
+// pickMutualAidChannel picks the highest unused channel number (starting from 19 down)
+// that has no active mutual aid link. Must be called with s.mu held.
+func (s *Server) pickMutualAidChannel() int {
+	used := make(map[int]bool)
+	for _, link := range s.mutualAidLinks {
+		if link.Active {
+			used[link.Channel] = true
+		}
+	}
+	for ch := 19; ch >= 0; ch-- {
+		if !used[ch] {
+			return ch
+		}
+	}
+	return 19 // fallback
 }
