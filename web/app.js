@@ -28,6 +28,8 @@ function navigateTo(pageName) {
         fetchAgencies();
     } else if (pageName === 'users') {
         fetchUsers();
+    } else if (pageName === 'mutual-aid') {
+        fetchMutualAid();
     } else if (pageName === 'settings') {
         fetchAuthStatus();
         fetchVersionInfo();
@@ -526,7 +528,7 @@ function updateUserRole(username, newRole) {
 
 function showQRCode(username) {
     // Show QR with server address and username (no password since we don't store plaintext)
-    const serverUrl = window.location.hostname + ':5000';
+    const serverUrl = 'client.meshrelayptt.com';
     document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
     document.getElementById('qrServer').textContent = serverUrl;
     document.getElementById('qrUsername').textContent = username;
@@ -553,7 +555,7 @@ function showQRCode(username) {
 }
 
 function showQRCodeWithData(username, password) {
-    const serverUrl = window.location.hostname + ':5000';
+    const serverUrl = 'client.meshrelayptt.com';
     document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
     document.getElementById('qrServer').textContent = serverUrl;
     document.getElementById('qrUsername').textContent = username;
@@ -578,6 +580,134 @@ function showQRCodeWithData(username, password) {
     });
 
     showModal('qrCodeModal');
+}
+
+// --- Mutual Aid ---
+
+function fetchMutualAid() {
+    // Ensure agencies are loaded for the modal dropdowns
+    if (agenciesList.length === 0) {
+        fetch('/api/agencies').then(r => r.json()).then(agencies => {
+            agenciesList = agencies;
+        }).catch(() => {});
+    }
+
+    fetch('/api/mutual-aid')
+    .then(r => r.json())
+    .then(links => {
+        renderMutualAidTable(links);
+    })
+    .catch(err => {
+        console.error('Failed to fetch mutual aid links:', err);
+    });
+}
+
+function renderMutualAidTable(links) {
+    const tbody = document.getElementById('mutual-aid-table-body');
+    const table = document.getElementById('mutual-aid-table');
+    const empty = document.getElementById('mutual-aid-empty');
+
+    if (!links || links.length === 0) {
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+    }
+
+    table.style.display = '';
+    empty.style.display = 'none';
+
+    tbody.innerHTML = links.map(link => {
+        const created = new Date(link.created_at).toLocaleDateString();
+        const statusClass = link.active ? 'status-active' : 'status-inactive';
+        const statusText = link.active ? 'Active' : 'Inactive';
+        const safeId = link.id.replace(/'/g, "\\'");
+        return `<tr>
+            <td>${link.agency_a_name} <span class="agency-badge">${link.agency_a}</span></td>
+            <td>${link.agency_b_name} <span class="agency-badge">${link.agency_b}</span></td>
+            <td>Channel ${link.channel}</td>
+            <td><span class="link-status ${statusClass}">${statusText}</span></td>
+            <td>${created}</td>
+            <td class="actions-cell">
+                <button class="btn-action delete" onclick="deleteMutualAidLink('${safeId}')">Remove</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function showCreateMutualAidModal() {
+    // Populate agency dropdowns
+    const selectA = document.getElementById('mutualAidAgencyA');
+    const selectB = document.getElementById('mutualAidAgencyB');
+    selectA.innerHTML = '<option value="">Select Agency</option>';
+    selectB.innerHTML = '<option value="">Select Agency</option>';
+
+    agenciesList.forEach(agency => {
+        selectA.innerHTML += `<option value="${agency.id}">${agency.name}</option>`;
+        selectB.innerHTML += `<option value="${agency.id}">${agency.name}</option>`;
+    });
+
+    document.getElementById('mutualAidChannel').value = '0';
+    showModal('createMutualAidModal');
+}
+
+function createMutualAidLink() {
+    const agencyA = document.getElementById('mutualAidAgencyA').value;
+    const agencyB = document.getElementById('mutualAidAgencyB').value;
+    const channel = parseInt(document.getElementById('mutualAidChannel').value);
+
+    if (!agencyA || !agencyB) {
+        showStatus('mutual-aid-status', 'Both agencies are required', 'error');
+        return;
+    }
+
+    if (agencyA === agencyB) {
+        showStatus('mutual-aid-status', 'Cannot link an agency to itself', 'error');
+        return;
+    }
+
+    if (isNaN(channel) || channel < 0 || channel > 19) {
+        showStatus('mutual-aid-status', 'Channel must be between 0 and 19', 'error');
+        return;
+    }
+
+    fetch('/api/mutual-aid', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agency_a: agencyA, agency_b: agencyB, channel: channel })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            showStatus('mutual-aid-status', data.error, 'error');
+            return;
+        }
+        closeModal('createMutualAidModal');
+        showStatus('mutual-aid-status', 'Mutual aid link created', 'success');
+        fetchMutualAid();
+    })
+    .catch(err => {
+        showStatus('mutual-aid-status', 'Failed to create link: ' + err.message, 'error');
+    });
+}
+
+function deleteMutualAidLink(id) {
+    if (!confirm('Remove this mutual aid link? Agencies will no longer be able to communicate on this channel.')) {
+        return;
+    }
+
+    fetch('/api/mutual-aid/' + id, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            showStatus('mutual-aid-status', data.error, 'error');
+            return;
+        }
+        showStatus('mutual-aid-status', 'Mutual aid link removed', 'success');
+        fetchMutualAid();
+    })
+    .catch(err => {
+        showStatus('mutual-aid-status', 'Failed to remove link: ' + err.message, 'error');
+    });
 }
 
 // --- Auth Toggle ---
