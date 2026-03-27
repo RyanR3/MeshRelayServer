@@ -909,6 +909,7 @@ func (s *Server) handleGetMutualAid(w http.ResponseWriter, r *http.Request) {
 			"agency_a_name": agencyAName,
 			"agency_b_name": agencyBName,
 			"channel":       link.Channel,
+			"channel_name":  link.ChannelName,
 			"created_at":    link.CreatedAt,
 			"created_by":    link.CreatedBy,
 			"active":        link.Active,
@@ -920,9 +921,9 @@ func (s *Server) handleGetMutualAid(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var req struct {
-		AgencyA string `json:"agency_a"`
-		AgencyB string `json:"agency_b"`
-		Channel int    `json:"channel"`
+		AgencyA     string `json:"agency_a"`
+		AgencyB     string `json:"agency_b"`
+		ChannelName string `json:"channel_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -942,9 +943,9 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Channel < 0 || req.Channel > 19 {
+	if req.ChannelName == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"channel must be between 0 and 19"}`))
+		w.Write([]byte(`{"error":"channel name is required"}`))
 		return
 	}
 
@@ -965,17 +966,20 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for existing active link between these agencies on this channel
+	// Check for existing active link between these agencies
 	for _, link := range s.mutualAidLinks {
-		if link.Active && link.Channel == req.Channel &&
+		if link.Active &&
 			((link.AgencyA == req.AgencyA && link.AgencyB == req.AgencyB) ||
 				(link.AgencyA == req.AgencyB && link.AgencyB == req.AgencyA)) {
 			s.mu.Unlock()
 			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte(`{"error":"active link already exists between these agencies on this channel"}`))
+			w.Write([]byte(`{"error":"active link already exists between these agencies"}`))
 			return
 		}
 	}
+
+	// Auto-assign channel number
+	channel := s.pickMutualAidChannel()
 
 	// Generate link ID
 	idBytes := make([]byte, 8)
@@ -988,15 +992,19 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link := &MutualAidLink{
-		ID:        linkID,
-		AgencyA:   req.AgencyA,
-		AgencyB:   req.AgencyB,
-		Channel:   req.Channel,
-		CreatedAt: time.Now().Format(time.RFC3339),
-		CreatedBy: createdBy,
-		Active:    true,
+		ID:          linkID,
+		AgencyA:     req.AgencyA,
+		AgencyB:     req.AgencyB,
+		Channel:     channel,
+		ChannelName: req.ChannelName,
+		CreatedAt:   time.Now().Format(time.RFC3339),
+		CreatedBy:   createdBy,
+		Active:      true,
 	}
 	s.mutualAidLinks[linkID] = link
+
+	// Force all clients in both agencies onto the mutual aid channel
+	s.forceChannelSwitch(req.AgencyA, req.AgencyB, channel, req.ChannelName)
 	s.mu.Unlock()
 
 	if err := s.saveMutualAid(); err != nil {
@@ -1005,7 +1013,7 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Created mutual aid link: %s <-> %s on channel %d (by %s)", req.AgencyA, req.AgencyB, req.Channel, createdBy)
+	log.Printf("Created mutual aid link: %s <-> %s on channel %d (%s) (by %s)", req.AgencyA, req.AgencyB, channel, req.ChannelName, createdBy)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": linkID})
 }
 
@@ -1023,12 +1031,19 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	agencyA := link.AgencyA
+	agencyB := link.AgencyB
+	oldChannel := link.Channel
+
 	delete(s.mutualAidLinks, id)
+
+	// Switch clients on the mutual aid channel back to channel 0
+	s.forceChannelSwitch(agencyA, agencyB, 0, "Channel 0")
 	s.mu.Unlock()
 
 	s.saveMutualAid()
 
-	log.Printf("Deleted mutual aid link: %s <-> %s on channel %d", link.AgencyA, link.AgencyB, link.Channel)
+	log.Printf("Deleted mutual aid link: %s <-> %s on channel %d", agencyA, agencyB, oldChannel)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

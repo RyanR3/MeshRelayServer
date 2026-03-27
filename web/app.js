@@ -624,7 +624,7 @@ function renderMutualAidTable(links) {
         return `<tr>
             <td>${link.agency_a_name} <span class="agency-badge">${link.agency_a}</span></td>
             <td>${link.agency_b_name} <span class="agency-badge">${link.agency_b}</span></td>
-            <td>Channel ${link.channel}</td>
+            <td>${link.channel_name || 'Channel ' + link.channel}</td>
             <td><span class="link-status ${statusClass}">${statusText}</span></td>
             <td>${created}</td>
             <td class="actions-cell">
@@ -646,14 +646,14 @@ function showCreateMutualAidModal() {
         selectB.innerHTML += `<option value="${agency.id}">${agency.name}</option>`;
     });
 
-    document.getElementById('mutualAidChannel').value = '0';
+    document.getElementById('mutualAidChannelName').value = '';
     showModal('createMutualAidModal');
 }
 
 function createMutualAidLink() {
     const agencyA = document.getElementById('mutualAidAgencyA').value;
     const agencyB = document.getElementById('mutualAidAgencyB').value;
-    const channel = parseInt(document.getElementById('mutualAidChannel').value);
+    const channelName = document.getElementById('mutualAidChannelName').value.trim();
 
     if (!agencyA || !agencyB) {
         showStatus('mutual-aid-status', 'Both agencies are required', 'error');
@@ -665,15 +665,15 @@ function createMutualAidLink() {
         return;
     }
 
-    if (isNaN(channel) || channel < 0 || channel > 19) {
-        showStatus('mutual-aid-status', 'Channel must be between 0 and 19', 'error');
+    if (!channelName) {
+        showStatus('mutual-aid-status', 'Channel name is required', 'error');
         return;
     }
 
     fetch('/api/mutual-aid', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agency_a: agencyA, agency_b: agencyB, channel: channel })
+        body: JSON.stringify({ agency_a: agencyA, agency_b: agencyB, channel_name: channelName })
     })
     .then(r => r.json())
     .then(data => {
@@ -682,7 +682,7 @@ function createMutualAidLink() {
             return;
         }
         closeModal('createMutualAidModal');
-        showStatus('mutual-aid-status', 'Mutual aid link created', 'success');
+        showStatus('mutual-aid-status', 'Mutual aid link created — all clients switched to shared channel', 'success');
         fetchMutualAid();
     })
     .catch(err => {
