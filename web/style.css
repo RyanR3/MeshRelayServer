@@ -873,6 +873,35 @@ body {
     padding: 4px 0;
 }
 
+/* Role Badges */
+.role-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.role-badge.role-user {
+    background: rgba(176, 176, 176, 0.15);
+    color: #B0B0B0;
+    border: 1px solid rgba(176, 176, 176, 0.3);
+}
+
+.role-badge.role-admin {
+    background: rgba(255, 87, 34, 0.15);
+    color: #FF5722;
+    border: 1px solid rgba(255, 87, 34, 0.3);
+}
+
+.role-badge.role-super-admin {
+    background: rgba(156, 39, 176, 0.15);
+    color: #CE93D8;
+    border: 1px solid rgba(156, 39, 176, 0.3);
+}
+
 /* Agency Badge */
 .agency-badge {
     display: inline-block;
@@ -901,6 +930,17 @@ body {
 
 .agency-filter:focus {
     border-color: #FF5722;
+}
+
+/* Modal field labels */
+.modal-field-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #B0B0B0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
 }
 
 /* Modal select dropdown */

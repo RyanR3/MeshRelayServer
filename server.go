@@ -42,6 +42,7 @@ type UserAccount struct {
 	Username     string `json:"username"`
 	PasswordHash string `json:"password_hash"`
 	AgencyID     string `json:"agency_id"`
+	Role         string `json:"role"` // "user", "admin", or "super_admin"
 	CreatedAt    string `json:"created_at"`
 }
 
@@ -838,8 +839,17 @@ func (s *Server) RemoveUser(username string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.users[username]; !exists {
+	user, exists := s.users[username]
+	if !exists {
 		return fmt.Errorf("user %s not found", username)
+	}
+
+	// If user had admin/super_admin role, also remove web admin entry
+	if user.Role == "admin" || user.Role == "super_admin" {
+		delete(s.webAdmins, username)
+		if err := s.saveWebAdmins(); err != nil {
+			log.Printf("Warning: failed to remove web admin for %s: %v", username, err)
+		}
 	}
 
 	delete(s.users, username)
@@ -861,9 +871,14 @@ func (s *Server) GetUsers(agencyFilter string) []map[string]interface{} {
 		if agencyFilter != "" && user.AgencyID != agencyFilter {
 			continue
 		}
+		role := user.Role
+		if role == "" {
+			role = "user"
+		}
 		users = append(users, map[string]interface{}{
 			"username":   user.Username,
 			"agency_id":  user.AgencyID,
+			"role":       role,
 			"created_at": user.CreatedAt,
 		})
 	}
@@ -1004,16 +1019,19 @@ func (s *Server) migrateToAgencies() {
 	// Create default agency
 	s.agencies["default"] = &Agency{
 		ID:          "default",
-		Name:        "Default Agency",
+		Name:        "Watchtower",
 		CreatedAt:   time.Now().Format(time.RFC3339),
 		MaxUsers:    100,
 		MaxChannels: 20,
 	}
 
-	// Backfill users with agency_id
+	// Backfill users with agency_id and role
 	for _, user := range s.users {
 		if user.AgencyID == "" {
 			user.AgencyID = "default"
+		}
+		if user.Role == "" {
+			user.Role = "user"
 		}
 	}
 	if len(s.users) > 0 {
@@ -1041,7 +1059,7 @@ func (s *Server) migrateToAgencies() {
 	log.Printf("Agency migration complete: %d users and %d admins updated", len(s.users), len(s.webAdmins))
 }
 
-func (s *Server) AddUser(username, password, agencyID string) error {
+func (s *Server) AddUser(username, password, agencyID, role string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1057,11 +1075,40 @@ func (s *Server) AddUser(username, password, agencyID string) error {
 		return fmt.Errorf("agency %s not found", agencyID)
 	}
 
+	if role == "" {
+		role = "user"
+	}
+
 	s.users[username] = &UserAccount{
 		Username:     username,
 		PasswordHash: hashPassword(password),
 		AgencyID:     agencyID,
+		Role:         role,
 		CreatedAt:    time.Now().Format(time.RFC3339),
+	}
+
+	// If the user is an admin, also create/update a web admin entry for dashboard access
+	if role == "admin" {
+		s.webAdmins[username] = &WebAdmin{
+			Username:           username,
+			PasswordHash:       hashPassword(password),
+			Role:               "agency_admin",
+			AgencyID:           agencyID,
+			MustChangePassword: false,
+		}
+		if err := s.saveWebAdmins(); err != nil {
+			log.Printf("Warning: failed to save web admin for %s: %v", username, err)
+		}
+	} else if role == "super_admin" {
+		s.webAdmins[username] = &WebAdmin{
+			Username:           username,
+			PasswordHash:       hashPassword(password),
+			Role:               "super_admin",
+			MustChangePassword: false,
+		}
+		if err := s.saveWebAdmins(); err != nil {
+			log.Printf("Warning: failed to save web admin for %s: %v", username, err)
+		}
 	}
 
 	if err := s.saveUsers(); err != nil {
@@ -1069,6 +1116,6 @@ func (s *Server) AddUser(username, password, agencyID string) error {
 		return err
 	}
 
-	log.Printf("Created user account: %s (agency: %s)", username, agencyID)
+	log.Printf("Created user account: %s (agency: %s, role: %s)", username, agencyID, role)
 	return nil
 }
