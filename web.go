@@ -56,6 +56,8 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/update/check", s.handleUpdateCheck).Methods("POST")
 	api.HandleFunc("/update/apply", s.handleUpdateApply).Methods("POST")
 	api.HandleFunc("/update/status", s.handleUpdateStatus).Methods("GET")
+	api.HandleFunc("/github-token", s.handleGetGitHubToken).Methods("GET")
+	api.HandleFunc("/github-token", s.handleSetGitHubToken).Methods("POST")
 
 	// WebSocket for real-time updates
 	r.HandleFunc("/ws", s.handleWebSocket)
@@ -458,7 +460,11 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://api.github.com/repos/RyanR3/MeshRelayServer/releases/latest")
+	ghReq, _ := http.NewRequest("GET", "https://api.github.com/repos/RyanR3/MeshRelayServer/releases/latest", nil)
+	if s.config.GitHubToken != "" {
+		ghReq.Header.Set("Authorization", "token "+s.config.GitHubToken)
+	}
+	resp, err := client.Do(ghReq)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to reach GitHub: " + err.Error()})
@@ -544,7 +550,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.performUpdate(req.BinaryURL, req.WebURL)
+	go s.performUpdate(req.BinaryURL, req.WebURL, s.config.GitHubToken)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "update_started"})
 }
@@ -568,7 +574,7 @@ func (s *Server) setUpdateStatus(stage string, progress int, message string, err
 	}
 }
 
-func (s *Server) performUpdate(binaryURL, webURL string) {
+func (s *Server) performUpdate(binaryURL, webURL, ghToken string) {
 	s.updateStatus.mu.Lock()
 	s.updateStatus.InProgress = true
 	s.updateStatus.Error = ""
@@ -588,7 +594,12 @@ func (s *Server) performUpdate(binaryURL, webURL string) {
 	log.Printf("Downloading binary from: %s", binaryURL)
 
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(binaryURL)
+	dlReq, _ := http.NewRequest("GET", binaryURL, nil)
+	if ghToken != "" {
+		dlReq.Header.Set("Authorization", "token "+ghToken)
+		dlReq.Header.Set("Accept", "application/octet-stream")
+	}
+	resp, err := client.Do(dlReq)
 	if err != nil {
 		s.setUpdateStatus("error", 10, "", "Failed to download binary: "+err.Error())
 		return
@@ -622,7 +633,7 @@ func (s *Server) performUpdate(binaryURL, webURL string) {
 		log.Printf("Downloading web files from: %s", webURL)
 
 		tmpWebDir = filepath.Join(installDir, "web.new")
-		if err := downloadAndExtractTarGz(webURL, tmpWebDir); err != nil {
+		if err := downloadAndExtractTarGz(webURL, tmpWebDir, ghToken); err != nil {
 			os.Remove(tmpBinary)
 			s.setUpdateStatus("error", 30, "", "Failed to download web files: "+err.Error())
 			return
@@ -685,9 +696,46 @@ func (s *Server) performUpdate(binaryURL, webURL string) {
 	s.setUpdateStatus("done", 100, "Update installed. Server is restarting...", "")
 }
 
-func downloadAndExtractTarGz(url string, destDir string) error {
+func (s *Server) handleGetGitHubToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// Only return whether a token is configured, not the token itself
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"configured": s.config.GitHubToken != "",
+	})
+}
+
+func (s *Server) handleSetGitHubToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request"})
+		return
+	}
+
+	s.config.GitHubToken = req.Token
+	if err := s.config.Save(s.configFile); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save config: " + err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"configured": req.Token != "",
+		"message":    "GitHub token updated",
+	})
+}
+
+func downloadAndExtractTarGz(url string, destDir string, ghToken string) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+	dlReq, _ := http.NewRequest("GET", url, nil)
+	if ghToken != "" {
+		dlReq.Header.Set("Authorization", "token "+ghToken)
+		dlReq.Header.Set("Accept", "application/octet-stream")
+	}
+	resp, err := client.Do(dlReq)
 	if err != nil {
 		return err
 	}

@@ -24,6 +24,7 @@ function navigateTo(pageName) {
     } else if (pageName === 'settings') {
         fetchAuthStatus();
         fetchVersionInfo();
+        fetchGitHubTokenStatus();
     }
 }
 
@@ -710,9 +711,8 @@ function applyUpdate() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            download_url: latestRelease.download_url,
-            web_download_url: latestRelease.web_download_url || '',
-            version: latestRelease.latest_version
+            binary_url: latestRelease.binary_url,
+            web_url: latestRelease.web_url || ''
         })
     })
     .then(r => r.json())
@@ -828,6 +828,53 @@ function formatStage(stage) {
         'restarting': 'Restarting server'
     };
     return stages[stage] || stage || 'Preparing';
+}
+
+// --- GitHub Token ---
+
+function fetchGitHubTokenStatus() {
+    fetch('/api/github-token')
+        .then(r => r.json())
+        .then(data => {
+            const el = document.getElementById('gh-token-status');
+            if (el) {
+                el.textContent = data.configured ? '(Token configured)' : '(No token set)';
+                el.style.color = data.configured ? '#4CAF50' : '#B0B0B0';
+            }
+        })
+        .catch(() => {});
+}
+
+function saveGitHubToken() {
+    const token = document.getElementById('github-token-input').value.trim();
+    if (!token) return;
+
+    fetch('/api/github-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token })
+    })
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById('github-token-input').value = '';
+        fetchGitHubTokenStatus();
+        addLog('GitHub token saved', 'success');
+    })
+    .catch(err => addLog('Failed to save token: ' + err.message, 'error'));
+}
+
+function clearGitHubToken() {
+    fetch('/api/github-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: '' })
+    })
+    .then(r => r.json())
+    .then(() => {
+        fetchGitHubTokenStatus();
+        addLog('GitHub token cleared', 'info');
+    })
+    .catch(err => addLog('Failed to clear token: ' + err.message, 'error'));
 }
 
 // Wrap fetch to handle 401 globally

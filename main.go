@@ -40,7 +40,7 @@ func main() {
 	log.Printf("Max Channels: %d", config.MaxChannels)
 
 	// Create server instance
-	server := NewServer(config)
+	server := NewServer(config, *configFile)
 
 	// Start PTT UDP server
 	go func() {

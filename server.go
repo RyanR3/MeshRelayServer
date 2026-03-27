@@ -45,6 +45,7 @@ type UpdateStatus struct {
 
 type Server struct {
 	config            *Config
+	configFile        string
 	conn              *net.UDPConn
 	clients           map[string]*Client      // username -> client
 	channels          map[int]*Channel        // channel ID -> channel
@@ -68,7 +69,7 @@ type Stats struct {
 	mu              sync.RWMutex
 }
 
-func NewServer(config *Config) *Server {
+func NewServer(config *Config, configFile string) *Server {
 	// Create default channels (0-19, matching Android app)
 	channels := make(map[int]*Channel)
 	for i := 0; i < 20; i++ {
@@ -81,6 +82,7 @@ func NewServer(config *Config) *Server {
 
 	s := &Server{
 		config:            config,
+		configFile:        configFile,
 		clients:           make(map[string]*Client),
 		channels:          channels,
 		groups:            make(map[string]*GroupPacket),
