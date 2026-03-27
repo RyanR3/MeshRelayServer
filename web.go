@@ -805,6 +805,7 @@ type GitHubRelease struct {
 	Assets  []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
+		URL                string `json:"url"` // API URL for private repo downloads
 	} `json:"assets"`
 }
 
@@ -859,11 +860,17 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 
 	var binaryURL, webURL string
 	for _, asset := range release.Assets {
+		// Use API URL for private repos (requires token + Accept: application/octet-stream)
+		// Use browser URL for public repos
+		dlURL := asset.BrowserDownloadURL
+		if s.config.GitHubToken != "" && asset.URL != "" {
+			dlURL = asset.URL
+		}
 		if asset.Name == "ptt-server-linux" || asset.Name == "ptt-server" {
-			binaryURL = asset.BrowserDownloadURL
+			binaryURL = dlURL
 		}
 		if asset.Name == "web.tar.gz" {
-			webURL = asset.BrowserDownloadURL
+			webURL = dlURL
 		}
 	}
 
@@ -901,7 +908,8 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !strings.HasPrefix(req.BinaryURL, "https://github.com/RyanR3/MeshRelayServer/") {
+	if !strings.HasPrefix(req.BinaryURL, "https://github.com/RyanR3/MeshRelayServer/") &&
+		!strings.HasPrefix(req.BinaryURL, "https://api.github.com/repos/RyanR3/MeshRelayServer/") {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid download URL"})
 		return
