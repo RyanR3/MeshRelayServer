@@ -50,14 +50,21 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/users/{username}", s.handleDeleteUser).Methods("DELETE")
 	api.HandleFunc("/users/{username}/password", s.handleUpdatePassword).Methods("PUT")
 	api.HandleFunc("/auth/status", s.handleAuthStatus).Methods("GET")
-	api.HandleFunc("/auth/toggle", s.handleAuthToggle).Methods("POST")
+	api.HandleFunc("/auth/toggle", s.requireSuperAdmin(s.handleAuthToggle)).Methods("POST")
 	api.HandleFunc("/admin/change-password", s.handleAdminChangePassword).Methods("POST")
 	api.HandleFunc("/version", s.handleVersion).Methods("GET")
-	api.HandleFunc("/update/check", s.handleUpdateCheck).Methods("POST")
-	api.HandleFunc("/update/apply", s.handleUpdateApply).Methods("POST")
+	api.HandleFunc("/update/check", s.requireSuperAdmin(s.handleUpdateCheck)).Methods("POST")
+	api.HandleFunc("/update/apply", s.requireSuperAdmin(s.handleUpdateApply)).Methods("POST")
 	api.HandleFunc("/update/status", s.handleUpdateStatus).Methods("GET")
-	api.HandleFunc("/github-token", s.handleGetGitHubToken).Methods("GET")
-	api.HandleFunc("/github-token", s.handleSetGitHubToken).Methods("POST")
+	api.HandleFunc("/github-token", s.requireSuperAdmin(s.handleGetGitHubToken)).Methods("GET")
+	api.HandleFunc("/github-token", s.requireSuperAdmin(s.handleSetGitHubToken)).Methods("POST")
+
+	// Agency management (super_admin only)
+	api.HandleFunc("/agencies", s.requireSuperAdmin(s.handleGetAgencies)).Methods("GET")
+	api.HandleFunc("/agencies", s.requireSuperAdmin(s.handleCreateAgency)).Methods("POST")
+	api.HandleFunc("/agencies/{id}", s.requireSuperAdmin(s.handleUpdateAgency)).Methods("PUT")
+	api.HandleFunc("/agencies/{id}", s.requireSuperAdmin(s.handleDeleteAgency)).Methods("DELETE")
+	api.HandleFunc("/agencies/{id}/admin", s.requireSuperAdmin(s.handleCreateAgencyAdmin)).Methods("POST")
 
 	// WebSocket for real-time updates
 	r.HandleFunc("/ws", s.handleWebSocket)
@@ -129,10 +136,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create session
+	// Create session with role info
 	token := s.generateSessionToken()
 	s.mu.Lock()
-	s.webSessions[token] = req.Username
+	s.webSessions[token] = &WebSession{
+		Username: req.Username,
+		Role:     admin.Role,
+		AgencyID: admin.AgencyID,
+	}
 	s.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -143,10 +154,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   86400 * 7, // 7 days
 	})
 
-	log.Printf("Web login successful: %s from %s", req.Username, r.RemoteAddr)
+	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, admin.Role, r.RemoteAddr)
 	w.Header().Set("Content-Type", "application/json")
 	mustChange := admin.MustChangePassword
-	w.Write([]byte(fmt.Sprintf(`{"status":"ok","username":"%s","must_change_password":%t}`, req.Username, mustChange)))
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":               "ok",
+		"username":             req.Username,
+		"role":                 admin.Role,
+		"agency_id":            admin.AgencyID,
+		"must_change_password": mustChange,
+	})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -180,27 +197,73 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	username := s.webSessions[cookie.Value]
-	admin, exists := s.webAdmins[username]
+	session := s.webSessions[cookie.Value]
+	admin, exists := s.webAdmins[session.Username]
 	mustChange := exists && admin.MustChangePassword
 	s.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(fmt.Sprintf(`{"status":"ok","username":"%s","must_change_password":%t}`, username, mustChange)))
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":               "ok",
+		"username":             session.Username,
+		"role":                 session.Role,
+		"agency_id":            session.AgencyID,
+		"must_change_password": mustChange,
+	})
+}
+
+// getSession extracts the WebSession from the request cookie.
+func (s *Server) getSession(r *http.Request) *WebSession {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.webSessions[cookie.Value]
+}
+
+// requireSuperAdmin wraps a handler to require super_admin role.
+func (s *Server) requireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session := s.getSession(r)
+		if session == nil || session.Role != "super_admin" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"super admin access required"}`))
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.GetStats()
+	session := s.getSession(r)
+	agencyFilter := ""
+	if session != nil && session.Role == "agency_admin" {
+		agencyFilter = session.AgencyID
+	}
+	stats := s.GetStats(agencyFilter)
 	json.NewEncoder(w).Encode(stats)
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
-	clients := s.GetClients()
+	session := s.getSession(r)
+	agencyFilter := r.URL.Query().Get("agency")
+	if session != nil && session.Role == "agency_admin" {
+		agencyFilter = session.AgencyID
+	}
+	clients := s.GetClients(agencyFilter)
 	json.NewEncoder(w).Encode(clients)
 }
 
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	channels := s.GetChannels()
+	session := s.getSession(r)
+	agencyFilter := r.URL.Query().Get("agency")
+	if session != nil && session.Role == "agency_admin" {
+		agencyFilter = session.AgencyID
+	}
+	channels := s.GetChannels(agencyFilter)
 	json.NewEncoder(w).Encode(channels)
 }
 
@@ -263,12 +326,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
+	// WebSocket sends unfiltered data; the frontend filters by role
 	msg := WebSocketMessage{
 		Type: "update",
 		Data: map[string]interface{}{
-			"stats":    s.GetStats(),
-			"clients":  s.GetClients(),
-			"channels": s.GetChannels(),
+			"stats":    s.GetStats(""),
+			"clients":  s.GetClients(""),
+			"channels": s.GetChannels(""),
 		},
 	}
 
@@ -277,7 +341,12 @@ func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
 
 func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	users := s.GetUsers()
+	session := s.getSession(r)
+	agencyFilter := r.URL.Query().Get("agency")
+	if session != nil && session.Role == "agency_admin" {
+		agencyFilter = session.AgencyID
+	}
+	users := s.GetUsers(agencyFilter)
 	json.NewEncoder(w).Encode(users)
 }
 
@@ -285,6 +354,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		AgencyID string `json:"agency_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -300,7 +370,16 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.AddUser(req.Username, req.Password); err != nil {
+	// Determine agency based on role
+	session := s.getSession(r)
+	if session != nil && session.Role == "agency_admin" {
+		req.AgencyID = session.AgencyID
+	}
+	if req.AgencyID == "" {
+		req.AgencyID = "default"
+	}
+
+	if err := s.AddUser(req.Username, req.Password, req.AgencyID); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -309,12 +388,26 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf(`{"status":"ok","username":"%s"}`, req.Username)))
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username, "agency_id": req.AgencyID})
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
+
+	// Agency admins can only delete users in their agency
+	session := s.getSession(r)
+	if session != nil && session.Role == "agency_admin" {
+		s.mu.RLock()
+		user, exists := s.users[username]
+		s.mu.RUnlock()
+		if !exists || user.AgencyID != session.AgencyID {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"cannot delete users outside your agency"}`))
+			return
+		}
+	}
 
 	if err := s.RemoveUser(username); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -331,6 +424,20 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
+
+	// Agency admins can only edit users in their agency
+	session := s.getSession(r)
+	if session != nil && session.Role == "agency_admin" {
+		s.mu.RLock()
+		user, exists := s.users[username]
+		s.mu.RUnlock()
+		if !exists || user.AgencyID != session.AgencyID {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"cannot edit users outside your agency"}`))
+			return
+		}
+	}
 
 	var req struct {
 		Password string `json:"password"`
@@ -391,10 +498,14 @@ func (s *Server) handleAuthToggle(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Request) {
 	// Get current user from session
-	cookie, _ := r.Cookie("session")
-	s.mu.RLock()
-	username := s.webSessions[cookie.Value]
-	s.mu.RUnlock()
+	session := s.getSession(r)
+	if session == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"not authenticated"}`))
+		return
+	}
+	username := session.Username
 
 	var req struct {
 		NewPassword string `json:"new_password"`
@@ -436,6 +547,252 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	log.Printf("Web admin password changed for: %s", username)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
+}
+
+// --- Agency Management ---
+
+func (s *Server) handleGetAgencies(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	agencies := make([]map[string]interface{}, 0, len(s.agencies))
+	for _, agency := range s.agencies {
+		// Count users in this agency
+		userCount := 0
+		for _, user := range s.users {
+			if user.AgencyID == agency.ID {
+				userCount++
+			}
+		}
+		// Find agency admin
+		adminUsername := ""
+		for _, admin := range s.webAdmins {
+			if admin.AgencyID == agency.ID && admin.Role == "agency_admin" {
+				adminUsername = admin.Username
+				break
+			}
+		}
+		agencies = append(agencies, map[string]interface{}{
+			"id":           agency.ID,
+			"name":         agency.Name,
+			"created_at":   agency.CreatedAt,
+			"max_users":    agency.MaxUsers,
+			"max_channels": agency.MaxChannels,
+			"user_count":   userCount,
+			"admin":        adminUsername,
+		})
+	}
+	json.NewEncoder(w).Encode(agencies)
+}
+
+func (s *Server) handleCreateAgency(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		MaxUsers    int    `json:"max_users"`
+		MaxChannels int    `json:"max_channels"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	if req.ID == "" || req.Name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"id and name required"}`))
+		return
+	}
+
+	if req.MaxUsers <= 0 {
+		req.MaxUsers = 100
+	}
+	if req.MaxChannels <= 0 {
+		req.MaxChannels = 20
+	}
+
+	s.mu.Lock()
+	if _, exists := s.agencies[req.ID]; exists {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"agency already exists"}`))
+		return
+	}
+
+	s.agencies[req.ID] = &Agency{
+		ID:          req.ID,
+		Name:        req.Name,
+		CreatedAt:   time.Now().Format(time.RFC3339),
+		MaxUsers:    req.MaxUsers,
+		MaxChannels: req.MaxChannels,
+	}
+	s.ensureAgencyChannels(req.ID)
+	s.mu.Unlock()
+
+	if err := s.saveAgencies(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf(`{"error":"failed to save: %s"}`, err.Error())))
+		return
+	}
+
+	log.Printf("Created agency: %s (%s)", req.Name, req.ID)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": req.ID})
+}
+
+func (s *Server) handleUpdateAgency(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	var req struct {
+		Name        string `json:"name"`
+		MaxUsers    int    `json:"max_users"`
+		MaxChannels int    `json:"max_channels"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	s.mu.Lock()
+	agency, exists := s.agencies[id]
+	if !exists {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"agency not found"}`))
+		return
+	}
+
+	if req.Name != "" {
+		agency.Name = req.Name
+	}
+	if req.MaxUsers > 0 {
+		agency.MaxUsers = req.MaxUsers
+	}
+	if req.MaxChannels > 0 {
+		agency.MaxChannels = req.MaxChannels
+	}
+	s.mu.Unlock()
+
+	if err := s.saveAgencies(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf(`{"error":"failed to save: %s"}`, err.Error())))
+		return
+	}
+
+	log.Printf("Updated agency: %s", id)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleDeleteAgency(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if id == "default" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"cannot delete default agency"}`))
+		return
+	}
+
+	s.mu.Lock()
+	if _, exists := s.agencies[id]; !exists {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"agency not found"}`))
+		return
+	}
+
+	// Check if agency has users
+	for _, user := range s.users {
+		if user.AgencyID == id {
+			s.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"agency still has users, remove them first"}`))
+			return
+		}
+	}
+
+	// Remove agency channels
+	for key := range s.channels {
+		if strings.HasPrefix(key, id+":") {
+			delete(s.channels, key)
+		}
+	}
+
+	// Remove agency admin(s)
+	for username, admin := range s.webAdmins {
+		if admin.AgencyID == id {
+			delete(s.webAdmins, username)
+		}
+	}
+
+	delete(s.agencies, id)
+	s.mu.Unlock()
+
+	s.saveAgencies()
+	s.saveWebAdmins()
+
+	log.Printf("Deleted agency: %s", id)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	agencyID := vars["id"]
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	if req.Username == "" || req.Password == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"username and password required"}`))
+		return
+	}
+
+	s.mu.Lock()
+	if _, exists := s.agencies[agencyID]; !exists {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"agency not found"}`))
+		return
+	}
+
+	if _, exists := s.webAdmins[req.Username]; exists {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"admin username already exists"}`))
+		return
+	}
+
+	s.webAdmins[req.Username] = &WebAdmin{
+		Username:           req.Username,
+		PasswordHash:       hashPassword(req.Password),
+		Role:               "agency_admin",
+		AgencyID:           agencyID,
+		MustChangePassword: true,
+	}
+	s.mu.Unlock()
+
+	if err := s.saveWebAdmins(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf(`{"error":"failed to save: %s"}`, err.Error())))
+		return
+	}
+
+	log.Printf("Created agency admin: %s for agency %s", req.Username, agencyID)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username})
 }
 
 // --- Update Management ---

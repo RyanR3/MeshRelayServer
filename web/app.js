@@ -5,6 +5,11 @@ let reconnectInterval = null;
 // Currently editing user
 let editingUsername = '';
 
+// Current session info
+let currentRole = '';
+let currentAgencyId = '';
+let agenciesList = []; // cached for dropdowns
+
 // --- Page Navigation ---
 
 function navigateTo(pageName) {
@@ -19,12 +24,14 @@ function navigateTo(pageName) {
     });
 
     // Refresh data when switching to certain pages
-    if (pageName === 'users') {
+    if (pageName === 'agencies') {
+        fetchAgencies();
+    } else if (pageName === 'users') {
         fetchUsers();
     } else if (pageName === 'settings') {
         fetchAuthStatus();
         fetchVersionInfo();
-        fetchGitHubTokenStatus();
+        if (currentRole === 'super_admin') fetchGitHubTokenStatus();
     }
 }
 
@@ -86,6 +93,18 @@ function updateConnectionStatus(connected) {
 
 // Update all dashboard elements
 function updateDashboard(data) {
+    // For agency admins, filter WebSocket data to their agency only
+    if (currentRole === 'agency_admin' && currentAgencyId) {
+        if (data.clients) {
+            data.clients = data.clients.filter(c => c.agency_id === currentAgencyId);
+        }
+        if (data.channels) {
+            data.channels = data.channels.filter(c => c.agency_id === currentAgencyId);
+        }
+        if (data.stats) {
+            data.stats.total_clients = data.clients ? data.clients.length : 0;
+        }
+    }
     updateStats(data.stats);
     updateChannels(data.channels);
     updateClients(data.clients);
@@ -119,12 +138,15 @@ function updateChannels(channels) {
         return;
     }
 
-    channelList.innerHTML = activeChannels.map(channel => `
-        <div class="channel-item">
-            <div class="channel-name">Channel ${channel.id}</div>
-            <div class="channel-count">${channel.client_count} ${channel.client_count === 1 ? 'client' : 'clients'}</div>
-        </div>
-    `).join('');
+    channelList.innerHTML = activeChannels.map(channel => {
+        const agencyLabel = currentRole === 'super_admin' && channel.agency_id ? ` <span class="agency-badge">${escapeHtml(channel.agency_id)}</span>` : '';
+        return `
+            <div class="channel-item">
+                <div class="channel-name">Channel ${channel.id}${agencyLabel}</div>
+                <div class="channel-count">${channel.client_count} ${channel.client_count === 1 ? 'client' : 'clients'}</div>
+            </div>
+        `;
+    }).join('');
 }
 
 // Update clients list
@@ -141,10 +163,11 @@ function updateClients(clients) {
 
     clientList.innerHTML = clients.map(client => {
         const connectedTime = timeSince(new Date(client.connected_at));
+        const agencyLabel = currentRole === 'super_admin' && client.agency_id ? ` <span class="agency-badge">${escapeHtml(client.agency_id)}</span>` : '';
         return `
             <div class="client-item">
                 <div class="client-username">
-                    ${escapeHtml(client.username)}
+                    ${escapeHtml(client.username)}${agencyLabel}
                     <span class="client-channel">Ch ${client.channel}</span>
                 </div>
                 <div class="client-info">
@@ -268,7 +291,14 @@ function fetchAuthStatus() {
 }
 
 function fetchUsers() {
-    fetch('/api/users')
+    let url = '/api/users';
+    if (currentRole === 'super_admin') {
+        const filter = document.getElementById('users-agency-filter');
+        if (filter && filter.value) {
+            url += '?agency=' + encodeURIComponent(filter.value);
+        }
+    }
+    fetch(url)
         .then(r => r.json())
         .then(users => renderUsersTable(users))
         .catch(err => console.error('Error fetching users:', err));
@@ -277,24 +307,26 @@ function fetchUsers() {
 function renderUsersTable(users) {
     const tbody = document.getElementById('users-table-body');
     const emptyState = document.getElementById('users-empty');
-    const table = document.querySelector('.data-table');
+    const table = document.querySelector('#page-users .data-table');
 
     if (!users || users.length === 0) {
         tbody.innerHTML = '';
-        table.style.display = 'none';
+        if (table) table.style.display = 'none';
         emptyState.style.display = 'block';
         return;
     }
 
-    table.style.display = 'table';
+    if (table) table.style.display = 'table';
     emptyState.style.display = 'none';
 
     tbody.innerHTML = users.map(user => {
         const created = user.created_at ? new Date(user.created_at).toLocaleString() : 'Unknown';
         const safeUsername = escapeHtml(user.username);
+        const agencyCol = currentRole === 'super_admin' ? `<td><span class="agency-badge">${escapeHtml(user.agency_id || 'default')}</span></td>` : '';
         return `
             <tr>
                 <td><strong>${safeUsername}</strong></td>
+                ${agencyCol}
                 <td>${created}</td>
                 <td>
                     <div class="actions-cell">
@@ -313,6 +345,10 @@ function renderUsersTable(users) {
 function showCreateUserModal() {
     document.getElementById('newUsername').value = '';
     document.getElementById('newPassword').value = '';
+    // Populate agency dropdown for super admins
+    if (currentRole === 'super_admin') {
+        populateAgencyDropdown('newUserAgency');
+    }
     showModal('createUserModal');
     document.getElementById('newUsername').focus();
 }
@@ -328,10 +364,18 @@ function createUser() {
         return;
     }
 
+    const body = { username, password };
+    if (currentRole === 'super_admin') {
+        const agencySelect = document.getElementById('newUserAgency');
+        if (agencySelect && agencySelect.value) {
+            body.agency_id = agencySelect.value;
+        }
+    }
+
     fetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify(body)
     })
     .then(r => r.text().then(text => ({ status: r.status, ok: r.ok, body: text })))
     .then(({ status, ok, body }) => {
@@ -523,15 +567,42 @@ function checkSession() {
         })
         .then(data => {
             if (!data) return false;
+            currentRole = data.role || 'super_admin';
+            currentAgencyId = data.agency_id || '';
             if (data.must_change_password) {
                 showForcePasswordChange();
             }
+            applyRoleUI();
             return true;
         })
         .catch(() => {
             window.location.href = '/login.html';
             return false;
         });
+}
+
+// Show/hide elements based on role
+function applyRoleUI() {
+    const isSuperAdmin = currentRole === 'super_admin';
+
+    // Show/hide super-admin-only elements
+    document.querySelectorAll('.super-admin-only').forEach(el => {
+        el.style.display = isSuperAdmin ? '' : 'none';
+    });
+
+    // Hide settings panels that agency admins shouldn't see
+    if (!isSuperAdmin) {
+        // Hide update, GitHub, and auth panels for agency admins
+        document.querySelectorAll('#page-settings .panel').forEach((panel, i) => {
+            // Keep only a basic view for agency admins
+            if (i < 3) panel.style.display = 'none'; // version, github, auth panels
+        });
+        // Hide update banners and buttons
+        const dashUpdateBtn = document.getElementById('dashboard-check-updates-btn');
+        if (dashUpdateBtn) dashUpdateBtn.style.display = 'none';
+        const dashVersion = document.getElementById('dashboard-version');
+        if (dashVersion) dashVersion.style.display = 'none';
+    }
 }
 
 function showForcePasswordChange() {
@@ -583,6 +654,177 @@ function logout() {
         .finally(() => {
             window.location.href = '/login.html';
         });
+}
+
+// --- Agency Management ---
+
+function fetchAgencies() {
+    fetch('/api/agencies')
+        .then(r => r.json())
+        .then(agencies => {
+            agenciesList = agencies;
+            renderAgenciesTable(agencies);
+            populateAgencyFilters();
+        })
+        .catch(err => console.error('Error fetching agencies:', err));
+}
+
+function renderAgenciesTable(agencies) {
+    const tbody = document.getElementById('agencies-table-body');
+    const emptyState = document.getElementById('agencies-empty');
+    const table = document.getElementById('agencies-table');
+
+    if (!agencies || agencies.length === 0) {
+        tbody.innerHTML = '';
+        table.style.display = 'none';
+        emptyState.style.display = 'block';
+        return;
+    }
+
+    table.style.display = 'table';
+    emptyState.style.display = 'none';
+
+    tbody.innerHTML = agencies.map(agency => {
+        const safeName = escapeHtml(agency.name);
+        const safeId = escapeHtml(agency.id);
+        const adminText = agency.admin ? escapeHtml(agency.admin) : '<em>None</em>';
+        const isDefault = agency.id === 'default';
+        return `
+            <tr>
+                <td><strong>${safeName}</strong></td>
+                <td><code>${safeId}</code></td>
+                <td>${agency.user_count || 0}</td>
+                <td>${adminText}</td>
+                <td>
+                    <div class="actions-cell">
+                        ${!agency.admin ? `<button class="btn-action edit" onclick="showCreateAgencyAdminModal('${safeId}', '${safeName}')">Add Admin</button>` : ''}
+                        ${!isDefault ? `<button class="btn-action delete" onclick="deleteAgency('${safeId}')">Delete</button>` : ''}
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function populateAgencyFilters() {
+    // Populate the users page filter dropdown
+    const filter = document.getElementById('users-agency-filter');
+    if (filter && agenciesList) {
+        const currentVal = filter.value;
+        filter.innerHTML = '<option value="">All Agencies</option>';
+        agenciesList.forEach(a => {
+            filter.innerHTML += `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`;
+        });
+        filter.value = currentVal;
+    }
+}
+
+function populateAgencyDropdown(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    // Fetch fresh list
+    fetch('/api/agencies')
+        .then(r => r.json())
+        .then(agencies => {
+            agenciesList = agencies;
+            select.innerHTML = '<option value="">Select Agency</option>';
+            agencies.forEach(a => {
+                select.innerHTML += `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`;
+            });
+        })
+        .catch(() => {});
+}
+
+function showCreateAgencyModal() {
+    document.getElementById('newAgencyName').value = '';
+    document.getElementById('newAgencyId').value = '';
+    document.getElementById('newAgencyMaxUsers').value = '100';
+    document.getElementById('newAgencyMaxChannels').value = '20';
+    showModal('createAgencyModal');
+    document.getElementById('newAgencyName').focus();
+}
+
+function createAgency() {
+    const name = document.getElementById('newAgencyName').value.trim();
+    let id = document.getElementById('newAgencyId').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    const maxUsers = parseInt(document.getElementById('newAgencyMaxUsers').value) || 100;
+    const maxChannels = parseInt(document.getElementById('newAgencyMaxChannels').value) || 20;
+
+    if (!name || !id) {
+        showStatus('agency-status', 'Name and ID are required', 'warning');
+        return;
+    }
+
+    fetch('/api/agencies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, name, max_users: maxUsers, max_channels: maxChannels })
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed');
+        closeModal('createAgencyModal');
+        showStatus('agency-status', `Agency "${name}" created`, 'success');
+        addLog(`Agency "${name}" created`, 'success');
+        fetchAgencies();
+    })
+    .catch(err => {
+        showStatus('agency-status', `Failed: ${err.message}`, 'error');
+    });
+}
+
+let agencyAdminAgencyId = '';
+
+function showCreateAgencyAdminModal(agencyId, agencyName) {
+    agencyAdminAgencyId = agencyId;
+    document.getElementById('agencyAdminAgencyName').textContent = agencyName;
+    document.getElementById('agencyAdminUsername').value = '';
+    document.getElementById('agencyAdminPassword').value = '';
+    showModal('createAgencyAdminModal');
+    document.getElementById('agencyAdminUsername').focus();
+}
+
+function createAgencyAdmin() {
+    const username = document.getElementById('agencyAdminUsername').value.trim();
+    const password = document.getElementById('agencyAdminPassword').value;
+
+    if (!username || !password) {
+        showStatus('agency-status', 'Username and password required', 'warning');
+        return;
+    }
+
+    fetch(`/api/agencies/${encodeURIComponent(agencyAdminAgencyId)}/admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed');
+        closeModal('createAgencyAdminModal');
+        showStatus('agency-status', `Admin "${username}" created for agency`, 'success');
+        addLog(`Agency admin "${username}" created`, 'success');
+        fetchAgencies();
+    })
+    .catch(err => {
+        showStatus('agency-status', `Failed: ${err.message}`, 'error');
+    });
+}
+
+function deleteAgency(agencyId) {
+    if (!confirm(`Delete agency "${agencyId}"? All users must be removed first.`)) return;
+
+    fetch(`/api/agencies/${encodeURIComponent(agencyId)}`, { method: 'DELETE' })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed');
+        showStatus('agency-status', `Agency "${agencyId}" deleted`, 'success');
+        addLog(`Agency "${agencyId}" deleted`, 'success');
+        fetchAgencies();
+    })
+    .catch(err => {
+        showStatus('agency-status', `Failed: ${err.message}`, 'error');
+    });
 }
 
 // --- Server Update ---
@@ -898,6 +1140,9 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchAuthStatus();
         fetchUsers();
         fetchVersionInfo();
+        if (currentRole === 'super_admin') {
+            fetchAgencies();
+        }
 
         // Set up navigation click handlers
         document.querySelectorAll('.nav-item').forEach(item => {
