@@ -32,6 +32,10 @@
                     <span class="nav-icon">&#x1F465;</span>
                     <span>Users</span>
                 </li>
+                <li class="nav-item super-admin-only" data-page="mutual-aid">
+                    <span class="nav-icon">&#x1F91D;</span>
+                    <span>Mutual Aid</span>
+                </li>
                 <li class="nav-item" data-page="settings">
                     <span class="nav-icon">&#x2699;</span>
                     <span>Settings</span>
@@ -193,6 +197,36 @@
                 </div>
             </div>
 
+            <!-- Mutual Aid Page (super_admin only) -->
+            <div class="page" id="page-mutual-aid">
+                <div class="page-header">
+                    <h2>Mutual Aid</h2>
+                    <button class="btn-create" onclick="showCreateMutualAidModal()">+ Create Link</button>
+                </div>
+
+                <div id="mutual-aid-status" class="status-message" style="display: none;"></div>
+
+                <table class="data-table" id="mutual-aid-table">
+                    <thead>
+                        <tr>
+                            <th>Agency A</th>
+                            <th>Agency B</th>
+                            <th>Channel</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="mutual-aid-table-body">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+                <div id="mutual-aid-empty" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">&#x1F91D;</div>
+                    <div>No mutual aid links</div>
+                </div>
+            </div>
+
             <!-- Settings Page -->
             <div class="page" id="page-settings">
                 <div class="page-header">
@@ -351,6 +385,28 @@
             <input type="password" id="adminConfirmPassword" placeholder="Confirm Password">
             <div class="modal-actions">
                 <button class="btn-primary" onclick="changeAdminPassword()">Change Password</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Mutual Aid Modal -->
+    <div id="createMutualAidModal" class="modal">
+        <div class="modal-content">
+            <h2>Create Mutual Aid Link</h2>
+            <p class="modal-subtitle">Temporarily bridge two agencies on a shared channel</p>
+            <label class="modal-field-label">Agency A</label>
+            <select id="mutualAidAgencyA">
+                <option value="">Select Agency</option>
+            </select>
+            <label class="modal-field-label">Agency B</label>
+            <select id="mutualAidAgencyB">
+                <option value="">Select Agency</option>
+            </select>
+            <label class="modal-field-label">Shared Channel (0-19)</label>
+            <input type="number" id="mutualAidChannel" placeholder="Channel" value="0" min="0" max="19">
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="createMutualAidLink()">Create Link</button>
+                <button class="btn-secondary" onclick="closeModal('createMutualAidModal')">Cancel</button>
             </div>
         </div>
     </div>

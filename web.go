@@ -3,6 +3,8 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,6 +68,11 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/agencies/{id}", s.requireSuperAdmin(s.handleUpdateAgency)).Methods("PUT")
 	api.HandleFunc("/agencies/{id}", s.requireSuperAdmin(s.handleDeleteAgency)).Methods("DELETE")
 	api.HandleFunc("/agencies/{id}/admin", s.requireSuperAdmin(s.handleCreateAgencyAdmin)).Methods("POST")
+
+	// Mutual Aid management (super_admin only)
+	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleGetMutualAid)).Methods("GET")
+	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
+	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
 	// WebSocket for real-time updates
 	r.HandleFunc("/ws", s.handleWebSocket)
@@ -876,6 +883,153 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("Created agency admin: %s for agency %s", req.Username, agencyID)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username})
+}
+
+// --- Mutual Aid Management ---
+
+func (s *Server) handleGetMutualAid(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	links := make([]map[string]interface{}, 0, len(s.mutualAidLinks))
+	for _, link := range s.mutualAidLinks {
+		agencyAName := link.AgencyA
+		agencyBName := link.AgencyB
+		if a, ok := s.agencies[link.AgencyA]; ok {
+			agencyAName = a.Name
+		}
+		if b, ok := s.agencies[link.AgencyB]; ok {
+			agencyBName = b.Name
+		}
+		links = append(links, map[string]interface{}{
+			"id":            link.ID,
+			"agency_a":      link.AgencyA,
+			"agency_b":      link.AgencyB,
+			"agency_a_name": agencyAName,
+			"agency_b_name": agencyBName,
+			"channel":       link.Channel,
+			"created_at":    link.CreatedAt,
+			"created_by":    link.CreatedBy,
+			"active":        link.Active,
+		})
+	}
+	json.NewEncoder(w).Encode(links)
+}
+
+func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		AgencyA string `json:"agency_a"`
+		AgencyB string `json:"agency_b"`
+		Channel int    `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	if req.AgencyA == "" || req.AgencyB == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"both agencies are required"}`))
+		return
+	}
+
+	if req.AgencyA == req.AgencyB {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"cannot link an agency to itself"}`))
+		return
+	}
+
+	if req.Channel < 0 || req.Channel > 19 {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"channel must be between 0 and 19"}`))
+		return
+	}
+
+	session := s.getSession(r)
+
+	s.mu.Lock()
+	// Verify agencies exist
+	if _, ok := s.agencies[req.AgencyA]; !ok {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"agency A not found"}`))
+		return
+	}
+	if _, ok := s.agencies[req.AgencyB]; !ok {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"agency B not found"}`))
+		return
+	}
+
+	// Check for existing active link between these agencies on this channel
+	for _, link := range s.mutualAidLinks {
+		if link.Active && link.Channel == req.Channel &&
+			((link.AgencyA == req.AgencyA && link.AgencyB == req.AgencyB) ||
+				(link.AgencyA == req.AgencyB && link.AgencyB == req.AgencyA)) {
+			s.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"active link already exists between these agencies on this channel"}`))
+			return
+		}
+	}
+
+	// Generate link ID
+	idBytes := make([]byte, 8)
+	rand.Read(idBytes)
+	linkID := hex.EncodeToString(idBytes)
+
+	createdBy := ""
+	if session != nil {
+		createdBy = session.Username
+	}
+
+	link := &MutualAidLink{
+		ID:        linkID,
+		AgencyA:   req.AgencyA,
+		AgencyB:   req.AgencyB,
+		Channel:   req.Channel,
+		CreatedAt: time.Now().Format(time.RFC3339),
+		CreatedBy: createdBy,
+		Active:    true,
+	}
+	s.mutualAidLinks[linkID] = link
+	s.mu.Unlock()
+
+	if err := s.saveMutualAid(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf(`{"error":"failed to save: %s"}`, err.Error())))
+		return
+	}
+
+	log.Printf("Created mutual aid link: %s <-> %s on channel %d (by %s)", req.AgencyA, req.AgencyB, req.Channel, createdBy)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": linkID})
+}
+
+func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	s.mu.Lock()
+	link, exists := s.mutualAidLinks[id]
+	if !exists {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"mutual aid link not found"}`))
+		return
+	}
+
+	delete(s.mutualAidLinks, id)
+	s.mu.Unlock()
+
+	s.saveMutualAid()
+
+	log.Printf("Deleted mutual aid link: %s <-> %s on channel %d", link.AgencyA, link.AgencyB, link.Channel)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // --- Update Management ---

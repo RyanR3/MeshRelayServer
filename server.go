@@ -46,6 +46,16 @@ type UserAccount struct {
 	CreatedAt    string `json:"created_at"`
 }
 
+type MutualAidLink struct {
+	ID        string `json:"id"`
+	AgencyA   string `json:"agency_a"`
+	AgencyB   string `json:"agency_b"`
+	Channel   int    `json:"channel"`
+	CreatedAt string `json:"created_at"`
+	CreatedBy string `json:"created_by"`
+	Active    bool   `json:"active"`
+}
+
 type UpdateStatus struct {
 	InProgress bool   `json:"in_progress"`
 	Stage      string `json:"stage"`
@@ -73,6 +83,7 @@ type Server struct {
 	authenticatedAddrs map[string]bool           // addr string -> authenticated
 	webAdmins          map[string]*WebAdmin      // username -> admin account (web dashboard)
 	webSessions        map[string]*WebSession    // session token -> session
+	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
 	mu                sync.RWMutex
 	shutdown          chan struct{}
 	stats             *Stats
@@ -119,6 +130,7 @@ func NewServer(config *Config, configFile string) *Server {
 		authenticatedAddrs: make(map[string]bool),
 		webAdmins:          make(map[string]*WebAdmin),
 		webSessions:        make(map[string]*WebSession),
+		mutualAidLinks:     make(map[string]*MutualAidLink),
 		shutdown:          make(chan struct{}),
 		stats: &Stats{
 			StartTime: time.Now(),
@@ -129,6 +141,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadAgencies()
 	s.loadUsers()
 	s.loadWebAdmins()
+	s.loadMutualAid()
 
 	// Migrate to agency model if needed (creates default agency, backfills users/admins)
 	s.migrateToAgencies()
@@ -240,21 +253,36 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		return
 	}
 
-	// Broadcast audio to all clients in the same channel (except sender)
-	channel.mu.RLock()
-	defer channel.mu.RUnlock()
-
 	// Prepend packet type to the serialized data
 	audioData := append([]byte{PacketTypeAudio}, SerializeAudioPacket(packet)...)
 
+	// Broadcast audio to all clients in the same channel (except sender)
+	channel.mu.RLock()
+	relayCount := 0
 	for _, otherClient := range channel.Clients {
 		if otherClient.Username != client.Username {
 			s.sendPacket(audioData, otherClient.Addr)
+			relayCount++
+		}
+	}
+	channel.mu.RUnlock()
+
+	// Check for mutual aid partner — also relay to partner agency's same channel
+	partnerAgency := s.getMutualAidPartner(client.AgencyID, client.Channel)
+	if partnerAgency != "" {
+		partnerKey := channelKey(partnerAgency, client.Channel)
+		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
+			partnerChannel.mu.RLock()
+			for _, otherClient := range partnerChannel.Clients {
+				s.sendPacket(audioData, otherClient.Addr)
+				relayCount++
+			}
+			partnerChannel.mu.RUnlock()
 		}
 	}
 
 	log.Printf("Relayed audio from %s [%s] to %d clients in channel %d (%d bytes)",
-		packet.Username, client.AgencyID, len(channel.Clients)-1, client.Channel, len(packet.AudioData))
+		packet.Username, client.AgencyID, relayCount, client.Channel, len(packet.AudioData))
 }
 
 func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UDPAddr) {
@@ -277,10 +305,12 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 		return
 	}
 
-	// Enforce same-agency isolation
+	// Enforce same-agency isolation (unless mutual aid link is active)
 	if sender.AgencyID != recipient.AgencyID {
-		log.Printf("Direct audio blocked: %s [%s] -> %s [%s] (cross-agency)", packet.Sender, sender.AgencyID, packet.Recipient, recipient.AgencyID)
-		return
+		if !s.hasMutualAidLink(sender.AgencyID, recipient.AgencyID) {
+			log.Printf("Direct audio blocked: %s [%s] -> %s [%s] (cross-agency)", packet.Sender, sender.AgencyID, packet.Recipient, recipient.AgencyID)
+			return
+		}
 	}
 
 	// Update sender's last heartbeat
@@ -324,19 +354,34 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 		return
 	}
 
-	// Broadcast message to all clients in the same channel
-	channel.mu.RLock()
-	defer channel.mu.RUnlock()
-
 	// Prepend packet type to the serialized data
 	textData := append([]byte{PacketTypeText}, SerializeTextPacket(packet)...)
 
+	// Broadcast message to all clients in the same channel
+	channel.mu.RLock()
+	relayCount := 0
 	for _, otherClient := range channel.Clients {
 		s.sendPacket(textData, otherClient.Addr)
+		relayCount++
+	}
+	channel.mu.RUnlock()
+
+	// Check for mutual aid partner — also relay to partner agency's same channel
+	partnerAgency := s.getMutualAidPartner(client.AgencyID, client.Channel)
+	if partnerAgency != "" {
+		partnerKey := channelKey(partnerAgency, client.Channel)
+		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
+			partnerChannel.mu.RLock()
+			for _, otherClient := range partnerChannel.Clients {
+				s.sendPacket(textData, otherClient.Addr)
+				relayCount++
+			}
+			partnerChannel.mu.RUnlock()
+		}
 	}
 
 	log.Printf("Relayed text message from %s [%s] to %d clients in channel %d",
-		packet.Sender, client.AgencyID, len(channel.Clients)-1, client.Channel)
+		packet.Sender, client.AgencyID, relayCount-1, client.Channel)
 }
 
 func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
@@ -375,6 +420,20 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		if otherClient.Username != packet.Username {
 			s.sendPacket(heartbeatData, otherClient.Addr)
 			relayCount++
+		}
+	}
+
+	// Check for mutual aid partner — also relay heartbeat to partner agency's same channel
+	partnerAgency := s.getMutualAidPartner(client.AgencyID, client.Channel)
+	if partnerAgency != "" {
+		partnerKey := channelKey(partnerAgency, client.Channel)
+		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
+			partnerChannel.mu.RLock()
+			for _, otherClient := range partnerChannel.Clients {
+				s.sendPacket(heartbeatData, otherClient.Addr)
+				relayCount++
+			}
+			partnerChannel.mu.RUnlock()
 		}
 	}
 
@@ -1175,4 +1234,81 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 
 	log.Printf("Created user account: %s (agency: %s, role: %s)", username, agencyID, role)
 	return nil
+}
+
+// --- Mutual Aid ---
+
+func (s *Server) loadMutualAid() {
+	file, err := os.Open(s.config.MutualAidFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("No mutual aid file found, starting with empty links")
+			return
+		}
+		log.Printf("Error loading mutual aid file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	var links []*MutualAidLink
+	if err := json.NewDecoder(file).Decode(&links); err != nil {
+		log.Printf("Error parsing mutual aid file: %v", err)
+		return
+	}
+
+	for _, link := range links {
+		s.mutualAidLinks[link.ID] = link
+	}
+	log.Printf("Loaded %d mutual aid links", len(s.mutualAidLinks))
+}
+
+func (s *Server) saveMutualAid() error {
+	links := make([]*MutualAidLink, 0, len(s.mutualAidLinks))
+	for _, link := range s.mutualAidLinks {
+		links = append(links, link)
+	}
+
+	file, err := os.Create(s.config.MutualAidFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(links)
+}
+
+// getMutualAidPartner returns the partner agencyID if an active mutual aid link
+// exists for the given agency and channel. Returns "" if no link.
+func (s *Server) getMutualAidPartner(agencyID string, channel int) string {
+	for _, link := range s.mutualAidLinks {
+		if !link.Active {
+			continue
+		}
+		if link.Channel != channel {
+			continue
+		}
+		if link.AgencyA == agencyID {
+			return link.AgencyB
+		}
+		if link.AgencyB == agencyID {
+			return link.AgencyA
+		}
+	}
+	return ""
+}
+
+// hasMutualAidLink checks if two agencies have an active mutual aid link on any channel.
+func (s *Server) hasMutualAidLink(agencyA, agencyB string) bool {
+	for _, link := range s.mutualAidLinks {
+		if !link.Active {
+			continue
+		}
+		if (link.AgencyA == agencyA && link.AgencyB == agencyB) ||
+			(link.AgencyA == agencyB && link.AgencyB == agencyA) {
+			return true
+		}
+	}
+	return false
 }
