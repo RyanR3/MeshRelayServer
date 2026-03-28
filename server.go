@@ -403,8 +403,15 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	s.mu.RUnlock()
 
 	if client == nil {
+		// Client not registered (e.g. after server restart) — auto-register them
+		// by treating this as a join on channel 0
+		log.Printf("Heartbeat from unregistered client %s — auto-registering", packet.Username)
+		s.handleJoin(&JoinPacket{Username: packet.Username, Channel: 0}, addr)
 		return
 	}
+
+	// Update address in case it changed (e.g. mobile network switch)
+	client.Addr = addr
 
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
@@ -1458,13 +1465,18 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 	}
 
 	count := 0
+	skipped := 0
 	for _, client := range s.clients {
-		log.Printf("Mutual aid notify check: client %s [agency=%s] agencyMatch=%v", client.Username, client.AgencyID, agencySet[client.AgencyID])
 		if !agencySet[client.AgencyID] {
+			skipped++
 			continue
 		}
 		s.sendPacket(pkt, client.Addr)
 		count++
+		log.Printf("Mutual aid notify: sent to %s [%s]", client.Username, client.AgencyID)
+	}
+	if skipped > 0 {
+		log.Printf("Mutual aid notify: skipped %d clients not in target agencies %v", skipped, agencies)
 	}
 
 	action := "added"
