@@ -278,15 +278,23 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 
 	// Check for mutual aid partners — also relay to partner agencies' same channel
 	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
+	if len(partners) > 0 {
+		log.Printf("Audio mutual aid: %s [%s] ch %d has partners %v", packet.Username, client.AgencyID, client.Channel, partners)
+	}
 	for _, partnerAgency := range partners {
 		partnerKey := channelKey(partnerAgency, client.Channel)
-		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
+		partnerChannel := s.channels[partnerKey]
+		if partnerChannel != nil {
 			partnerChannel.mu.RLock()
+			partnerCount := len(partnerChannel.Clients)
 			for _, otherClient := range partnerChannel.Clients {
 				s.sendPacket(audioData, otherClient.Addr)
 				relayCount++
 			}
 			partnerChannel.mu.RUnlock()
+			log.Printf("Audio mutual aid: relayed to %d clients in %s", partnerCount, partnerKey)
+		} else {
+			log.Printf("Audio mutual aid: channel %s NOT FOUND", partnerKey)
 		}
 	}
 
