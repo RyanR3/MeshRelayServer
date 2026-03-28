@@ -324,7 +324,8 @@ function renderUsersTable(users) {
     tbody.innerHTML = users.map(user => {
         const created = user.created_at ? new Date(user.created_at).toLocaleString() : 'Unknown';
         const safeUsername = escapeHtml(user.username);
-        const agencyCol = currentRole === 'super_admin' ? `<td><span class="agency-badge">${escapeHtml(user.agency_id || 'default')}</span></td>` : '';
+        const safeAgency = escapeHtml(user.agency_id || 'default');
+        const agencyCol = currentRole === 'super_admin' ? `<td><span class="agency-badge">${safeAgency}</span></td>` : '';
         const role = user.role || 'user';
         const superAdminOpt = currentRole === 'super_admin' ? `<option value="super_admin" ${role === 'super_admin' ? 'selected' : ''}>Super Admin</option>` : '';
         return `
@@ -332,7 +333,7 @@ function renderUsersTable(users) {
                 <td><strong>${safeUsername}</strong></td>
                 ${agencyCol}
                 <td>
-                    <select class="role-select" onchange="updateUserRole('${safeUsername}', this.value)" data-current="${role}">
+                    <select class="role-select" onchange="updateUserRole('${safeUsername}', this.value, '${safeAgency}')" data-current="${role}">
                         <option value="user" ${role === 'user' ? 'selected' : ''}>User</option>
                         <option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin</option>
                         ${superAdminOpt}
@@ -342,8 +343,8 @@ function renderUsersTable(users) {
                 <td>
                     <div class="actions-cell">
                         <button class="btn-action qr" onclick="showQRCode('${safeUsername}')">QR Code</button>
-                        <button class="btn-action edit" onclick="showEditPassword('${safeUsername}')">Edit</button>
-                        <button class="btn-action delete" onclick="deleteUser('${safeUsername}')">Delete</button>
+                        <button class="btn-action edit" onclick="showEditPassword('${safeUsername}', '${safeAgency}')">Edit</button>
+                        <button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>
                     </div>
                 </td>
             </tr>
@@ -427,8 +428,11 @@ function createUser() {
 
 // --- Edit Password ---
 
-function showEditPassword(username) {
+var editingAgency = '';
+
+function showEditPassword(username, agency) {
     editingUsername = username;
+    editingAgency = agency || '';
     document.getElementById('editPasswordUser').textContent = username;
     document.getElementById('editNewPassword').value = '';
     showModal('editPasswordModal');
@@ -443,7 +447,8 @@ function updatePassword() {
         return;
     }
 
-    fetch(`/api/users/${encodeURIComponent(editingUsername)}/password`, {
+    const agencyParam = editingAgency ? `?agency=${encodeURIComponent(editingAgency)}` : '';
+    fetch(`/api/users/${encodeURIComponent(editingUsername)}/password${agencyParam}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password })
@@ -473,10 +478,11 @@ function updatePassword() {
 
 // --- Delete User ---
 
-function deleteUser(username) {
+function deleteUser(username, agency) {
     if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
 
-    fetch(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' })
+    const agencyParam = agency ? `?agency=${encodeURIComponent(agency)}` : '';
+    fetch(`/api/users/${encodeURIComponent(username)}${agencyParam}`, { method: 'DELETE' })
     .then(r => {
         if (!r.ok) {
             return r.text().then(text => {
@@ -504,8 +510,9 @@ function deleteUser(username) {
 
 // --- Update User Role ---
 
-function updateUserRole(username, newRole) {
-    fetch(`/api/users/${encodeURIComponent(username)}/role`, {
+function updateUserRole(username, newRole, agency) {
+    const agencyParam = agency ? `?agency=${encodeURIComponent(agency)}` : '';
+    fetch(`/api/users/${encodeURIComponent(username)}/role${agencyParam}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: newRole })

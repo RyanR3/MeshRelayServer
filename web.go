@@ -124,6 +124,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		AgencyID string `json:"agency_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -133,11 +134,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	admin, exists := s.webAdmins[req.Username]
+	admin, exists := s.webAdmins[userKey(req.AgencyID, req.Username)]
 	s.mu.RUnlock()
 
 	if !exists || admin.PasswordHash != hashPassword(req.Password) {
-		log.Printf("Failed web login attempt for user: %s from %s", req.Username, r.RemoteAddr)
+		log.Printf("Failed web login attempt for user: %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"invalid username or password"}`))
@@ -351,10 +352,18 @@ func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	session := s.getSession(r)
 	agencyFilter := r.URL.Query().Get("agency")
-	if session != nil && session.Role == "agency_admin" {
-		agencyFilter = session.AgencyID
+	callerRole := "super_admin"
+	callerAgency := ""
+	callerUsername := ""
+	if session != nil {
+		callerRole = session.Role
+		callerAgency = session.AgencyID
+		callerUsername = session.Username
+		if session.Role == "agency_admin" {
+			agencyFilter = session.AgencyID
+		}
 	}
-	users := s.GetUsers(agencyFilter)
+	users := s.GetUsers(agencyFilter, callerRole, callerAgency, callerUsername)
 	json.NewEncoder(w).Encode(users)
 }
 
@@ -383,11 +392,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
 		req.AgencyID = session.AgencyID
-		// Agency admins can only create users, not other admins or super_admins
-		if req.Role == "super_admin" {
+		// Agency admins can only create "user" role accounts
+		if req.Role == "super_admin" || req.Role == "admin" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"cannot create super admin users"}`))
+			w.Write([]byte(`{"error":"cannot create admin users"}`))
 			return
 		}
 	}
@@ -422,22 +431,24 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
+	agencyID := r.URL.Query().Get("agency")
 
-	// Agency admins can only delete users in their agency
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
+		agencyID = session.AgencyID
+		// Agency admins can only delete "user" role accounts
 		s.mu.RLock()
-		user, exists := s.users[username]
+		user, exists := s.users[userKey(agencyID, username)]
 		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID {
+		if !exists || user.AgencyID != session.AgencyID || user.Role != "user" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"cannot delete users outside your agency"}`))
+			w.Write([]byte(`{"error":"cannot delete this user"}`))
 			return
 		}
 	}
 
-	if err := s.RemoveUser(username); err != nil {
+	if err := s.RemoveUser(agencyID, username); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -452,17 +463,18 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
+	agencyID := r.URL.Query().Get("agency")
 
-	// Agency admins can only edit users in their agency
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
+		agencyID = session.AgencyID
 		s.mu.RLock()
-		user, exists := s.users[username]
+		user, exists := s.users[userKey(agencyID, username)]
 		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID {
+		if !exists || user.AgencyID != session.AgencyID || user.Role != "user" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"cannot edit users outside your agency"}`))
+			w.Write([]byte(`{"error":"cannot edit this user"}`))
 			return
 		}
 	}
@@ -484,14 +496,14 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.UpdatePassword(username, req.Password); err != nil {
+	if err := s.UpdatePassword(agencyID, username, req.Password); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
 	}
 
-	log.Printf("Password updated for user: %s", username)
+	log.Printf("Password updated for user: %s [%s]", username, agencyID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
@@ -500,18 +512,20 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
+	agencyID := r.URL.Query().Get("agency")
 
 	session := s.getSession(r)
 
-	// Agency admins can only change roles within their agency, and cannot set super_admin
+	// Agency admins can only change roles of "user" role accounts in their agency
 	if session != nil && session.Role == "agency_admin" {
+		agencyID = session.AgencyID
 		s.mu.RLock()
-		user, exists := s.users[username]
+		user, exists := s.users[userKey(agencyID, username)]
 		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID {
+		if !exists || user.AgencyID != session.AgencyID || user.Role != "user" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"cannot edit users outside your agency"}`))
+			w.Write([]byte(`{"error":"cannot edit this user"}`))
 			return
 		}
 	}
@@ -541,7 +555,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.UpdateUserRole(username, req.Role); err != nil {
+	if err := s.UpdateUserRole(agencyID, username, req.Role); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -609,7 +623,7 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.mu.Lock()
-	admin, exists := s.webAdmins[username]
+	admin, exists := s.webAdmins[userKey(session.AgencyID, username)]
 	if !exists {
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -628,7 +642,7 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	log.Printf("Web admin password changed for: %s", username)
+	log.Printf("Web admin password changed for: %s [%s]", username, session.AgencyID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
 }
@@ -859,14 +873,15 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, exists := s.webAdmins[req.Username]; exists {
+	key := userKey(agencyID, req.Username)
+	if _, exists := s.webAdmins[key]; exists {
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusConflict)
-		w.Write([]byte(`{"error":"admin username already exists"}`))
+		w.Write([]byte(`{"error":"admin username already exists in this agency"}`))
 		return
 	}
 
-	s.webAdmins[req.Username] = &WebAdmin{
+	s.webAdmins[key] = &WebAdmin{
 		Username:           req.Username,
 		PasswordHash:       hashPassword(req.Password),
 		Role:               "agency_admin",
@@ -1109,7 +1124,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
 	currentVersion := strings.TrimPrefix(Version, "v")
-	updateAvailable := latestVersion != currentVersion && Version != "dev"
+	updateAvailable := latestVersion != currentVersion || Version == "dev"
 
 	var binaryURL, webURL string
 	for _, asset := range release.Assets {
