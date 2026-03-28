@@ -512,6 +512,25 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	} else {
 		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
 	}
+
+	// Send any active mutual aid channels for this client's agency
+	for _, link := range s.mutualAidLinks {
+		if !link.Active {
+			continue
+		}
+		for _, a := range link.Agencies {
+			if a == agencyID {
+				pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
+					Channel:     link.Channel,
+					ChannelName: link.ChannelName,
+					Active:      true,
+				})
+				s.sendPacket(pkt, addr)
+				log.Printf("Sent mutual aid channel %d (%s) to newly joined client %s [%s]", link.Channel, link.ChannelName, packet.Username, agencyID)
+				break
+			}
+		}
+	}
 }
 
 func (s *Server) handleLeave(addr *net.UDPAddr) {
@@ -1440,6 +1459,7 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 
 	count := 0
 	for _, client := range s.clients {
+		log.Printf("Mutual aid notify check: client %s [agency=%s] agencyMatch=%v", client.Username, client.AgencyID, agencySet[client.AgencyID])
 		if !agencySet[client.AgencyID] {
 			continue
 		}
