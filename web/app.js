@@ -628,9 +628,15 @@ function renderMutualAidTable(links) {
         const statusClass = link.active ? 'status-active' : 'status-inactive';
         const statusText = link.active ? 'Active' : 'Inactive';
         const safeId = link.id.replace(/'/g, "\\'");
+        // Build agencies display from arrays
+        const agencies = link.agencies || [];
+        const agencyNames = link.agency_names || [];
+        const agenciesHtml = agencies.map((aid, i) => {
+            const name = agencyNames[i] || aid;
+            return `${name} <span class="agency-badge">${aid}</span>`;
+        }).join(', ');
         return `<tr>
-            <td>${link.agency_a_name} <span class="agency-badge">${link.agency_a}</span></td>
-            <td>${link.agency_b_name} <span class="agency-badge">${link.agency_b}</span></td>
+            <td>${agenciesHtml}</td>
             <td>${link.channel_name || 'Channel ' + link.channel}</td>
             <td><span class="link-status ${statusClass}">${statusText}</span></td>
             <td>${created}</td>
@@ -642,15 +648,12 @@ function renderMutualAidTable(links) {
 }
 
 function showCreateMutualAidModal() {
-    // Populate agency dropdowns
-    const selectA = document.getElementById('mutualAidAgencyA');
-    const selectB = document.getElementById('mutualAidAgencyB');
-    selectA.innerHTML = '<option value="">Select Agency</option>';
-    selectB.innerHTML = '<option value="">Select Agency</option>';
+    // Populate agency checkbox list
+    const list = document.getElementById('mutualAidAgencyList');
+    list.innerHTML = '';
 
     agenciesList.forEach(agency => {
-        selectA.innerHTML += `<option value="${agency.id}">${agency.name}</option>`;
-        selectB.innerHTML += `<option value="${agency.id}">${agency.name}</option>`;
+        list.innerHTML += `<label><input type="checkbox" value="${agency.id}"> ${agency.name} <span class="agency-badge">${agency.id}</span></label>`;
     });
 
     document.getElementById('mutualAidChannelName').value = '';
@@ -658,17 +661,12 @@ function showCreateMutualAidModal() {
 }
 
 function createMutualAidLink() {
-    const agencyA = document.getElementById('mutualAidAgencyA').value;
-    const agencyB = document.getElementById('mutualAidAgencyB').value;
+    const checkboxes = document.querySelectorAll('#mutualAidAgencyList input[type="checkbox"]:checked');
+    const agencies = Array.from(checkboxes).map(cb => cb.value);
     const channelName = document.getElementById('mutualAidChannelName').value.trim();
 
-    if (!agencyA || !agencyB) {
-        showStatus('mutual-aid-status', 'Both agencies are required', 'error');
-        return;
-    }
-
-    if (agencyA === agencyB) {
-        showStatus('mutual-aid-status', 'Cannot link an agency to itself', 'error');
+    if (agencies.length < 2) {
+        showStatus('mutual-aid-status', 'Select at least two agencies', 'error');
         return;
     }
 
@@ -680,7 +678,7 @@ function createMutualAidLink() {
     fetch('/api/mutual-aid', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agency_a: agencyA, agency_b: agencyB, channel_name: channelName })
+        body: JSON.stringify({ agencies: agencies, channel_name: channelName })
     })
     .then(r => r.json())
     .then(data => {

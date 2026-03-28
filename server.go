@@ -47,14 +47,16 @@ type UserAccount struct {
 }
 
 type MutualAidLink struct {
-	ID          string `json:"id"`
-	AgencyA     string `json:"agency_a"`
-	AgencyB     string `json:"agency_b"`
-	Channel     int    `json:"channel"`
-	ChannelName string `json:"channel_name"`
-	CreatedAt   string `json:"created_at"`
-	CreatedBy   string `json:"created_by"`
-	Active      bool   `json:"active"`
+	ID          string   `json:"id"`
+	Agencies    []string `json:"agencies"`
+	Channel     int      `json:"channel"`
+	ChannelName string   `json:"channel_name"`
+	CreatedAt   string   `json:"created_at"`
+	CreatedBy   string   `json:"created_by"`
+	Active      bool     `json:"active"`
+	// Deprecated fields kept for migration from old format
+	AgencyA string `json:"agency_a,omitempty"`
+	AgencyB string `json:"agency_b,omitempty"`
 }
 
 type UpdateStatus struct {
@@ -274,9 +276,9 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	}
 	channel.mu.RUnlock()
 
-	// Check for mutual aid partner — also relay to partner agency's same channel
-	partnerAgency := s.getMutualAidPartner(client.AgencyID, client.Channel)
-	if partnerAgency != "" {
+	// Check for mutual aid partners — also relay to partner agencies' same channel
+	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
+	for _, partnerAgency := range partners {
 		partnerKey := channelKey(partnerAgency, client.Channel)
 		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
 			partnerChannel.mu.RLock()
@@ -373,9 +375,9 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 	}
 	channel.mu.RUnlock()
 
-	// Check for mutual aid partner — also relay to partner agency's same channel
-	partnerAgency := s.getMutualAidPartner(client.AgencyID, client.Channel)
-	if partnerAgency != "" {
+	// Check for mutual aid partners — also relay to partner agencies' same channel
+	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
+	for _, partnerAgency := range partners {
 		partnerKey := channelKey(partnerAgency, client.Channel)
 		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
 			partnerChannel.mu.RLock()
@@ -430,9 +432,9 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		}
 	}
 
-	// Check for mutual aid partner — also relay heartbeat to partner agency's same channel
-	partnerAgency := s.getMutualAidPartner(client.AgencyID, client.Channel)
-	if partnerAgency != "" {
+	// Check for mutual aid partners — also relay heartbeat to partner agencies' same channel
+	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
+	for _, partnerAgency := range partners {
 		partnerKey := channelKey(partnerAgency, client.Channel)
 		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
 			partnerChannel.mu.RLock()
@@ -1033,13 +1035,13 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 
 		// Role-based visibility:
 		// - super_admin: sees everyone
-		// - agency_admin: sees only "user" role in own agency
+		// - agency_admin: sees "user" and "admin" roles in own agency (not super_admin)
 		// - user: sees only themselves
 		if callerRole == "agency_admin" {
 			if user.AgencyID != callerAgency {
 				continue
 			}
-			if role != "user" {
+			if role == "super_admin" {
 				continue
 			}
 		}
@@ -1325,8 +1327,20 @@ func (s *Server) loadMutualAid() {
 		return
 	}
 
+	migrated := false
 	for _, link := range links {
+		// Migrate old AgencyA/AgencyB format to Agencies array
+		if len(link.Agencies) == 0 && link.AgencyA != "" && link.AgencyB != "" {
+			link.Agencies = []string{link.AgencyA, link.AgencyB}
+			link.AgencyA = ""
+			link.AgencyB = ""
+			migrated = true
+		}
 		s.mutualAidLinks[link.ID] = link
+	}
+	if migrated {
+		s.saveMutualAid()
+		log.Printf("Migrated mutual aid links to multi-agency format")
 	}
 	log.Printf("Loaded %d mutual aid links", len(s.mutualAidLinks))
 }
@@ -1348,9 +1362,9 @@ func (s *Server) saveMutualAid() error {
 	return encoder.Encode(links)
 }
 
-// getMutualAidPartner returns the partner agencyID if an active mutual aid link
-// exists for the given agency and channel. Returns "" if no link.
-func (s *Server) getMutualAidPartner(agencyID string, channel int) string {
+// getMutualAidPartners returns all partner agency IDs if an active mutual aid link
+// exists for the given agency and channel. Returns nil if no link.
+func (s *Server) getMutualAidPartners(agencyID string, channel int) []string {
 	for _, link := range s.mutualAidLinks {
 		if !link.Active {
 			continue
@@ -1358,43 +1372,69 @@ func (s *Server) getMutualAidPartner(agencyID string, channel int) string {
 		if link.Channel != channel {
 			continue
 		}
-		if link.AgencyA == agencyID {
-			return link.AgencyB
+		// Check if this agency is part of this link
+		found := false
+		for _, a := range link.Agencies {
+			if a == agencyID {
+				found = true
+				break
+			}
 		}
-		if link.AgencyB == agencyID {
-			return link.AgencyA
+		if !found {
+			continue
 		}
+		// Return all other agencies in the link
+		var partners []string
+		for _, a := range link.Agencies {
+			if a != agencyID {
+				partners = append(partners, a)
+			}
+		}
+		return partners
 	}
-	return ""
+	return nil
 }
 
-// hasMutualAidLink checks if two agencies have an active mutual aid link on any channel.
+// hasMutualAidLink checks if two agencies share an active mutual aid link on any channel.
 func (s *Server) hasMutualAidLink(agencyA, agencyB string) bool {
 	for _, link := range s.mutualAidLinks {
 		if !link.Active {
 			continue
 		}
-		if (link.AgencyA == agencyA && link.AgencyB == agencyB) ||
-			(link.AgencyA == agencyB && link.AgencyB == agencyA) {
+		foundA, foundB := false, false
+		for _, a := range link.Agencies {
+			if a == agencyA {
+				foundA = true
+			}
+			if a == agencyB {
+				foundB = true
+			}
+		}
+		if foundA && foundB {
 			return true
 		}
 	}
 	return false
 }
 
-// notifyMutualAidChannel sends a ChannelSwitchPacket to all connected clients in both
-// agencies, telling the PTT app to add or remove a mutual aid channel from its list.
+// notifyMutualAidChannel sends a ChannelSwitchPacket to all connected clients in the
+// given agencies, telling the PTT app to add or remove a mutual aid channel from its list.
 // Must be called with s.mu held.
-func (s *Server) notifyMutualAidChannel(agencyA, agencyB string, channel int, channelName string, active bool) {
+func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelName string, active bool) {
 	pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
 		Channel:     channel,
 		ChannelName: channelName,
 		Active:      active,
 	})
 
+	agencySet := make(map[string]bool, len(agencies))
+	for _, a := range agencies {
+		agencySet[a] = true
+	}
+
 	count := 0
 	for _, client := range s.clients {
-		if client.AgencyID != agencyA && client.AgencyID != agencyB {
+		if !agencySet[client.AgencyID] {
 			continue
 		}
 		s.sendPacket(pkt, client.Addr)
@@ -1405,7 +1445,7 @@ func (s *Server) notifyMutualAidChannel(agencyA, agencyB string, channel int, ch
 	if !active {
 		action = "removed"
 	}
-	log.Printf("Mutual aid channel %s: notified %d clients in [%s, %s] about channel %d (%s)", action, count, agencyA, agencyB, channel, channelName)
+	log.Printf("Mutual aid channel %s: notified %d clients in %v about channel %d (%s)", action, count, agencies, channel, channelName)
 }
 
 // pickMutualAidChannel picks the highest unused channel number (starting from 19 down)
