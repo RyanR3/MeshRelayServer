@@ -454,6 +454,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 
 func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		log.Printf("JOIN rejected: %s from %s (not authenticated)", packet.Username, addr)
 		return
 	}
 
@@ -465,6 +466,8 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	// Try to find user by searching (since we may not know agency from join packet)
 	if user := s.findUserByUsername(packet.Username); user != nil {
 		agencyID = user.AgencyID
+	} else {
+		log.Printf("JOIN warning: user %s not found in users list, using agency 'default'", packet.Username)
 	}
 
 	// Check if client already exists
@@ -506,6 +509,8 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		channel.Clients[ck] = client
 		channel.mu.Unlock()
 		log.Printf("Client %s [%s] joined channel %d from %s", packet.Username, agencyID, packet.Channel, addr)
+	} else {
+		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
 	}
 }
 
@@ -527,6 +532,7 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 	}
 
 	if clientToRemove != nil {
+		log.Printf("LEAVE: removing client %s [%s] from channel %d (addr: %s)", clientToRemove.Username, clientToRemove.AgencyID, clientToRemove.Channel, addr)
 		s.removeClient(clientToRemove)
 	}
 }
