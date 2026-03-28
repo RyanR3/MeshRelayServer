@@ -74,6 +74,9 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
+	// Debug endpoint (super_admin only)
+	api.HandleFunc("/debug/state", s.requireSuperAdmin(s.handleDebugState)).Methods("GET")
+
 	// WebSocket for real-time updates
 	r.HandleFunc("/ws", s.handleWebSocket)
 
@@ -303,6 +306,44 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	clients := make([]map[string]string, 0)
+	for key, client := range s.clients {
+		clients = append(clients, map[string]string{
+			"key":      key,
+			"username": client.Username,
+			"agency":   client.AgencyID,
+			"addr":     client.Addr.String(),
+		})
+	}
+
+	links := make([]map[string]interface{}, 0)
+	for id, link := range s.mutualAidLinks {
+		links = append(links, map[string]interface{}{
+			"id":       id,
+			"agencies": link.Agencies,
+			"channel":  link.Channel,
+			"name":     link.ChannelName,
+			"active":   link.Active,
+		})
+	}
+
+	agencies := make([]string, 0)
+	for id := range s.agencies {
+		agencies = append(agencies, id)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"clients":    clients,
+		"mutual_aid": links,
+		"agencies":   agencies,
+	})
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
