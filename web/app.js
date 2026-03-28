@@ -8,6 +8,7 @@ let editingUsername = '';
 // Current session info
 let currentRole = '';
 let currentAgencyId = '';
+let pttPort = 5000;
 let agenciesList = []; // cached for dropdowns
 
 // --- Page Navigation ---
@@ -342,7 +343,7 @@ function renderUsersTable(users) {
                 <td>${created}</td>
                 <td>
                     <div class="actions-cell">
-                        <button class="btn-action qr" onclick="showQRCode('${safeUsername}')">QR Code</button>
+                        <button class="btn-action qr" onclick="showQRCode('${safeUsername}', '${safeAgency}')">QR Code</button>
                         <button class="btn-action edit" onclick="showEditPassword('${safeUsername}', '${safeAgency}')">Edit</button>
                         <button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>
                     </div>
@@ -418,7 +419,8 @@ function createUser() {
         fetchUsers();
 
         // Show QR code for the new user
-        showQRCodeWithData(username, password);
+        const agencyForQr = body.agency_id || currentAgencyId || '';
+        showQRCodeWithData(username, password, agencyForQr);
     })
     .catch(err => {
         showStatus('user-status', `Failed to create user: ${err.message}`, 'error');
@@ -533,9 +535,10 @@ function updateUserRole(username, newRole, agency) {
 
 // --- QR Code ---
 
-function showQRCode(username) {
+function showQRCode(username, agencyId) {
     // Show QR with server address and username (no password since we don't store plaintext)
     const serverUrl = 'client.meshrelayptt.com';
+    const agency = agencyId || currentAgencyId || '';
     document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
     document.getElementById('qrServer').textContent = serverUrl;
     document.getElementById('qrUsername').textContent = username;
@@ -544,10 +547,13 @@ function showQRCode(username) {
     const container = document.getElementById('qrCodeCanvas');
     container.innerHTML = '';
 
-    const qrData = JSON.stringify({
+    const qrObj = {
         server: serverUrl,
+        port: pttPort,
         username: username
-    });
+    };
+    if (agency) qrObj.agency_id = agency;
+    const qrData = JSON.stringify(qrObj);
 
     new QRCode(container, {
         text: qrData,
@@ -561,8 +567,9 @@ function showQRCode(username) {
     showModal('qrCodeModal');
 }
 
-function showQRCodeWithData(username, password) {
+function showQRCodeWithData(username, password, agencyId) {
     const serverUrl = 'client.meshrelayptt.com';
+    const agency = agencyId || currentAgencyId || '';
     document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
     document.getElementById('qrServer').textContent = serverUrl;
     document.getElementById('qrUsername').textContent = username;
@@ -571,11 +578,14 @@ function showQRCodeWithData(username, password) {
     const container = document.getElementById('qrCodeCanvas');
     container.innerHTML = '';
 
-    const qrData = JSON.stringify({
+    const qrObj = {
         server: serverUrl,
+        port: pttPort,
         username: username,
         password: password
-    });
+    };
+    if (agency) qrObj.agency_id = agency;
+    const qrData = JSON.stringify(qrObj);
 
     new QRCode(container, {
         text: qrData,
@@ -758,6 +768,7 @@ function checkSession() {
             if (!data) return false;
             currentRole = data.role || 'super_admin';
             currentAgencyId = data.agency_id || '';
+            pttPort = data.ptt_port || 5000;
             if (data.must_change_password) {
                 showForcePasswordChange();
             }

@@ -218,6 +218,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		"role":                 session.Role,
 		"agency_id":            session.AgencyID,
 		"must_change_password": mustChange,
+		"ptt_port":             s.config.PTTPort,
 	})
 }
 
