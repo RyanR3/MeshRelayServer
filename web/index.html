@@ -209,8 +209,7 @@
                 <table class="data-table" id="mutual-aid-table">
                     <thead>
                         <tr>
-                            <th>Agency A</th>
-                            <th>Agency B</th>
+                            <th>Agencies</th>
                             <th>Channel Name</th>
                             <th>Status</th>
                             <th>Created</th>
@@ -393,15 +392,9 @@
     <div id="createMutualAidModal" class="modal">
         <div class="modal-content">
             <h2>Create Mutual Aid Link</h2>
-            <p class="modal-subtitle">Temporarily bridge two agencies on a shared channel</p>
-            <label class="modal-field-label">Agency A</label>
-            <select id="mutualAidAgencyA">
-                <option value="">Select Agency</option>
-            </select>
-            <label class="modal-field-label">Agency B</label>
-            <select id="mutualAidAgencyB">
-                <option value="">Select Agency</option>
-            </select>
+            <p class="modal-subtitle">Select agencies to bridge on a shared channel</p>
+            <label class="modal-field-label">Agencies (select 2 or more)</label>
+            <div id="mutualAidAgencyList" class="checkbox-list"></div>
             <label class="modal-field-label">Channel Name</label>
             <input type="text" id="mutualAidChannelName" placeholder="e.g. Fire Response">
             <div class="modal-actions">

@@ -12,3 +12,4 @@ config.json
 # Backups
 backups/
 .DS_Store
+pttserver

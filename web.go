@@ -207,7 +207,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	session := s.webSessions[cookie.Value]
-	admin, exists := s.webAdmins[session.Username]
+	admin, exists := s.webAdmins[userKey(session.AgencyID, session.Username)]
 	mustChange := exists && admin.MustChangePassword
 	s.mu.RUnlock()
 
@@ -392,11 +392,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
 		req.AgencyID = session.AgencyID
-		// Agency admins can only create "user" role accounts
-		if req.Role == "super_admin" || req.Role == "admin" {
+		// Agency admins can create "user" or "admin" but not "super_admin"
+		if req.Role == "super_admin" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"cannot create admin users"}`))
+			w.Write([]byte(`{"error":"only super admins can create super admin users"}`))
 			return
 		}
 	}
@@ -436,11 +436,11 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
 		agencyID = session.AgencyID
-		// Agency admins can only delete "user" role accounts
+		// Agency admins can delete "user" and "admin" role accounts (not super_admin)
 		s.mu.RLock()
 		user, exists := s.users[userKey(agencyID, username)]
 		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID || user.Role != "user" {
+		if !exists || user.AgencyID != session.AgencyID || user.Role == "super_admin" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"cannot delete this user"}`))
@@ -468,10 +468,11 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	if session != nil && session.Role == "agency_admin" {
 		agencyID = session.AgencyID
+		// Agency admins can edit "user" and "admin" passwords (not super_admin)
 		s.mu.RLock()
 		user, exists := s.users[userKey(agencyID, username)]
 		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID || user.Role != "user" {
+		if !exists || user.AgencyID != session.AgencyID || user.Role == "super_admin" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"cannot edit this user"}`))
@@ -516,13 +517,13 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 
 	session := s.getSession(r)
 
-	// Agency admins can only change roles of "user" role accounts in their agency
+	// Agency admins can change roles of "user" and "admin" accounts in their agency (not super_admin)
 	if session != nil && session.Role == "agency_admin" {
 		agencyID = session.AgencyID
 		s.mu.RLock()
 		user, exists := s.users[userKey(agencyID, username)]
 		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID || user.Role != "user" {
+		if !exists || user.AgencyID != session.AgencyID || user.Role == "super_admin" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"cannot edit this user"}`))
@@ -909,20 +910,19 @@ func (s *Server) handleGetMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	links := make([]map[string]interface{}, 0, len(s.mutualAidLinks))
 	for _, link := range s.mutualAidLinks {
-		agencyAName := link.AgencyA
-		agencyBName := link.AgencyB
-		if a, ok := s.agencies[link.AgencyA]; ok {
-			agencyAName = a.Name
-		}
-		if b, ok := s.agencies[link.AgencyB]; ok {
-			agencyBName = b.Name
+		// Build agency names list
+		agencyNames := make([]string, 0, len(link.Agencies))
+		for _, aid := range link.Agencies {
+			name := aid
+			if a, ok := s.agencies[aid]; ok {
+				name = a.Name
+			}
+			agencyNames = append(agencyNames, name)
 		}
 		links = append(links, map[string]interface{}{
 			"id":            link.ID,
-			"agency_a":      link.AgencyA,
-			"agency_b":      link.AgencyB,
-			"agency_a_name": agencyAName,
-			"agency_b_name": agencyBName,
+			"agencies":      link.Agencies,
+			"agency_names":  agencyNames,
 			"channel":       link.Channel,
 			"channel_name":  link.ChannelName,
 			"created_at":    link.CreatedAt,
@@ -936,9 +936,8 @@ func (s *Server) handleGetMutualAid(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var req struct {
-		AgencyA     string `json:"agency_a"`
-		AgencyB     string `json:"agency_b"`
-		ChannelName string `json:"channel_name"`
+		Agencies    []string `json:"agencies"`
+		ChannelName string   `json:"channel_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -946,16 +945,21 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.AgencyA == "" || req.AgencyB == "" {
+	if len(req.Agencies) < 2 {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"both agencies are required"}`))
+		w.Write([]byte(`{"error":"at least two agencies are required"}`))
 		return
 	}
 
-	if req.AgencyA == req.AgencyB {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"cannot link an agency to itself"}`))
-		return
+	// Check for duplicates
+	seen := make(map[string]bool)
+	for _, a := range req.Agencies {
+		if seen[a] {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"duplicate agency in list"}`))
+			return
+		}
+		seen[a] = true
 	}
 
 	if req.ChannelName == "" {
@@ -967,28 +971,12 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 
 	s.mu.Lock()
-	// Verify agencies exist
-	if _, ok := s.agencies[req.AgencyA]; !ok {
-		s.mu.Unlock()
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"agency A not found"}`))
-		return
-	}
-	if _, ok := s.agencies[req.AgencyB]; !ok {
-		s.mu.Unlock()
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"agency B not found"}`))
-		return
-	}
-
-	// Check for existing active link between these agencies
-	for _, link := range s.mutualAidLinks {
-		if link.Active &&
-			((link.AgencyA == req.AgencyA && link.AgencyB == req.AgencyB) ||
-				(link.AgencyA == req.AgencyB && link.AgencyB == req.AgencyA)) {
+	// Verify all agencies exist
+	for _, aid := range req.Agencies {
+		if _, ok := s.agencies[aid]; !ok {
 			s.mu.Unlock()
-			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte(`{"error":"active link already exists between these agencies"}`))
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(fmt.Sprintf(`{"error":"agency %s not found"}`, aid)))
 			return
 		}
 	}
@@ -1008,8 +996,7 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	link := &MutualAidLink{
 		ID:          linkID,
-		AgencyA:     req.AgencyA,
-		AgencyB:     req.AgencyB,
+		Agencies:    req.Agencies,
 		Channel:     channel,
 		ChannelName: req.ChannelName,
 		CreatedAt:   time.Now().Format(time.RFC3339),
@@ -1018,8 +1005,8 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mutualAidLinks[linkID] = link
 
-	// Notify all clients in both agencies about the new mutual aid channel
-	s.notifyMutualAidChannel(req.AgencyA, req.AgencyB, channel, req.ChannelName, true)
+	// Notify all clients in the selected agencies about the new mutual aid channel
+	s.notifyMutualAidChannel(req.Agencies, channel, req.ChannelName, true)
 	s.mu.Unlock()
 
 	if err := s.saveMutualAid(); err != nil {
@@ -1028,7 +1015,7 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Created mutual aid link: %s <-> %s on channel %d (%s) (by %s)", req.AgencyA, req.AgencyB, channel, req.ChannelName, createdBy)
+	log.Printf("Created mutual aid link: %v on channel %d (%s) (by %s)", req.Agencies, channel, req.ChannelName, createdBy)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": linkID})
 }
 
@@ -1046,20 +1033,19 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agencyA := link.AgencyA
-	agencyB := link.AgencyB
+	agencies := link.Agencies
 	oldChannel := link.Channel
 	channelName := link.ChannelName
 
 	delete(s.mutualAidLinks, id)
 
 	// Notify clients to remove the mutual aid channel from their list
-	s.notifyMutualAidChannel(agencyA, agencyB, oldChannel, channelName, false)
+	s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
 	s.mu.Unlock()
 
 	s.saveMutualAid()
 
-	log.Printf("Deleted mutual aid link: %s <-> %s on channel %d", agencyA, agencyB, oldChannel)
+	log.Printf("Deleted mutual aid link: %v on channel %d", agencies, oldChannel)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
