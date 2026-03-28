@@ -313,12 +313,13 @@ func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	clients := make([]map[string]string, 0)
+	clients := make([]map[string]interface{}, 0)
 	for key, client := range s.clients {
-		clients = append(clients, map[string]string{
+		clients = append(clients, map[string]interface{}{
 			"key":      key,
 			"username": client.Username,
 			"agency":   client.AgencyID,
+			"channel":  client.Channel,
 			"addr":     client.Addr.String(),
 		})
 	}
@@ -339,10 +340,25 @@ func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 		agencies = append(agencies, id)
 	}
 
+	// Show which clients are in each relevant channel
+	channelClients := make(map[string][]string)
+	for key, ch := range s.channels {
+		ch.mu.RLock()
+		if len(ch.Clients) > 0 {
+			names := make([]string, 0)
+			for _, c := range ch.Clients {
+				names = append(names, c.Username+"["+c.AgencyID+"]")
+			}
+			channelClients[key] = names
+		}
+		ch.mu.RUnlock()
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"clients":    clients,
-		"mutual_aid": links,
-		"agencies":   agencies,
+		"clients":         clients,
+		"mutual_aid":      links,
+		"agencies":        agencies,
+		"channel_clients": channelClients,
 	})
 }
 
