@@ -648,32 +648,43 @@ function renderMutualAidTable(links) {
 }
 
 function showCreateMutualAidModal() {
-    // Populate agency checkbox list
     const list = document.getElementById('mutualAidAgencyList');
-    list.innerHTML = '';
-
-    agenciesList.forEach(agency => {
-        list.innerHTML += `<label><input type="checkbox" value="${agency.id}"> ${agency.name} <span class="agency-badge">${agency.id}</span></label>`;
-    });
-
+    list.innerHTML = '<div style="color:#888;padding:8px 0;">Loading agencies...</div>';
     document.getElementById('mutualAidChannelName').value = '';
+    document.getElementById('mutualAidError').style.display = 'none';
     showModal('createMutualAidModal');
+
+    // Always fetch fresh agencies list
+    fetch('/api/agencies').then(r => r.json()).then(agencies => {
+        agenciesList = agencies;
+        list.innerHTML = '';
+        agencies.forEach(agency => {
+            list.innerHTML += `<label><input type="checkbox" value="${agency.id}"> ${agency.name} <span class="agency-badge">${agency.id}</span></label>`;
+        });
+    }).catch(() => {
+        list.innerHTML = '<div style="color:#FF6B6B;padding:8px 0;">Failed to load agencies</div>';
+    });
 }
 
 function createMutualAidLink() {
     const checkboxes = document.querySelectorAll('#mutualAidAgencyList input[type="checkbox"]:checked');
     const agencies = Array.from(checkboxes).map(cb => cb.value);
     const channelName = document.getElementById('mutualAidChannelName').value.trim();
+    const errorEl = document.getElementById('mutualAidError');
 
     if (agencies.length < 2) {
-        showStatus('mutual-aid-status', 'Select at least two agencies', 'error');
+        errorEl.textContent = 'Select at least two agencies';
+        errorEl.style.display = 'block';
         return;
     }
 
     if (!channelName) {
-        showStatus('mutual-aid-status', 'Channel name is required', 'error');
+        errorEl.textContent = 'Channel name is required';
+        errorEl.style.display = 'block';
         return;
     }
+
+    errorEl.style.display = 'none';
 
     fetch('/api/mutual-aid', {
         method: 'POST',
@@ -683,15 +694,17 @@ function createMutualAidLink() {
     .then(r => r.json())
     .then(data => {
         if (data.error) {
-            showStatus('mutual-aid-status', data.error, 'error');
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
             return;
         }
         closeModal('createMutualAidModal');
-        showStatus('mutual-aid-status', 'Mutual aid link created — all clients switched to shared channel', 'success');
+        showStatus('mutual-aid-status', 'Mutual aid link created — all clients notified', 'success');
         fetchMutualAid();
     })
     .catch(err => {
-        showStatus('mutual-aid-status', 'Failed to create link: ' + err.message, 'error');
+        errorEl.textContent = 'Failed to create link: ' + err.message;
+        errorEl.style.display = 'block';
     });
 }
 
