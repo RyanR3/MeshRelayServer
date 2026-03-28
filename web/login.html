@@ -93,12 +93,14 @@
         <h1>MeshRelay</h1>
         <p>Sign in to access the dashboard</p>
         <div id="error" class="login-error"></div>
+        <input type="text" id="agency" class="login-input" placeholder="Agency ID (leave blank for super admin)">
         <input type="text" id="username" class="login-input" placeholder="Username" autocomplete="username">
         <input type="password" id="password" class="login-input" placeholder="Password" autocomplete="current-password">
         <button id="loginBtn" class="login-btn" onclick="login()">Sign In</button>
     </div>
     <script>
         function login() {
+            const agency_id = document.getElementById('agency').value.trim();
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
             const errorEl = document.getElementById('error');
@@ -117,7 +119,7 @@
             fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify({ username, password, agency_id })
             })
             .then(r => r.json().then(data => ({ ok: r.ok, data })))
             .then(({ ok, data }) => {
@@ -141,6 +143,9 @@
         document.getElementById('password').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') login();
         });
+        document.getElementById('agency').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('username').focus();
+        });
         document.getElementById('username').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') document.getElementById('password').focus();
         });
@@ -150,7 +155,7 @@
             if (r.ok) window.location.href = '/';
         });
 
-        document.getElementById('username').focus();
+        document.getElementById('agency').focus();
     </script>
 </body>
 </html>

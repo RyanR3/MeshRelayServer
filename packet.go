@@ -58,6 +58,7 @@ type JoinPacket struct {
 type AuthRequestPacket struct {
 	Username     string
 	PasswordHash string
+	AgencyID     string // optional, empty for older clients
 }
 
 // AuthResponsePacket represents a server authentication response
@@ -567,9 +568,22 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 		return nil, err
 	}
 
+	// Optionally read agency ID (new clients send it, old clients don't)
+	var agencyID string
+	if buf.Len() >= 2 {
+		var agencyLen int16
+		if err := binary.Read(buf, binary.BigEndian, &agencyLen); err == nil && agencyLen > 0 && agencyLen <= 256 {
+			agencyBytes := make([]byte, agencyLen)
+			if _, err := io.ReadFull(buf, agencyBytes); err == nil {
+				agencyID = string(agencyBytes)
+			}
+		}
+	}
+
 	return &AuthRequestPacket{
 		Username:     string(usernameBytes),
 		PasswordHash: string(hashBytes),
+		AgencyID:     agencyID,
 	}, nil
 }
 

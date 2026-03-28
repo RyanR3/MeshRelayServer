@@ -79,10 +79,10 @@ type Server struct {
 	clients           map[string]*Client        // username -> client
 	channels          map[string]*Channel       // "agencyID:channelNum" -> channel
 	groups            map[string]*GroupPacket    // groupID -> group
-	users             map[string]*UserAccount    // username -> account
+	users             map[string]*UserAccount    // "agencyID:username" -> account
 	agencies          map[string]*Agency         // agencyID -> agency
 	authenticatedAddrs map[string]bool           // addr string -> authenticated
-	webAdmins          map[string]*WebAdmin      // username -> admin account (web dashboard)
+	webAdmins          map[string]*WebAdmin      // "agencyID:username" -> admin account (web dashboard)
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
 	mu                sync.RWMutex
@@ -103,6 +103,11 @@ type Stats struct {
 // channelKey builds the map key for agency-scoped channels.
 func channelKey(agencyID string, channelNum int) string {
 	return fmt.Sprintf("%s:%d", agencyID, channelNum)
+}
+
+// userKey builds the map key for agency-scoped users: "agencyID:username".
+func userKey(agencyID, username string) string {
+	return agencyID + ":" + username
 }
 
 // ensureAgencyChannels creates channels 0-19 for an agency if they don't exist.
@@ -236,13 +241,14 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	}
 
 	s.mu.RLock()
-	client, exists := s.clients[packet.Username]
+	client, clientKey := s.findClientByUsername(packet.Username)
 	s.mu.RUnlock()
 
-	if !exists {
+	if client == nil {
 		log.Printf("Audio from unknown client: %s (%s)", packet.Username, addr)
 		return
 	}
+	_ = clientKey
 
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
@@ -292,16 +298,16 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 	}
 
 	s.mu.RLock()
-	sender, senderExists := s.clients[packet.Sender]
-	recipient, recipientExists := s.clients[packet.Recipient]
+	sender, _ := s.findClientByUsername(packet.Sender)
+	recipient, _ := s.findClientByUsername(packet.Recipient)
 	s.mu.RUnlock()
 
-	if !senderExists {
+	if sender == nil {
 		log.Printf("Direct audio from unknown sender: %s (%s)", packet.Sender, addr)
 		return
 	}
 
-	if !recipientExists {
+	if recipient == nil {
 		log.Printf("Direct audio to unknown recipient: %s from %s", packet.Recipient, packet.Sender)
 		return
 	}
@@ -337,10 +343,10 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 	}
 
 	s.mu.RLock()
-	client, exists := s.clients[packet.Sender]
+	client, _ := s.findClientByUsername(packet.Sender)
 	s.mu.RUnlock()
 
-	if !exists {
+	if client == nil {
 		log.Printf("Text message from unknown client: %s (%s)", packet.Sender, addr)
 		return
 	}
@@ -391,10 +397,10 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	}
 
 	s.mu.RLock()
-	client, exists := s.clients[packet.Username]
+	client, _ := s.findClientByUsername(packet.Username)
 	s.mu.RUnlock()
 
-	if !exists {
+	if client == nil {
 		return
 	}
 
@@ -454,12 +460,14 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	// Determine agency from user account (default to "default" if not found)
 	agencyID := "default"
-	if user, ok := s.users[packet.Username]; ok {
+	// Try to find user by searching (since we may not know agency from join packet)
+	if user := s.findUserByUsername(packet.Username); user != nil {
 		agencyID = user.AgencyID
 	}
 
 	// Check if client already exists
-	client, exists := s.clients[packet.Username]
+	ck := userKey(agencyID, packet.Username)
+	client, exists := s.clients[ck]
 
 	if exists {
 		// Client is rejoining, possibly switching channels
@@ -467,7 +475,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		oldChannel := s.channels[oldKey]
 		if oldChannel != nil {
 			oldChannel.mu.Lock()
-			delete(oldChannel.Clients, client.Username)
+			delete(oldChannel.Clients, ck)
 			oldChannel.mu.Unlock()
 		}
 
@@ -485,7 +493,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 			LastHeartbeat: time.Now(),
 			ConnectedAt:   time.Now(),
 		}
-		s.clients[packet.Username] = client
+		s.clients[ck] = client
 	}
 
 	// Add client to agency-scoped channel
@@ -493,7 +501,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	channel := s.channels[key]
 	if channel != nil {
 		channel.mu.Lock()
-		channel.Clients[client.Username] = client
+		channel.Clients[ck] = client
 		channel.mu.Unlock()
 		log.Printf("Client %s [%s] joined channel %d from %s", packet.Username, agencyID, packet.Channel, addr)
 	}
@@ -522,12 +530,14 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 }
 
 func (s *Server) removeClient(client *Client) {
+	ck := userKey(client.AgencyID, client.Username)
+
 	// Remove from agency-scoped channel
 	key := channelKey(client.AgencyID, client.Channel)
 	channel := s.channels[key]
 	if channel != nil {
 		channel.mu.Lock()
-		delete(channel.Clients, client.Username)
+		delete(channel.Clients, ck)
 		channel.mu.Unlock()
 	}
 
@@ -537,7 +547,7 @@ func (s *Server) removeClient(client *Client) {
 	}
 
 	// Remove from clients map
-	delete(s.clients, client.Username)
+	delete(s.clients, ck)
 	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
 }
 
@@ -705,7 +715,7 @@ func (s *Server) handleGroupCreate(packet *GroupPacket, addr *net.UDPAddr) {
 	// Determine creator's agency
 	s.mu.RLock()
 	creatorAgency := "default"
-	if creator, ok := s.clients[packet.Creator]; ok {
+	if creator, _ := s.findClientByUsername(packet.Creator); creator != nil {
 		creatorAgency = creator.AgencyID
 	}
 
@@ -744,7 +754,7 @@ func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
 	// Determine creator's agency
 	s.mu.RLock()
 	creatorAgency := "default"
-	if creator, ok := s.clients[packet.Creator]; ok {
+	if creator, _ := s.findClientByUsername(packet.Creator); creator != nil {
 		creatorAgency = creator.AgencyID
 	}
 
@@ -794,12 +804,41 @@ func (s *Server) isAuthenticated(addr *net.UDPAddr) bool {
 	return s.authenticatedAddrs[addr.String()]
 }
 
+// findUserByUsername searches all users to find one matching the given username.
+// Used as fallback when agency ID is not provided (backward compat with old PTT clients).
+func (s *Server) findUserByUsername(username string) *UserAccount {
+	for _, user := range s.users {
+		if user.Username == username {
+			return user
+		}
+	}
+	return nil
+}
+
+// findClientByUsername searches connected clients by username.
+func (s *Server) findClientByUsername(username string) (*Client, string) {
+	for key, client := range s.clients {
+		if client.Username == username {
+			return client, key
+		}
+	}
+	return nil, ""
+}
+
 func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	user, exists := s.users[packet.Username]
-	if !exists {
+	// Try agency-scoped lookup first, fall back to search by username
+	var user *UserAccount
+	if packet.AgencyID != "" {
+		user = s.users[userKey(packet.AgencyID, packet.Username)]
+	}
+	if user == nil {
+		user = s.findUserByUsername(packet.Username)
+	}
+
+	if user == nil {
 		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Unknown user"})
 		s.sendPacket(resp, addr)
@@ -814,7 +853,8 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	// Remove old authenticated address for this user (in case they reconnected from a new port)
-	if existingClient, ok := s.clients[packet.Username]; ok {
+	clientKey := userKey(user.AgencyID, user.Username)
+	if existingClient, ok := s.clients[clientKey]; ok {
 		oldAddr := existingClient.Addr.String()
 		if oldAddr != addr.String() {
 			delete(s.authenticatedAddrs, oldAddr)
@@ -823,7 +863,7 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	s.authenticatedAddrs[addr.String()] = true
-	log.Printf("Auth success: user %s from %s", packet.Username, addr)
+	log.Printf("Auth success: user %s [%s] from %s", packet.Username, user.AgencyID, addr)
 	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: "Authenticated"})
 	s.sendPacket(resp, addr)
 }
@@ -849,7 +889,8 @@ func (s *Server) loadUsers() {
 	}
 
 	for _, user := range users {
-		s.users[user.Username] = user
+		key := userKey(user.AgencyID, user.Username)
+		s.users[key] = user
 	}
 	log.Printf("Loaded %d user accounts", len(s.users))
 }
@@ -876,11 +917,12 @@ func hashPassword(password string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *Server) UpdatePassword(username, password string) error {
+func (s *Server) UpdatePassword(agencyID, username, password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	user, exists := s.users[username]
+	key := userKey(agencyID, username)
+	user, exists := s.users[key]
 	if !exists {
 		return fmt.Errorf("user %s not found", username)
 	}
@@ -888,7 +930,7 @@ func (s *Server) UpdatePassword(username, password string) error {
 	user.PasswordHash = hashPassword(password)
 
 	// Also update web admin password if they have one
-	if admin, ok := s.webAdmins[username]; ok {
+	if admin, ok := s.webAdmins[key]; ok {
 		admin.PasswordHash = hashPassword(password)
 		s.saveWebAdmins()
 	}
@@ -897,15 +939,16 @@ func (s *Server) UpdatePassword(username, password string) error {
 		return err
 	}
 
-	log.Printf("Updated password for user: %s", username)
+	log.Printf("Updated password for user: %s [%s]", username, agencyID)
 	return nil
 }
 
-func (s *Server) UpdateUserRole(username, newRole string) error {
+func (s *Server) UpdateUserRole(agencyID, username, newRole string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	user, exists := s.users[username]
+	key := userKey(agencyID, username)
+	user, exists := s.users[key]
 	if !exists {
 		return fmt.Errorf("user %s not found", username)
 	}
@@ -915,7 +958,7 @@ func (s *Server) UpdateUserRole(username, newRole string) error {
 
 	// Handle web admin entry changes
 	if newRole == "admin" {
-		s.webAdmins[username] = &WebAdmin{
+		s.webAdmins[key] = &WebAdmin{
 			Username:           username,
 			PasswordHash:       user.PasswordHash,
 			Role:               "agency_admin",
@@ -924,7 +967,7 @@ func (s *Server) UpdateUserRole(username, newRole string) error {
 		}
 		s.saveWebAdmins()
 	} else if newRole == "super_admin" {
-		s.webAdmins[username] = &WebAdmin{
+		s.webAdmins[key] = &WebAdmin{
 			Username:           username,
 			PasswordHash:       user.PasswordHash,
 			Role:               "super_admin",
@@ -933,7 +976,7 @@ func (s *Server) UpdateUserRole(username, newRole string) error {
 		s.saveWebAdmins()
 	} else if oldRole == "admin" || oldRole == "super_admin" {
 		// Downgraded from admin/super_admin to user — remove web admin
-		delete(s.webAdmins, username)
+		delete(s.webAdmins, key)
 		s.saveWebAdmins()
 	}
 
@@ -941,38 +984,39 @@ func (s *Server) UpdateUserRole(username, newRole string) error {
 		return err
 	}
 
-	log.Printf("Updated role for user %s: %s -> %s", username, oldRole, newRole)
+	log.Printf("Updated role for user %s [%s]: %s -> %s", username, agencyID, oldRole, newRole)
 	return nil
 }
 
-func (s *Server) RemoveUser(username string) error {
+func (s *Server) RemoveUser(agencyID, username string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	user, exists := s.users[username]
+	key := userKey(agencyID, username)
+	user, exists := s.users[key]
 	if !exists {
 		return fmt.Errorf("user %s not found", username)
 	}
 
 	// If user had admin/super_admin role, also remove web admin entry
 	if user.Role == "admin" || user.Role == "super_admin" {
-		delete(s.webAdmins, username)
+		delete(s.webAdmins, key)
 		if err := s.saveWebAdmins(); err != nil {
 			log.Printf("Warning: failed to remove web admin for %s: %v", username, err)
 		}
 	}
 
-	delete(s.users, username)
+	delete(s.users, key)
 
 	if err := s.saveUsers(); err != nil {
 		return err
 	}
 
-	log.Printf("Removed user account: %s", username)
+	log.Printf("Removed user account: %s [%s]", username, agencyID)
 	return nil
 }
 
-func (s *Server) GetUsers(agencyFilter string) []map[string]interface{} {
+func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername string) []map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -981,10 +1025,25 @@ func (s *Server) GetUsers(agencyFilter string) []map[string]interface{} {
 		if agencyFilter != "" && user.AgencyID != agencyFilter {
 			continue
 		}
+
 		role := user.Role
 		if role == "" {
 			role = "user"
 		}
+
+		// Role-based visibility:
+		// - super_admin: sees everyone
+		// - agency_admin: sees only "user" role in own agency
+		// - user: sees only themselves
+		if callerRole == "agency_admin" {
+			if user.AgencyID != callerAgency {
+				continue
+			}
+			if role != "user" {
+				continue
+			}
+		}
+
 		users = append(users, map[string]interface{}{
 			"username":   user.Username,
 			"agency_id":  user.AgencyID,
@@ -1023,13 +1082,14 @@ func (s *Server) loadWebAdmins() {
 	}
 
 	for i := range admins {
-		s.webAdmins[admins[i].Username] = &admins[i]
+		key := userKey(admins[i].AgencyID, admins[i].Username)
+		s.webAdmins[key] = &admins[i]
 	}
 	log.Printf("Loaded %d web admin account(s)", len(s.webAdmins))
 }
 
 func (s *Server) createDefaultAdmin() {
-	s.webAdmins["admin"] = &WebAdmin{
+	s.webAdmins[userKey("", "admin")] = &WebAdmin{
 		Username:           "admin",
 		PasswordHash:       hashPassword("admin"),
 		Role:               "super_admin",
@@ -1142,7 +1202,8 @@ func (s *Server) migrateToAgencies() {
 		MaxChannels: 20,
 	}
 
-	// Backfill users with agency_id and role
+	// Backfill users with agency_id and role, and re-key map
+	rekeyed := make(map[string]*UserAccount)
 	for _, user := range s.users {
 		if user.AgencyID == "" {
 			user.AgencyID = "default"
@@ -1150,19 +1211,24 @@ func (s *Server) migrateToAgencies() {
 		if user.Role == "" {
 			user.Role = "user"
 		}
+		rekeyed[userKey(user.AgencyID, user.Username)] = user
 	}
+	s.users = rekeyed
 	if len(s.users) > 0 {
 		if err := s.saveUsers(); err != nil {
 			log.Printf("Error saving migrated users: %v", err)
 		}
 	}
 
-	// Backfill web admins with role
+	// Backfill web admins with role and re-key map
+	rekeyedAdmins := make(map[string]*WebAdmin)
 	for _, admin := range s.webAdmins {
 		if admin.Role == "" {
 			admin.Role = "super_admin"
 		}
+		rekeyedAdmins[userKey(admin.AgencyID, admin.Username)] = admin
 	}
+	s.webAdmins = rekeyedAdmins
 	if len(s.webAdmins) > 0 {
 		if err := s.saveWebAdmins(); err != nil {
 			log.Printf("Error saving migrated web admins: %v", err)
@@ -1180,12 +1246,14 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.users[username]; exists {
-		return fmt.Errorf("user %s already exists", username)
-	}
-
 	if agencyID == "" {
 		agencyID = "default"
+	}
+
+	key := userKey(agencyID, username)
+
+	if _, exists := s.users[key]; exists {
+		return fmt.Errorf("user %s already exists in agency %s", username, agencyID)
 	}
 
 	if _, exists := s.agencies[agencyID]; !exists {
@@ -1196,7 +1264,7 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 		role = "user"
 	}
 
-	s.users[username] = &UserAccount{
+	s.users[key] = &UserAccount{
 		Username:     username,
 		PasswordHash: hashPassword(password),
 		AgencyID:     agencyID,
@@ -1206,7 +1274,7 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 
 	// If the user is an admin, also create/update a web admin entry for dashboard access
 	if role == "admin" {
-		s.webAdmins[username] = &WebAdmin{
+		s.webAdmins[key] = &WebAdmin{
 			Username:           username,
 			PasswordHash:       hashPassword(password),
 			Role:               "agency_admin",
@@ -1217,7 +1285,7 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 			log.Printf("Warning: failed to save web admin for %s: %v", username, err)
 		}
 	} else if role == "super_admin" {
-		s.webAdmins[username] = &WebAdmin{
+		s.webAdmins[key] = &WebAdmin{
 			Username:           username,
 			PasswordHash:       hashPassword(password),
 			Role:               "super_admin",
@@ -1229,7 +1297,7 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 	}
 
 	if err := s.saveUsers(); err != nil {
-		delete(s.users, username)
+		delete(s.users, key)
 		return err
 	}
 
