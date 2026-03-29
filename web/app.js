@@ -1,6 +1,7 @@
 // WebSocket connection
 let ws = null;
 let reconnectInterval = null;
+let reconnectAttempts = 0;
 
 // Currently editing user
 let editingUsername = '';
@@ -49,6 +50,7 @@ function connectWebSocket() {
         console.log('WebSocket connected');
         updateConnectionStatus(true);
         addLog('Connected to server', 'success');
+        reconnectAttempts = 0;
 
         if (reconnectInterval) {
             clearInterval(reconnectInterval);
@@ -68,9 +70,18 @@ function connectWebSocket() {
         updateConnectionStatus(false);
         addLog('Disconnected from server', 'warning');
 
-        // Attempt to reconnect every 3 seconds
+        // Attempt to reconnect every 3 seconds, reload page after 5 failures
         if (!reconnectInterval) {
-            reconnectInterval = setInterval(connectWebSocket, 3000);
+            reconnectInterval = setInterval(() => {
+                reconnectAttempts++;
+                if (reconnectAttempts > 5) {
+                    clearInterval(reconnectInterval);
+                    reconnectInterval = null;
+                    location.reload();
+                    return;
+                }
+                connectWebSocket();
+            }, 3000);
         }
     };
 
