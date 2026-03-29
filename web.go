@@ -372,17 +372,42 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("New WebSocket connection from %s", r.RemoteAddr)
 
+	// Set up ping/pong to detect dead connections
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	// Read pump — needed so pong frames are processed
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				conn.Close()
+				return
+			}
+		}
+	}()
+
 	// Send initial data
 	s.sendWebSocketUpdate(conn)
 
-	// Send updates every 2 seconds
+	// Send updates every 2 seconds, ping every 30 seconds
 	ticker := time.NewTicker(2 * time.Second)
+	pingTicker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	defer pingTicker.Stop()
 
 	for {
 		select {
 		case <-s.shutdown:
 			return
+		case <-pingTicker.C:
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("WebSocket ping error: %v", err)
+				return
+			}
 		case <-ticker.C:
 			if err := s.sendWebSocketUpdate(conn); err != nil {
 				log.Printf("WebSocket send error: %v", err)
@@ -403,6 +428,7 @@ func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
 		},
 	}
 
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteJSON(msg)
 }
 
