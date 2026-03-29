@@ -1088,10 +1088,10 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		Active:      true,
 	}
 	s.mutualAidLinks[linkID] = link
-
-	// Notify all clients in the selected agencies about the new mutual aid channel
-	s.notifyMutualAidChannel(req.Agencies, channel, req.ChannelName, true)
 	s.mu.Unlock()
+
+	// Notify AFTER releasing the lock to avoid blocking WebSocket updates
+	s.notifyMutualAidChannel(req.Agencies, channel, req.ChannelName, true)
 
 	if err := s.saveMutualAid(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1122,10 +1122,10 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 	channelName := link.ChannelName
 
 	delete(s.mutualAidLinks, id)
-
-	// Notify clients to remove the mutual aid channel from their list
-	s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
 	s.mu.Unlock()
+
+	// Notify clients AFTER releasing the lock to avoid blocking WebSocket updates
+	s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
 
 	s.saveMutualAid()
 

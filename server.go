@@ -1483,26 +1483,33 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 		agencySet[a] = true
 	}
 
-	count := 0
-	skipped := 0
+	// Collect targets under read lock, then send outside the lock
+	type target struct {
+		username string
+		agencyID string
+		addr     *net.UDPAddr
+	}
+	var targets []target
+
+	s.mu.RLock()
 	for _, client := range s.clients {
 		if !agencySet[client.AgencyID] {
-			skipped++
 			continue
 		}
-		s.sendPacket(pkt, client.Addr)
-		count++
-		log.Printf("Mutual aid notify: sent to %s [%s]", client.Username, client.AgencyID)
+		targets = append(targets, target{client.Username, client.AgencyID, client.Addr})
 	}
-	if skipped > 0 {
-		log.Printf("Mutual aid notify: skipped %d clients not in target agencies %v", skipped, agencies)
+	s.mu.RUnlock()
+
+	for _, t := range targets {
+		s.sendPacket(pkt, t.addr)
+		log.Printf("Mutual aid notify: sent to %s [%s]", t.username, t.agencyID)
 	}
 
 	action := "added"
 	if !active {
 		action = "removed"
 	}
-	log.Printf("Mutual aid channel %s: notified %d clients in %v about channel %d (%s)", action, count, agencies, channel, channelName)
+	log.Printf("Mutual aid channel %s: notified %d clients in %v about channel %d (%s)", action, len(targets), agencies, channel, channelName)
 }
 
 // pickMutualAidChannel picks the highest unused channel number (starting from 19 down)
