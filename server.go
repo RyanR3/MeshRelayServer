@@ -528,21 +528,32 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
 	}
 
-	// Send any active mutual aid channels for this client's agency
+	// Send any active mutual aid channels for this client's agency,
+	// but only if the client is NOT joining a mutual aid channel itself
+	// (to prevent infinite join loops: client gets ChannelSwitch -> joins -> gets ChannelSwitch -> ...)
+	isMutualAidJoin := false
 	for _, link := range s.mutualAidLinks {
-		if !link.Active {
-			continue
+		if link.Active && link.Channel == packet.Channel {
+			isMutualAidJoin = true
+			break
 		}
-		for _, a := range link.Agencies {
-			if a == agencyID {
-				pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
-					Channel:     link.Channel,
-					ChannelName: link.ChannelName,
-					Active:      true,
-				})
-				s.sendPacket(pkt, addr)
-				log.Printf("Sent mutual aid channel %d (%s) to newly joined client %s [%s]", link.Channel, link.ChannelName, packet.Username, agencyID)
-				break
+	}
+	if !isMutualAidJoin {
+		for _, link := range s.mutualAidLinks {
+			if !link.Active {
+				continue
+			}
+			for _, a := range link.Agencies {
+				if a == agencyID {
+					pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
+						Channel:     link.Channel,
+						ChannelName: link.ChannelName,
+						Active:      true,
+					})
+					s.sendPacket(pkt, addr)
+					log.Printf("Sent mutual aid channel %d (%s) to newly joined client %s [%s]", link.Channel, link.ChannelName, packet.Username, agencyID)
+					break
+				}
 			}
 		}
 	}
