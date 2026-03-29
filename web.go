@@ -1090,8 +1090,8 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 	s.mutualAidLinks[linkID] = link
 	s.mu.Unlock()
 
-	// Notify AFTER releasing the lock to avoid blocking WebSocket updates
-	s.notifyMutualAidChannel(req.Agencies, channel, req.ChannelName, true)
+	// Notify in background so the HTTP response returns immediately
+	go s.notifyMutualAidChannel(req.Agencies, channel, req.ChannelName, true)
 
 	if err := s.saveMutualAid(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1124,8 +1124,8 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 	delete(s.mutualAidLinks, id)
 	s.mu.Unlock()
 
-	// Notify clients AFTER releasing the lock to avoid blocking WebSocket updates
-	s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
+	// Notify in background so the HTTP response returns immediately
+	go s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
 
 	s.saveMutualAid()
 
