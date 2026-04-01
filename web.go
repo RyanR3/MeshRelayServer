@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,8 +87,21 @@ func (s *Server) StartWeb() error {
 	addr := fmt.Sprintf(":%d", s.config.WebPort)
 	log.Printf("Web GUI server starting on http://localhost%s", addr)
 
-	// Wrap with auth middleware
-	return http.ListenAndServe(addr, s.authMiddleware(r))
+	// Start pprof debug server on separate port for diagnostics
+	go func() {
+		log.Printf("pprof debug server on :6060")
+		http.ListenAndServe(":6060", nil)
+	}()
+
+	// Use http.Server with timeouts to prevent stuck connections from blocking the server
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      s.authMiddleware(r),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 // authMiddleware checks for valid session cookie on all requests
