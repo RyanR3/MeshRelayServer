@@ -1512,10 +1512,7 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 	}
 	s.mu.RUnlock()
 
-	for i, t := range targets {
-		if i > 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
+	for _, t := range targets {
 		s.sendPacket(pkt, t.addr)
 		log.Printf("Mutual aid notify: sent to %s [%s]", t.username, t.agencyID)
 	}

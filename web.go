@@ -1133,16 +1133,13 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	agencies := link.Agencies
 	oldChannel := link.Channel
-	_ = link.ChannelName
+	channelName := link.ChannelName
 
 	delete(s.mutualAidLinks, id)
 	s.mu.Unlock()
 
-	// Skip UDP notification to clients on delete — the tunnel stalls when
-	// sending packets during a delete. Clients will keep the channel until
-	// they reconnect. The WebSocket dashboard updates immediately.
-	// TODO: re-enable once tunnel issue is resolved
-	log.Printf("Skipping client notification for mutual aid delete (tunnel protection)")
+	// Notify clients in background so HTTP response returns immediately
+	go s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
 
 	s.saveMutualAid()
 
