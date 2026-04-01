@@ -1138,8 +1138,13 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 	delete(s.mutualAidLinks, id)
 	s.mu.Unlock()
 
-	// Notify in background so the HTTP response returns immediately
-	go s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
+	// Notify in background with delay — gives HTTP response and WebSocket
+	// time to flow through the Wireguard tunnel before triggering client
+	// channel switches that create bidirectional traffic bursts
+	go func() {
+		time.Sleep(2 * time.Second)
+		s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
+	}()
 
 	s.saveMutualAid()
 
