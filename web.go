@@ -1133,18 +1133,16 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	agencies := link.Agencies
 	oldChannel := link.Channel
-	channelName := link.ChannelName
+	_ = link.ChannelName
 
 	delete(s.mutualAidLinks, id)
 	s.mu.Unlock()
 
-	// Notify in background with delay — gives HTTP response and WebSocket
-	// time to flow through the Wireguard tunnel before triggering client
-	// channel switches that create bidirectional traffic bursts
-	go func() {
-		time.Sleep(2 * time.Second)
-		s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
-	}()
+	// Skip UDP notification to clients on delete — the tunnel stalls when
+	// sending packets during a delete. Clients will keep the channel until
+	// they reconnect. The WebSocket dashboard updates immediately.
+	// TODO: re-enable once tunnel issue is resolved
+	log.Printf("Skipping client notification for mutual aid delete (tunnel protection)")
 
 	s.saveMutualAid()
 
