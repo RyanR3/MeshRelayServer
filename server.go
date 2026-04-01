@@ -473,8 +473,15 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		return
 	}
 
+	// Collect packets to send AFTER releasing the lock
+	type pendingPacket struct {
+		data []byte
+		addr *net.UDPAddr
+		desc string
+	}
+	var toSend []pendingPacket
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Determine agency from user account (default to "default" if not found)
 	agencyID := "default"
@@ -528,9 +535,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
 	}
 
-	// Send any active mutual aid channels for this client's agency,
-	// but only if the client is NOT joining a mutual aid channel itself
-	// (to prevent infinite join loops: client gets ChannelSwitch -> joins -> gets ChannelSwitch -> ...)
+	// Collect mutual aid channel notifications to send after releasing the lock
 	isMutualAidJoin := false
 	for _, link := range s.mutualAidLinks {
 		if link.Active && link.Channel == packet.Channel {
@@ -550,12 +555,19 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 						ChannelName: link.ChannelName,
 						Active:      true,
 					})
-					s.sendPacket(pkt, addr)
-					log.Printf("Sent mutual aid channel %d (%s) to newly joined client %s [%s]", link.Channel, link.ChannelName, packet.Username, agencyID)
+					toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent mutual aid channel %d (%s) to newly joined client %s [%s]", link.Channel, link.ChannelName, packet.Username, agencyID)})
 					break
 				}
 			}
 		}
+	}
+
+	s.mu.Unlock()
+
+	// Send packets outside the lock
+	for _, p := range toSend {
+		s.sendPacket(p.data, p.addr)
+		log.Printf("%s", p.desc)
 	}
 }
 
