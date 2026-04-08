@@ -83,7 +83,7 @@ type Server struct {
 	groups            map[string]*GroupPacket    // groupID -> group
 	users             map[string]*UserAccount    // "agencyID:username" -> account
 	agencies          map[string]*Agency         // agencyID -> agency
-	authenticatedAddrs map[string]bool           // addr string -> authenticated
+	authenticatedAddrs map[string]string         // addr string -> agencyID
 	webAdmins          map[string]*WebAdmin      // "agencyID:username" -> admin account (web dashboard)
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
@@ -135,7 +135,7 @@ func NewServer(config *Config, configFile string) *Server {
 		groups:            make(map[string]*GroupPacket),
 		users:             make(map[string]*UserAccount),
 		agencies:          make(map[string]*Agency),
-		authenticatedAddrs: make(map[string]bool),
+		authenticatedAddrs: make(map[string]string),
 		webAdmins:          make(map[string]*WebAdmin),
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
@@ -483,13 +483,15 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	s.mu.Lock()
 
-	// Determine agency from user account (default to "default" if not found)
-	agencyID := "default"
-	// Try to find user by searching (since we may not know agency from join packet)
-	if user := s.findUserByUsername(packet.Username); user != nil {
-		agencyID = user.AgencyID
-	} else {
-		log.Printf("JOIN warning: user %s not found in users list, using agency 'default'", packet.Username)
+	// Determine agency: prefer authenticated session, then user account lookup, then default
+	agencyID := s.authenticatedAddrs[addr.String()]
+	if agencyID == "" {
+		if user := s.findUserByUsername(packet.Username); user != nil {
+			agencyID = user.AgencyID
+		} else {
+			agencyID = "default"
+			log.Printf("JOIN warning: user %s not found in users list, using agency 'default'", packet.Username)
+		}
 	}
 
 	// Check if client already exists
@@ -866,6 +868,14 @@ func (s *Server) GetGroups() []map[string]interface{} {
 func (s *Server) isAuthenticated(addr *net.UDPAddr) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	_, ok := s.authenticatedAddrs[addr.String()]
+	return ok
+}
+
+// getAuthenticatedAgency returns the agency ID for an authenticated address.
+func (s *Server) getAuthenticatedAgency(addr *net.UDPAddr) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.authenticatedAddrs[addr.String()]
 }
 
@@ -927,7 +937,7 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		}
 	}
 
-	s.authenticatedAddrs[addr.String()] = true
+	s.authenticatedAddrs[addr.String()] = user.AgencyID
 	log.Printf("Auth success: user %s [%s] from %s", packet.Username, user.AgencyID, addr)
 	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: "Authenticated"})
 	s.sendPacket(resp, addr)
