@@ -1,6 +1,27 @@
-# PTT Server
+# MeshRelay Server
 
-A high-performance Push-to-Talk relay server written in Go, designed to work with the Android PTT app. Routes voice and text messages between clients over the internet, bypassing multicast limitations.
+A high-performance Push-to-Talk relay server written in Go, designed to work with the MeshRelay Android app. Routes voice and text messages between clients over the internet.
+
+## Quick Install (Ubuntu/Debian)
+
+```bash
+git clone https://github.com/RyanR3/MeshRelayServer.git
+cd MeshRelayServer
+sudo ./install.sh
+```
+
+Dashboard: `http://your-server-ip:8080`
+Default login: `admin` / `admin`
+
+### Update
+
+```bash
+cd MeshRelayServer
+git pull
+sudo ./install.sh
+```
+
+Your config, users, and agencies are preserved on update.
 
 ## Features
 
@@ -18,55 +39,26 @@ A high-performance Push-to-Talk relay server written in Go, designed to work wit
 - **Web Server** (Port 8080): Serves dashboard and REST API
 - **WebSocket**: Real-time updates to web clients
 
-## Quick Start
+## Manual Setup
 
-### Installation
+If you prefer to set up manually instead of using `install.sh`:
 
-1. **Install Go** (if not already installed):
-   ```bash
-   # On Ubuntu
-   sudo apt update
-   sudo apt install golang-go
-
-   # Or download from https://go.dev/dl/
-   ```
-
-2. **Clone or extract** the PTT Server files
-
-3. **Install dependencies**:
-   ```bash
-   cd PTTServer
-   go mod download
-   ```
-
-4. **Build the server**:
-   ```bash
-   go build -o ptt-server
-   ```
-
-### Running the Server
-
-**Basic usage**:
 ```bash
+# Install Go
+sudo apt update && sudo apt install golang-go
+
+# Build
+cd MeshRelayServer
+go mod download
+go build -o ptt-server
+
+# Run
 ./ptt-server
 ```
 
-**Custom ports**:
-```bash
-./ptt-server -ptt-port=6000 -web-port=9090
-```
+**Custom ports**: `./ptt-server -ptt-port=6000 -web-port=9090`
 
-**Using config file**:
-```bash
-./ptt-server -config=myconfig.json
-```
-
-### Access the Dashboard
-
-Open your browser and navigate to:
-```
-http://localhost:8080
-```
+**Dashboard**: `http://localhost:8080`
 
 ## Configuration
 
@@ -82,61 +74,15 @@ Edit `config.json`:
 }
 ```
 
-## Ubuntu Server Deployment
+## Service Management
 
-### 1. Copy Server to Ubuntu VM
-
-```bash
-# Build for Linux (if building on Mac)
-GOOS=linux GOARCH=amd64 go build -o ptt-server
-
-# Copy to server
-scp ptt-server user@your-server:/opt/ptt-server/
-scp config.json user@your-server:/opt/ptt-server/
-scp -r web user@your-server:/opt/ptt-server/
-```
-
-### 2. Create Systemd Service
-
-Create `/etc/systemd/system/ptt-server.service`:
-
-```ini
-[Unit]
-Description=PTT Relay Server
-After=network.target
-
-[Service]
-Type=simple
-User=ptt
-WorkingDirectory=/opt/ptt-server
-ExecStart=/opt/ptt-server/ptt-server
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 3. Create User and Set Permissions
+The install script sets up a systemd service automatically. Useful commands:
 
 ```bash
-sudo useradd -r -s /bin/false ptt
-sudo chown -R ptt:ptt /opt/ptt-server
-```
-
-### 4. Enable and Start Service
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ptt-server
-sudo systemctl start ptt-server
-```
-
-### 5. Check Status
-
-```bash
-sudo systemctl status ptt-server
-journalctl -u ptt-server -f  # View logs
+sudo systemctl status ptt-server    # Check status
+sudo systemctl restart ptt-server   # Restart
+sudo systemctl stop ptt-server      # Stop
+journalctl -u ptt-server -f         # View logs
 ```
 
 ## Firewall Configuration
