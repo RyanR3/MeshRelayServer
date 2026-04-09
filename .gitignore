@@ -9,6 +9,9 @@ web_admins.json
 # Config (contains server-specific settings)
 config.json
 
+# Build artifacts
+web.tar.gz
+
 # Backups
 backups/
 .DS_Store
