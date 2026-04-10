@@ -88,6 +88,13 @@ fi
 # Step 5: Set permissions
 echo -e "${YELLOW}[5/7] Setting permissions...${NC}"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+
+# Ensure the ptt user can traverse parent directories to reach the install dir
+CURRENT="$INSTALL_DIR"
+while [ "$CURRENT" != "/" ]; do
+    CURRENT="$(dirname "$CURRENT")"
+    chmod o+x "$CURRENT" 2>/dev/null || true
+done
 echo -e "  Ownership set to ${SERVICE_USER}"
 
 # Step 6: Install systemd service + firewall
