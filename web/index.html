@@ -374,14 +374,15 @@
         </div>
     </div>
 
-    <!-- Change Admin Password Modal (forced on first login) -->
+    <!-- Change Admin Password Modal (forced on first login — non-dismissible) -->
     <div id="changeAdminPasswordModal" class="modal">
         <div class="modal-content">
             <h2>Change Your Password</h2>
             <p class="modal-subtitle">You must change your password before continuing</p>
             <div id="adminPasswordError" class="status-message error" style="display: none;"></div>
-            <input type="password" id="adminNewPassword" placeholder="New Password">
+            <input type="password" id="adminNewPassword" placeholder="New Password (min 12 characters)">
             <input type="password" id="adminConfirmPassword" placeholder="Confirm Password">
+            <p style="font-size: 12px; color: #888; margin-bottom: 12px;">Password must be at least 12 characters</p>
             <div class="modal-actions">
                 <button class="btn-primary" onclick="changeAdminPassword()">Change Password</button>
             </div>
@@ -434,6 +435,12 @@
                     <div class="progress-bar" id="update-progress-bar" style="width: 0%"></div>
                 </div>
                 <div class="progress-stage" id="update-stage">Preparing...</div>
+            </div>
+
+            <!-- Confirm section (shown before applying) -->
+            <div id="update-confirm-section" style="display: none;">
+                <p style="color: #FFC107; margin-bottom: 12px;">This will replace the running server binary and restart the service.</p>
+                <input type="password" id="update-confirm-password" placeholder="Re-enter your password to confirm" style="width: 100%; padding: 12px 14px; background: #0A0A0A; border: 1px solid #2A2A2A; border-radius: 8px; color: #FFF; font-size: 14px; margin-bottom: 8px;">
             </div>
 
             <!-- Error / Success messages -->

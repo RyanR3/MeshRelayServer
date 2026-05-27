@@ -64,7 +64,7 @@ if [ ! -f "$INSTALL_DIR/config.json" ]; then
   "max_clients": 1000,
   "max_channels": 100,
   "log_level": "INFO",
-  "auth_enabled": false,
+  "auth_enabled": true,
   "users_file": "users.json",
   "web_admins_file": "web_admins.json",
   "agencies_file": "agencies.json"
@@ -96,6 +96,14 @@ while [ "$CURRENT" != "/" ]; do
     chmod o+x "$CURRENT" 2>/dev/null || true
 done
 echo -e "  Ownership set to ${SERVICE_USER}"
+
+# Restrict sensitive data files to owner-read/write only
+for f in config.json users.json web_admins.json agencies.json mutual_aid.json; do
+    if [ -f "$INSTALL_DIR/$f" ]; then
+        chmod 600 "$INSTALL_DIR/$f"
+    fi
+done
+echo -e "  Sensitive files restricted to owner-only (chmod 600)"
 
 # Step 6: Install systemd service + firewall
 echo -e "${YELLOW}[6/7] Installing service...${NC}"
@@ -131,6 +139,12 @@ else
     echo -e "  Firewall: UFW not active (configure manually if needed)"
 fi
 
+# Sudoers: restrict ptt user to only restart its own service (for self-update)
+SUDOERS_FILE="/etc/sudoers.d/ptt-server"
+echo "${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}" > "$SUDOERS_FILE"
+chmod 440 "$SUDOERS_FILE"
+echo -e "  Sudoers: ${SERVICE_USER} can only restart ${SERVICE_NAME}"
+
 # Step 7: Start service
 echo -e "${YELLOW}[7/7] Starting server...${NC}"
 systemctl restart "$SERVICE_NAME"
@@ -145,8 +159,9 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo -e "${GREEN}  MeshRelay Server is running!${NC}"
     echo -e "${GREEN}============================================${NC}"
     echo ""
-    echo -e "  Dashboard:  ${GREEN}http://${IP}:8080${NC}"
-    echo -e "  Login:      admin / admin"
+    echo -e "  Dashboard:  ${GREEN}https://${IP}:8080${NC}  (configure TLS in config.json)"
+    echo -e "  Login:      Check server log for initial admin password"
+    echo -e "              journalctl -u ${SERVICE_NAME} | grep 'INITIAL ADMIN PASSWORD'"
     echo -e "  PTT Port:   UDP 5000"
     echo ""
     echo -e "  Logs:       journalctl -u ${SERVICE_NAME} -f"

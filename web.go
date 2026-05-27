@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,11 +24,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for development
-	},
-}
+// upgrader is initialized in StartWeb() with proper origin checking
+var upgrader websocket.Upgrader
 
 type WebSocketMessage struct {
 	Type string      `json:"type"`
@@ -33,6 +33,21 @@ type WebSocketMessage struct {
 }
 
 func (s *Server) StartWeb() error {
+	// Initialize WebSocket upgrader with proper origin checking
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // Non-browser clients (no Origin header)
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			return u.Host == r.Host
+		},
+	}
+
 	r := mux.NewRouter()
 
 	// Unauthenticated routes
@@ -85,13 +100,16 @@ func (s *Server) StartWeb() error {
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./web")))
 
 	addr := fmt.Sprintf(":%d", s.config.WebPort)
-	log.Printf("Web GUI server starting on http://localhost%s", addr)
 
-	// Start pprof debug server on separate port for diagnostics
-	go func() {
-		log.Printf("pprof debug server on :6060")
-		http.ListenAndServe(":6060", nil)
-	}()
+	// pprof: only start if explicitly enabled, and bind to loopback only
+	if s.config.DebugPprof {
+		go func() {
+			log.Printf("pprof debug server on 127.0.0.1:6060 (loopback only)")
+			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+				log.Printf("pprof server error: %v", err)
+			}
+		}()
+	}
 
 	// Use http.Server with timeouts to prevent stuck connections from blocking the server
 	srv := &http.Server{
@@ -101,6 +119,20 @@ func (s *Server) StartWeb() error {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+
+	// TLS: if cert and key are configured, serve HTTPS
+	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+		srv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		log.Printf("Web GUI server starting on https://localhost%s (TLS enabled)", addr)
+		return srv.ListenAndServeTLS(s.config.TLSCertFile, s.config.TLSKeyFile)
+	}
+
+	// No TLS — warn if binding to non-loopback
+	log.Printf("WARNING: Web dashboard running without TLS on %s — admin credentials transmitted in cleartext", addr)
+	log.Printf("WARNING: Set tls_cert_file and tls_key_file in config.json to enable TLS")
+	log.Printf("Web GUI server starting on http://localhost%s", addr)
 	return srv.ListenAndServe()
 }
 
@@ -133,6 +165,34 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Enforce MustChangePassword server-side: block all privileged
+		// API calls until the admin has changed their password
+		s.mu.RLock()
+		session := s.webSessions[cookie.Value]
+		var mustChange bool
+		if session != nil {
+			if admin, exists := s.webAdmins[userKey(session.AgencyID, session.Username)]; exists {
+				mustChange = admin.MustChangePassword
+			}
+		}
+		s.mu.RUnlock()
+
+		if mustChange {
+			allowedWhenForced := path == "/api/admin/change-password" ||
+				path == "/api/logout" ||
+				path == "/api/session" ||
+				// Allow static assets so the dashboard page (with password change modal) can load
+				path == "/" || path == "/index.html" ||
+				path == "/app.js" || path == "/style.css" ||
+				path == "/logo.png" || path == "/favicon.ico"
+			if !allowedWhenForced {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"must_change_password","message":"You must change your password before accessing other features"}`))
+				return
+			}
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -154,12 +214,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	admin, exists := s.webAdmins[userKey(req.AgencyID, req.Username)]
 	s.mu.RUnlock()
 
-	if !exists || admin.PasswordHash != hashPassword(req.Password) {
+	if !exists || !checkPassword(req.Password, admin.PasswordHash) {
 		log.Printf("Failed web login attempt for user: %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"invalid username or password"}`))
 		return
+	}
+
+	// Transparently migrate legacy SHA-256 hashes to bcrypt on successful login
+	if !strings.HasPrefix(admin.PasswordHash, "$2a$") && !strings.HasPrefix(admin.PasswordHash, "$2b$") {
+		if newHash, err := hashPasswordSecure(req.Password); err == nil {
+			s.mu.Lock()
+			admin.PasswordHash = newHash
+			s.mu.Unlock()
+			s.saveWebAdmins()
+			log.Printf("Upgraded password hash to bcrypt for user: %s", req.Username)
+		}
 	}
 
 	// Create session with role info
@@ -177,7 +248,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		MaxAge:   86400 * 7, // 7 days
+		MaxAge:   86400, // 24 hours
+		Secure:   s.config.TLSCertFile != "",
+		SameSite: http.SameSiteStrictMode,
 	})
 
 	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, admin.Role, r.RemoteAddr)
@@ -207,6 +280,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		MaxAge:   -1,
+		Secure:   s.config.TLSCertFile != "",
+		SameSite: http.SameSiteStrictMode,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -714,10 +789,17 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if req.NewPassword == "" || len(req.NewPassword) < 4 {
+	if len(req.NewPassword) < 12 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"password must be at least 4 characters"}`))
+		w.Write([]byte(`{"error":"password must be at least 12 characters"}`))
+		return
+	}
+	lowPw := strings.ToLower(req.NewPassword)
+	if lowPw == "admin" || lowPw == "password" || lowPw == "123456789012" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"password is too common, choose a stronger one"}`))
 		return
 	}
 
@@ -730,7 +812,15 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 		w.Write([]byte(`{"error":"admin not found"}`))
 		return
 	}
-	admin.PasswordHash = hashPassword(req.NewPassword)
+	newHash, err := hashPasswordSecure(req.NewPassword)
+	if err != nil {
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"failed to hash password"}`))
+		return
+	}
+	admin.PasswordHash = newHash
 	admin.MustChangePassword = false
 	s.mu.Unlock()
 
@@ -980,9 +1070,16 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	bcryptHash, err := hashPasswordSecure(req.Password)
+	if err != nil {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"failed to hash password"}`))
+		return
+	}
 	s.webAdmins[key] = &WebAdmin{
 		Username:           req.Username,
-		PasswordHash:       hashPassword(req.Password),
+		PasswordHash:       bcryptHash,
 		Role:               "agency_admin",
 		AgencyID:           agencyID,
 		MustChangePassword: true,
@@ -1260,11 +1357,37 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !strings.HasPrefix(req.BinaryURL, "https://github.com/RyanR3/MeshRelayServer/") &&
-		!strings.HasPrefix(req.BinaryURL, "https://api.github.com/repos/RyanR3/MeshRelayServer/") {
+	allowedPrefixes := []string{
+		"https://github.com/RyanR3/MeshRelayServer/",
+		"https://api.github.com/repos/RyanR3/MeshRelayServer/",
+	}
+
+	binaryAllowed := false
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(req.BinaryURL, prefix) {
+			binaryAllowed = true
+			break
+		}
+	}
+	if !binaryAllowed {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid download URL"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Binary URL not in allowlist"})
 		return
+	}
+
+	if req.WebURL != "" {
+		webAllowed := false
+		for _, prefix := range allowedPrefixes {
+			if strings.HasPrefix(req.WebURL, prefix) {
+				webAllowed = true
+				break
+			}
+		}
+		if !webAllowed {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Web URL not in allowlist"})
+			return
+		}
 	}
 
 	go s.performUpdate(req.BinaryURL, req.WebURL, s.config.GitHubToken)
@@ -1334,14 +1457,43 @@ func (s *Server) performUpdate(binaryURL, webURL, ghToken string) {
 		s.setUpdateStatus("error", 10, "", "Failed to create temp file: "+err.Error())
 		return
 	}
-	if _, err := io.Copy(outFile, resp.Body); err != nil {
+	const maxBinarySize = 100 * 1024 * 1024 // 100 MB
+	limitedReader := io.LimitReader(resp.Body, maxBinarySize+1)
+	written, err := io.Copy(outFile, limitedReader)
+	if err != nil {
 		outFile.Close()
 		os.Remove(tmpBinary)
 		s.setUpdateStatus("error", 20, "", "Failed to write binary: "+err.Error())
 		return
 	}
 	outFile.Close()
+	if written > maxBinarySize {
+		os.Remove(tmpBinary)
+		s.setUpdateStatus("error", 20, "", "Binary exceeds maximum allowed size (100 MB)")
+		return
+	}
 	os.Chmod(tmpBinary, 0755)
+
+	// Verify SHA-256 checksum if a checksums file is available in the release
+	s.setUpdateStatus("verifying", 25, "Verifying binary checksum...", "")
+	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryURL, ghToken)
+	if checksumErr != nil {
+		// FAIL CLOSED: cannot verify => do not install.
+		os.Remove(tmpBinary)
+		log.Printf("Checksum verification could not complete: %v", checksumErr)
+		s.setUpdateStatus("error", 25, "",
+			"Binary checksum could not be verified (checksum file missing or "+
+				"unreachable) — update aborted")
+		return
+	}
+	if !verified {
+		// hash mismatch — possible tampering
+		os.Remove(tmpBinary)
+		s.setUpdateStatus("error", 25, "",
+			"Binary checksum verification FAILED — possible tampering")
+		return
+	}
+	log.Printf("Binary checksum verified successfully")
 
 	// Stage 2: Download web files
 	var tmpWebDir string
@@ -1413,6 +1565,71 @@ func (s *Server) performUpdate(binaryURL, webURL, ghToken string) {
 	s.setUpdateStatus("done", 100, "Update installed. Server is restarting...", "")
 }
 
+// verifyBinaryChecksum downloads the SHA256SUMS file from the same release and
+// verifies the binary's hash against it. Returns (true, nil) if verified,
+// (false, nil) if hash mismatch, or (false, err) if checksum file unavailable.
+// NOTE: caller treats any error as fatal (fail closed) — only (true, nil) proceeds.
+func (s *Server) verifyBinaryChecksum(binaryPath, binaryURL, ghToken string) (bool, error) {
+	// Derive checksum URL: replace the binary asset name with "SHA256SUMS"
+	// Works for both browser and API URLs
+	checksumURL := binaryURL
+	lastSlash := strings.LastIndex(checksumURL, "/")
+	if lastSlash < 0 {
+		return false, fmt.Errorf("cannot derive checksum URL from binary URL")
+	}
+	checksumURL = checksumURL[:lastSlash+1] + "SHA256SUMS"
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, _ := http.NewRequest("GET", checksumURL, nil)
+	if ghToken != "" {
+		req.Header.Set("Authorization", "token "+ghToken)
+		req.Header.Set("Accept", "application/octet-stream")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to download checksums: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("checksum file not found (status %d)", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024)) // 10 KB max for checksum file
+	if err != nil {
+		return false, fmt.Errorf("failed to read checksums: %w", err)
+	}
+
+	// Parse SHA256SUMS format: "hash  filename\n"
+	binaryName := filepath.Base(binaryURL)
+	var expectedHash string
+	for _, line := range strings.Split(string(body), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[1] == binaryName {
+			expectedHash = parts[0]
+			break
+		}
+	}
+	if expectedHash == "" {
+		return false, fmt.Errorf("no checksum entry found for %s", binaryName)
+	}
+
+	// Compute actual hash
+	f, err := os.Open(binaryPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to open binary for hashing: %w", err)
+	}
+	defer f.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return false, fmt.Errorf("failed to hash binary: %w", err)
+	}
+	actualHash := hex.EncodeToString(hasher.Sum(nil))
+
+	return actualHash == expectedHash, nil
+}
+
 func (s *Server) handleGetGitHubToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// Only return whether a token is configured, not the token itself
@@ -1464,11 +1681,20 @@ func downloadAndExtractTarGz(url string, destDir string, ghToken string) error {
 
 	os.MkdirAll(destDir, 0755)
 
-	gzReader, err := gzip.NewReader(resp.Body)
+	const maxTarGzSize = 200 * 1024 * 1024 // 200 MB
+	limitedBody := io.LimitReader(resp.Body, maxTarGzSize+1)
+
+	gzReader, err := gzip.NewReader(limitedBody)
 	if err != nil {
 		return fmt.Errorf("gzip error: %w", err)
 	}
 	defer gzReader.Close()
+
+	// Resolve destDir to absolute for path traversal checks
+	absDestDir, err := filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve destination: %w", err)
+	}
 
 	tarReader := tar.NewReader(gzReader)
 	for {
@@ -1485,18 +1711,30 @@ func downloadAndExtractTarGz(url string, destDir string, ghToken string) error {
 			continue
 		}
 
-		target := filepath.Join(destDir, name)
+		// Path traversal protection: ensure target stays inside destDir
+		target := filepath.Join(absDestDir, name)
+		cleanTarget := filepath.Clean(target)
+		if !strings.HasPrefix(cleanTarget, absDestDir+string(filepath.Separator)) && cleanTarget != absDestDir {
+			return fmt.Errorf("tar entry %q attempts path traversal outside destination", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			os.MkdirAll(target, 0755)
+			os.MkdirAll(cleanTarget, 0755)
 		case tar.TypeReg:
-			os.MkdirAll(filepath.Dir(target), 0755)
-			f, err := os.Create(target)
+			// Reject individual files over 50 MB
+			if header.Size > 50*1024*1024 {
+				return fmt.Errorf("tar entry %q exceeds 50 MB limit (%d bytes)", header.Name, header.Size)
+			}
+			os.MkdirAll(filepath.Dir(cleanTarget), 0755)
+			f, err := os.Create(cleanTarget)
 			if err != nil {
 				return err
 			}
-			io.Copy(f, tarReader)
+			if _, err := io.Copy(f, io.LimitReader(tarReader, header.Size+1)); err != nil {
+				f.Close()
+				return err
+			}
 			f.Close()
 		}
 	}

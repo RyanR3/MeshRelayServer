@@ -118,6 +118,7 @@
 
             fetch('/api/login', {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password, agency_id })
             })
@@ -151,7 +152,7 @@
         });
 
         // If already logged in, redirect to dashboard
-        fetch('/api/session').then(r => {
+        fetch('/api/session', { credentials: 'same-origin' }).then(r => {
             if (r.ok) window.location.href = '/';
         });
 

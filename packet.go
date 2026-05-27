@@ -20,6 +20,13 @@ const (
 	PacketTypeAuthRequest   byte = 0x08
 	PacketTypeAuthResponse  byte = 0x09
 	PacketTypeChannelSwitch byte = 0x0A
+
+	// Phase 4 key management packet types
+	PacketTypeKeyJoinRequest  byte = 0x0B
+	PacketTypeKeyJoinResponse byte = 0x0C
+	PacketTypeAuthChallengeReq byte = 0x0D // Client requests challenge nonce
+	PacketTypeAuthChallenge    byte = 0x0E // Server sends challenge nonce
+	PacketTypeKeyAnnounce      byte = 0x0F // Wrapped key announcement for group propagation
 )
 
 // AudioPacket represents an audio packet
@@ -57,8 +64,19 @@ type JoinPacket struct {
 // AuthRequestPacket represents a client authentication request
 type AuthRequestPacket struct {
 	Username     string
-	PasswordHash string
+	PasswordHash string // Legacy: SHA-256(password); Challenge-response: HMAC-SHA256(password, nonce)
 	AgencyID     string // optional, empty for older clients
+}
+
+// AuthChallengeRequestPacket - client requests a challenge nonce (Phase 4f)
+type AuthChallengeRequestPacket struct {
+	Username string
+	AgencyID string
+}
+
+// AuthChallengePacket - server sends a challenge nonce (Phase 4f)
+type AuthChallengePacket struct {
+	Nonce [32]byte
 }
 
 // AuthResponsePacket represents a server authentication response
@@ -116,6 +134,12 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 	case PacketTypeAuthRequest:
 		pkt, err := ParseAuthRequestPacket(payload)
 		return packetType, pkt, err
+	case PacketTypeAuthChallengeReq:
+		pkt, err := ParseAuthChallengeRequestPacket(payload)
+		return packetType, pkt, err
+	case PacketTypeKeyJoinRequest, PacketTypeKeyJoinResponse, PacketTypeKeyAnnounce:
+		// Pass through — relayed to channel peers
+		return packetType, payload, nil
 	default:
 		return packetType, nil, errors.New("unknown packet type")
 	}
@@ -628,5 +652,48 @@ func SerializeAuthResponse(packet *AuthResponsePacket) []byte {
 	binary.Write(buf, binary.BigEndian, int16(len(msgBytes)))
 	buf.Write(msgBytes)
 
+	return buf.Bytes()
+}
+
+// ParseAuthChallengeRequestPacket parses a challenge request from the client
+func ParseAuthChallengeRequestPacket(data []byte) (*AuthChallengeRequestPacket, error) {
+	buf := bytes.NewReader(data)
+
+	// Username
+	var usernameLen int16
+	if err := binary.Read(buf, binary.BigEndian, &usernameLen); err != nil {
+		return nil, err
+	}
+	if usernameLen <= 0 || usernameLen > 256 {
+		return nil, errors.New("invalid username length")
+	}
+	usernameBytes := make([]byte, usernameLen)
+	if _, err := io.ReadFull(buf, usernameBytes); err != nil {
+		return nil, err
+	}
+
+	// AgencyID (optional — remaining bytes)
+	var agencyID string
+	if buf.Len() >= 2 {
+		var agencyLen int16
+		if err := binary.Read(buf, binary.BigEndian, &agencyLen); err == nil && agencyLen > 0 && agencyLen <= 256 {
+			agencyBytes := make([]byte, agencyLen)
+			if _, err := io.ReadFull(buf, agencyBytes); err == nil {
+				agencyID = string(agencyBytes)
+			}
+		}
+	}
+
+	return &AuthChallengeRequestPacket{
+		Username: string(usernameBytes),
+		AgencyID: agencyID,
+	}, nil
+}
+
+// SerializeAuthChallenge serializes a challenge nonce for the client
+func SerializeAuthChallenge(nonce [32]byte) []byte {
+	buf := new(bytes.Buffer)
+	buf.WriteByte(PacketTypeAuthChallenge)
+	buf.Write(nonce[:])
 	return buf.Bytes()
 }

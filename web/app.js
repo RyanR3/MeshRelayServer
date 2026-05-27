@@ -271,9 +271,9 @@ function closeModal(id) {
     document.getElementById(id).classList.remove('active');
 }
 
-// Close modal on backdrop click
+// Close modal on backdrop click (except forced password change — that one is non-dismissible)
 document.addEventListener('click', (e) => {
-    if (e.target.classList.contains('modal')) {
+    if (e.target.classList.contains('modal') && e.target.id !== 'changeAdminPasswordModal') {
         e.target.classList.remove('active');
     }
 });
@@ -752,6 +752,13 @@ function deleteMutualAidLink(id) {
 // --- Auth Toggle ---
 
 function toggleAuth() {
+    const toggle = document.getElementById('auth-toggle');
+    const action = toggle.checked ? 'enable' : 'disable';
+    if (!confirm(`Are you sure you want to ${action} authentication? This affects all client connections.`)) {
+        toggle.checked = !toggle.checked; // revert the toggle
+        return;
+    }
+
     fetch('/api/auth/toggle', { method: 'POST' })
     .then(r => r.json())
     .then(data => {
@@ -817,6 +824,9 @@ function applyRoleUI() {
 }
 
 function showForcePasswordChange() {
+    // Hide the entire dashboard — only password change is allowed
+    const layout = document.querySelector('.app-layout');
+    if (layout) layout.style.display = 'none';
     const modal = document.getElementById('changeAdminPasswordModal');
     if (modal) {
         modal.style.display = 'flex';
@@ -829,8 +839,8 @@ function changeAdminPassword() {
     const confirmPass = document.getElementById('adminConfirmPassword').value;
     const errorEl = document.getElementById('adminPasswordError');
 
-    if (!newPass || newPass.length < 4) {
-        errorEl.textContent = 'Password must be at least 4 characters';
+    if (!newPass || newPass.length < 12) {
+        errorEl.textContent = 'Password must be at least 12 characters';
         errorEl.style.display = 'block';
         return;
     }
@@ -852,7 +862,11 @@ function changeAdminPassword() {
             errorEl.style.display = 'block';
             return;
         }
+        // Password changed — dismiss modal, restore dashboard, re-check session
         document.getElementById('changeAdminPasswordModal').style.display = 'none';
+        const layout = document.querySelector('.app-layout');
+        if (layout) layout.style.display = 'flex';
+        checkSession();
     })
     .catch(() => {
         errorEl.textContent = 'Connection error';
@@ -1142,7 +1156,14 @@ function showUpdateModal() {
     document.getElementById('update-success').style.display = 'none';
     document.getElementById('update-apply-btn').style.display = 'inline-block';
     document.getElementById('update-apply-btn').disabled = false;
+    document.getElementById('update-apply-btn').textContent = 'Update Server';
     document.getElementById('update-close-btn').textContent = 'Cancel';
+    // Reset confirm section
+    const confirmSection = document.getElementById('update-confirm-section');
+    if (confirmSection) {
+        confirmSection.style.display = 'none';
+        document.getElementById('update-confirm-password').value = '';
+    }
 
     showModal('updateModal');
 }
@@ -1150,9 +1171,27 @@ function showUpdateModal() {
 function applyUpdate() {
     if (!latestRelease) return;
 
+    const confirmSection = document.getElementById('update-confirm-section');
+    const passwordInput = document.getElementById('update-confirm-password');
+
+    // First click: show the confirm section with password field
+    if (confirmSection && confirmSection.style.display === 'none') {
+        confirmSection.style.display = 'block';
+        passwordInput.focus();
+        document.getElementById('update-apply-btn').textContent = 'Confirm & Update';
+        return;
+    }
+
+    // Second click: validate password is entered
+    if (!passwordInput || !passwordInput.value) {
+        showUpdateError('Please re-enter your password to confirm the update.');
+        return;
+    }
+
     const applyBtn = document.getElementById('update-apply-btn');
     applyBtn.disabled = true;
     applyBtn.textContent = 'Updating...';
+    if (confirmSection) confirmSection.style.display = 'none';
 
     document.getElementById('update-progress').style.display = 'block';
     document.getElementById('update-error').style.display = 'none';
@@ -1162,11 +1201,14 @@ function applyUpdate() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             binary_url: latestRelease.binary_url,
-            web_url: latestRelease.web_url || ''
+            web_url: latestRelease.web_url || '',
+            password: passwordInput.value
         })
     })
     .then(r => r.json())
     .then(data => {
+        // Clear the password from the input immediately
+        passwordInput.value = '';
         if (data.error) {
             showUpdateError(data.error);
             return;
@@ -1175,6 +1217,7 @@ function applyUpdate() {
         startUpdatePolling();
     })
     .catch(err => {
+        passwordInput.value = '';
         showUpdateError('Failed to start update: ' + err.message);
     });
 }
@@ -1327,12 +1370,23 @@ function clearGitHubToken() {
     .catch(err => addLog('Failed to clear token: ' + err.message, 'error'));
 }
 
-// Wrap fetch to handle 401 globally
+// Wrap fetch to handle 401 and must_change_password globally, and ensure credentials are sent
 const originalFetch = window.fetch;
-window.fetch = function(url, options) {
+window.fetch = function(url, options = {}) {
+    // Always send cookies so the HttpOnly session cookie rides along
+    options.credentials = options.credentials || 'same-origin';
     return originalFetch(url, options).then(response => {
-        if (response.status === 401 && !url.toString().includes('/api/session') && !url.toString().includes('/api/login')) {
+        const urlStr = url.toString();
+        if (response.status === 401 && !urlStr.includes('/api/session') && !urlStr.includes('/api/login')) {
             window.location.href = '/login.html';
+        }
+        // Handle must_change_password (403) — bounce to password-change screen
+        if (response.status === 403 && !urlStr.includes('/api/admin/change-password')) {
+            response.clone().json().then(data => {
+                if (data.error === 'must_change_password') {
+                    showForcePasswordChange();
+                }
+            }).catch(() => {});
         }
         return response;
     });
