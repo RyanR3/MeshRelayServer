@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Client struct {
@@ -84,6 +88,7 @@ type Server struct {
 	users             map[string]*UserAccount    // "agencyID:username" -> account
 	agencies          map[string]*Agency         // agencyID -> agency
 	authenticatedAddrs map[string]string         // addr string -> agencyID
+	pendingChallenges  map[string][32]byte       // addr string -> nonce (Phase 4f challenge-response)
 	webAdmins          map[string]*WebAdmin      // "agencyID:username" -> admin account (web dashboard)
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
@@ -136,6 +141,7 @@ func NewServer(config *Config, configFile string) *Server {
 		users:             make(map[string]*UserAccount),
 		agencies:          make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]string),
+		pendingChallenges:  make(map[string][32]byte),
 		webAdmins:          make(map[string]*WebAdmin),
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
@@ -234,6 +240,10 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handleGroupUpdate(payload.(*GroupPacket), addr)
 	case PacketTypeAuthRequest:
 		s.handleAuthRequest(payload.(*AuthRequestPacket), addr)
+	case PacketTypeAuthChallengeReq:
+		s.handleAuthChallengeRequest(payload.(*AuthChallengeRequestPacket), addr)
+	case PacketTypeKeyJoinRequest, PacketTypeKeyJoinResponse, PacketTypeKeyAnnounce:
+		s.relayRawPacket(data, addr)
 	}
 }
 
@@ -632,6 +642,37 @@ func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
 	s.stats.mu.Unlock()
 }
 
+// relayRawPacket forwards a raw packet (key exchange, key announce) to all
+// other clients in the sender's channel. The packet is sent as-is.
+func (s *Server) relayRawPacket(data []byte, senderAddr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(senderAddr) {
+		return
+	}
+
+	s.mu.RLock()
+	sender, _ := s.findClientByAddr(senderAddr)
+	if sender == nil {
+		s.mu.RUnlock()
+		return
+	}
+
+	key := channelKey(sender.AgencyID, sender.Channel)
+	channel := s.channels[key]
+	s.mu.RUnlock()
+
+	if channel == nil {
+		return
+	}
+
+	channel.mu.RLock()
+	for _, other := range channel.Clients {
+		if other.Addr.String() != senderAddr.String() {
+			s.sendPacket(data, other.Addr)
+		}
+	}
+	channel.mu.RUnlock()
+}
+
 func (s *Server) heartbeatChecker() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -890,6 +931,17 @@ func (s *Server) findUserByUsername(username string) *UserAccount {
 	return nil
 }
 
+// findClientByAddr searches connected clients by address.
+func (s *Server) findClientByAddr(addr *net.UDPAddr) (*Client, string) {
+	addrStr := addr.String()
+	for key, client := range s.clients {
+		if client.Addr != nil && client.Addr.String() == addrStr {
+			return client, key
+		}
+	}
+	return nil, ""
+}
+
 // findClientByUsername searches connected clients by username.
 func (s *Server) findClientByUsername(username string) (*Client, string) {
 	for key, client := range s.clients {
@@ -898,6 +950,28 @@ func (s *Server) findClientByUsername(username string) (*Client, string) {
 		}
 	}
 	return nil, ""
+}
+
+// handleAuthChallengeRequest handles the first step of challenge-response auth (Phase 4f).
+// Client sends username, server generates a nonce and sends it back.
+func (s *Server) handleAuthChallengeRequest(packet *AuthChallengeRequestPacket, addr *net.UDPAddr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Generate 32-byte random nonce
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		log.Printf("Failed to generate auth nonce: %v", err)
+		return
+	}
+
+	// Store pending challenge (keyed by address)
+	s.pendingChallenges[addr.String()] = nonce
+
+	// Send challenge nonce to client
+	resp := SerializeAuthChallenge(nonce)
+	s.sendPacket(resp, addr)
+	log.Printf("Auth challenge sent to %s for user %s", addr, packet.Username)
 }
 
 func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr) {
@@ -920,12 +994,35 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		return
 	}
 
-	if user.PasswordHash != packet.PasswordHash {
+	// Challenge-response auth is required — legacy static-hash auth has been removed.
+	addrKey := addr.String()
+	nonce, hasPendingChallenge := s.pendingChallenges[addrKey]
+
+	if !hasPendingChallenge {
+		// No challenge issued for this address — challenge-response is required.
+		log.Printf("Auth rejected: no pending challenge for %s (client must use challenge-response)", addr)
+		resp := SerializeAuthResponse(&AuthResponsePacket{
+			Success: false,
+			Message: "Authentication method not supported — please update the app",
+		})
+		s.sendPacket(resp, addr)
+		return
+	}
+
+	// Challenge-response: client sends HMAC-SHA256(stored hash, nonce)
+	delete(s.pendingChallenges, addrKey) // consume nonce (one-time use)
+	expectedHmac := computeHmacSha256([]byte(user.PasswordHash), nonce[:])
+	authOk := subtle.ConstantTimeCompare(
+		[]byte(hex.EncodeToString(expectedHmac)),
+		[]byte(packet.PasswordHash)) == 1
+
+	if !authOk {
 		log.Printf("Auth failed: wrong password for user %s from %s", packet.Username, addr)
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid password"})
 		s.sendPacket(resp, addr)
 		return
 	}
+	log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
 
 	// Remove old authenticated address for this user (in case they reconnected from a new port)
 	clientKey := userKey(user.AgencyID, user.Username)
@@ -938,9 +1035,15 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	s.authenticatedAddrs[addr.String()] = user.AgencyID
-	log.Printf("Auth success: user %s [%s] from %s", packet.Username, user.AgencyID, addr)
 	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: "Authenticated"})
 	s.sendPacket(resp, addr)
+}
+
+// computeHmacSha256 computes HMAC-SHA256(key, data).
+func computeHmacSha256(key, data []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(data)
+	return mac.Sum(nil)
 }
 
 // --- User Management ---
@@ -992,6 +1095,27 @@ func hashPassword(password string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// hashPasswordSecure hashes a password with bcrypt (cost 12).
+func hashPasswordSecure(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+// checkPassword verifies a password against either a bcrypt hash ($2a$/$2b$ prefix)
+// or a legacy SHA-256 hex hash (64 chars). Returns true on match.
+func checkPassword(password, storedHash string) bool {
+	if strings.HasPrefix(storedHash, "$2a$") || strings.HasPrefix(storedHash, "$2b$") {
+		return bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(password)) == nil
+	}
+	// Legacy SHA-256 path — constant-time comparison
+	expected := []byte(hashPassword(password))
+	got := []byte(storedHash)
+	return subtle.ConstantTimeCompare(expected, got) == 1
+}
+
 func (s *Server) UpdatePassword(agencyID, username, password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1002,11 +1126,15 @@ func (s *Server) UpdatePassword(agencyID, username, password string) error {
 		return fmt.Errorf("user %s not found", username)
 	}
 
-	user.PasswordHash = hashPassword(password)
+	user.PasswordHash = hashPassword(password) // PTT auth uses SHA-256 (Phase 4f will migrate to challenge-response)
 
-	// Also update web admin password if they have one
+	// Also update web admin password if they have one — use bcrypt for web
 	if admin, ok := s.webAdmins[key]; ok {
-		admin.PasswordHash = hashPassword(password)
+		if bcryptHash, err := hashPasswordSecure(password); err == nil {
+			admin.PasswordHash = bcryptHash
+		} else {
+			admin.PasswordHash = hashPassword(password) // fallback
+		}
 		s.saveWebAdmins()
 	}
 
@@ -1164,16 +1292,33 @@ func (s *Server) loadWebAdmins() {
 }
 
 func (s *Server) createDefaultAdmin() {
+	// Generate a cryptographically random initial password
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		log.Fatalf("FATAL: cannot generate random password: %v", err)
+	}
+	initialPassword := hex.EncodeToString(buf) // 32-char hex string
+
+	bcryptHash, err := hashPasswordSecure(initialPassword)
+	if err != nil {
+		log.Fatalf("FATAL: cannot hash initial password: %v", err)
+	}
+
 	s.webAdmins[userKey("", "admin")] = &WebAdmin{
 		Username:           "admin",
-		PasswordHash:       hashPassword("admin"),
+		PasswordHash:       bcryptHash,
 		Role:               "super_admin",
 		MustChangePassword: true,
 	}
 	if err := s.saveWebAdmins(); err != nil {
 		log.Printf("Error saving default web admin: %v", err)
 	}
-	log.Printf("Created default web admin account: admin (password: admin)")
+
+	log.Printf("==============================================================")
+	log.Printf("INITIAL ADMIN PASSWORD (record this, it will not be shown again):")
+	log.Printf("  admin / %s", initialPassword)
+	log.Printf("==============================================================")
+	log.Printf("You MUST change this password at first login.")
 }
 
 func (s *Server) saveWebAdmins() error {
@@ -1349,9 +1494,13 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 
 	// If the user is an admin, also create/update a web admin entry for dashboard access
 	if role == "admin" {
+		adminHash := hashPassword(password) // fallback to SHA-256
+		if bh, err := hashPasswordSecure(password); err == nil {
+			adminHash = bh // prefer bcrypt for web admin
+		}
 		s.webAdmins[key] = &WebAdmin{
 			Username:           username,
-			PasswordHash:       hashPassword(password),
+			PasswordHash:       adminHash,
 			Role:               "agency_admin",
 			AgencyID:           agencyID,
 			MustChangePassword: false,

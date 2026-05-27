@@ -17,6 +17,9 @@ type Config struct {
 	AgenciesFile   string `json:"agencies_file"`
 	MutualAidFile  string `json:"mutual_aid_file"`
 	GitHubToken    string `json:"github_token,omitempty"`
+	DebugPprof     bool   `json:"debug_pprof,omitempty"`
+	TLSCertFile    string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile     string `json:"tls_key_file,omitempty"`
 }
 
 func DefaultConfig() *Config {
@@ -26,7 +29,7 @@ func DefaultConfig() *Config {
 		MaxClients:  1000,
 		MaxChannels: 100,
 		LogLevel:    "INFO",
-		AuthEnabled:   false,
+		AuthEnabled:   true,
 		UsersFile:     "users.json",
 		WebAdminsFile: "web_admins.json",
 		AgenciesFile:   "agencies.json",
