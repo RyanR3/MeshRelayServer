@@ -1517,7 +1517,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	currentVersion := strings.TrimPrefix(Version, "v")
 	updateAvailable := latestVersion != currentVersion || Version == "dev"
 
-	var binaryURL, webURL string
+	var binaryURL, webURL, checksumURL string
 	for _, asset := range release.Assets {
 		// Use API URL for private repos (requires token + Accept: application/octet-stream)
 		// Use browser URL for public repos
@@ -1531,6 +1531,9 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		if asset.Name == "web.tar.gz" {
 			webURL = dlURL
 		}
+		if asset.Name == "SHA256SUMS" {
+			checksumURL = dlURL
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1541,6 +1544,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		"release_url":      release.HTMLURL,
 		"binary_url":       binaryURL,
 		"web_url":          webURL,
+		"checksum_url":     checksumURL,
 		"assets_found":     binaryURL != "",
 	})
 }
@@ -1558,8 +1562,9 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	s.updateStatus.mu.RUnlock()
 
 	var req struct {
-		BinaryURL string `json:"binary_url"`
-		WebURL    string `json:"web_url"`
+		BinaryURL   string `json:"binary_url"`
+		WebURL      string `json:"web_url"`
+		ChecksumURL string `json:"checksum_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BinaryURL == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -1572,35 +1577,34 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		"https://api.github.com/repos/RyanR3/MeshRelayServer/",
 	}
 
-	binaryAllowed := false
-	for _, prefix := range allowedPrefixes {
-		if strings.HasPrefix(req.BinaryURL, prefix) {
-			binaryAllowed = true
-			break
+	validateURL := func(u string) bool {
+		for _, prefix := range allowedPrefixes {
+			if strings.HasPrefix(u, prefix) {
+				return true
+			}
 		}
+		return false
 	}
-	if !binaryAllowed {
+
+	if !validateURL(req.BinaryURL) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Binary URL not in allowlist"})
 		return
 	}
 
-	if req.WebURL != "" {
-		webAllowed := false
-		for _, prefix := range allowedPrefixes {
-			if strings.HasPrefix(req.WebURL, prefix) {
-				webAllowed = true
-				break
-			}
-		}
-		if !webAllowed {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Web URL not in allowlist"})
-			return
-		}
+	if req.WebURL != "" && !validateURL(req.WebURL) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Web URL not in allowlist"})
+		return
 	}
 
-	go s.performUpdate(req.BinaryURL, req.WebURL, s.config.GitHubToken)
+	if req.ChecksumURL != "" && !validateURL(req.ChecksumURL) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Checksum URL not in allowlist"})
+		return
+	}
+
+	go s.performUpdate(req.BinaryURL, req.WebURL, req.ChecksumURL, s.config.GitHubToken)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "update_started"})
 }
@@ -1624,7 +1628,7 @@ func (s *Server) setUpdateStatus(stage string, progress int, message string, err
 	}
 }
 
-func (s *Server) performUpdate(binaryURL, webURL, ghToken string) {
+func (s *Server) performUpdate(binaryURL, webURL, checksumURL, ghToken string) {
 	s.updateStatus.mu.Lock()
 	s.updateStatus.InProgress = true
 	s.updateStatus.Error = ""
@@ -1686,7 +1690,7 @@ func (s *Server) performUpdate(binaryURL, webURL, ghToken string) {
 
 	// Verify SHA-256 checksum if a checksums file is available in the release
 	s.setUpdateStatus("verifying", 25, "Verifying binary checksum...", "")
-	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryURL, ghToken)
+	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryURL, checksumURL, ghToken)
 	if checksumErr != nil {
 		// FAIL CLOSED: cannot verify => do not install.
 		os.Remove(tmpBinary)
@@ -1779,15 +1783,16 @@ func (s *Server) performUpdate(binaryURL, webURL, ghToken string) {
 // verifies the binary's hash against it. Returns (true, nil) if verified,
 // (false, nil) if hash mismatch, or (false, err) if checksum file unavailable.
 // NOTE: caller treats any error as fatal (fail closed) — only (true, nil) proceeds.
-func (s *Server) verifyBinaryChecksum(binaryPath, binaryURL, ghToken string) (bool, error) {
-	// Derive checksum URL: replace the binary asset name with "SHA256SUMS"
-	// Works for both browser and API URLs
-	checksumURL := binaryURL
-	lastSlash := strings.LastIndex(checksumURL, "/")
-	if lastSlash < 0 {
-		return false, fmt.Errorf("cannot derive checksum URL from binary URL")
+func (s *Server) verifyBinaryChecksum(binaryPath, binaryURL, checksumURL, ghToken string) (bool, error) {
+	// Use explicit checksum URL if provided, otherwise derive from binary URL
+	if checksumURL == "" {
+		derived := binaryURL
+		lastSlash := strings.LastIndex(derived, "/")
+		if lastSlash < 0 {
+			return false, fmt.Errorf("cannot derive checksum URL from binary URL")
+		}
+		checksumURL = derived[:lastSlash+1] + "SHA256SUMS"
 	}
-	checksumURL = checksumURL[:lastSlash+1] + "SHA256SUMS"
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, _ := http.NewRequest("GET", checksumURL, nil)
