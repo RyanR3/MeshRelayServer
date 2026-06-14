@@ -1380,10 +1380,15 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		return
 	}
 
-	// Consume enrollment token after successful use
+	// Enrollment token used — update the PTT password hash so the client
+	// can reconnect with the stored token. Web admin password (bcrypt) is
+	// left unchanged so web portal login still uses the original password.
 	if usedEnrollToken != "" {
+		et := s.enrollmentTokens[usedEnrollToken]
+		user.PasswordHash = hashPassword(et.Token)
+		s.saveUsers()
 		delete(s.enrollmentTokens, usedEnrollToken)
-		log.Printf("Auth (enrollment token) success: user %s from %s — token consumed", packet.Username, addr)
+		log.Printf("Auth (enrollment token) success: user %s from %s — PTT password updated to enrollment token", packet.Username, addr)
 	} else {
 		log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
 	}
