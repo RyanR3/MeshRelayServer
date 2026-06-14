@@ -1517,7 +1517,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	currentVersion := strings.TrimPrefix(Version, "v")
 	updateAvailable := latestVersion != currentVersion || Version == "dev"
 
-	var binaryURL, webURL, checksumURL string
+	var binaryURL, webURL, checksumURL, binaryName string
 	for _, asset := range release.Assets {
 		// Use API URL for private repos (requires token + Accept: application/octet-stream)
 		// Use browser URL for public repos
@@ -1527,6 +1527,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		if asset.Name == "ptt-server-linux" || asset.Name == "ptt-server" {
 			binaryURL = dlURL
+			binaryName = asset.Name
 		}
 		if asset.Name == "web.tar.gz" {
 			webURL = dlURL
@@ -1543,6 +1544,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		"release_notes":    release.Body,
 		"release_url":      release.HTMLURL,
 		"binary_url":       binaryURL,
+		"binary_name":      binaryName,
 		"web_url":          webURL,
 		"checksum_url":     checksumURL,
 		"assets_found":     binaryURL != "",
@@ -1563,6 +1565,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		BinaryURL   string `json:"binary_url"`
+		BinaryName  string `json:"binary_name"`
 		WebURL      string `json:"web_url"`
 		ChecksumURL string `json:"checksum_url"`
 	}
@@ -1604,7 +1607,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.performUpdate(req.BinaryURL, req.WebURL, req.ChecksumURL, s.config.GitHubToken)
+	go s.performUpdate(req.BinaryURL, req.BinaryName, req.WebURL, req.ChecksumURL, s.config.GitHubToken)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "update_started"})
 }
@@ -1628,7 +1631,7 @@ func (s *Server) setUpdateStatus(stage string, progress int, message string, err
 	}
 }
 
-func (s *Server) performUpdate(binaryURL, webURL, checksumURL, ghToken string) {
+func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghToken string) {
 	s.updateStatus.mu.Lock()
 	s.updateStatus.InProgress = true
 	s.updateStatus.Error = ""
@@ -1690,7 +1693,7 @@ func (s *Server) performUpdate(binaryURL, webURL, checksumURL, ghToken string) {
 
 	// Verify SHA-256 checksum if a checksums file is available in the release
 	s.setUpdateStatus("verifying", 25, "Verifying binary checksum...", "")
-	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryURL, checksumURL, ghToken)
+	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryName, checksumURL, ghToken)
 	if checksumErr != nil {
 		// FAIL CLOSED: cannot verify => do not install.
 		os.Remove(tmpBinary)
@@ -1779,19 +1782,14 @@ func (s *Server) performUpdate(binaryURL, webURL, checksumURL, ghToken string) {
 	s.setUpdateStatus("done", 100, "Update installed. Server is restarting...", "")
 }
 
-// verifyBinaryChecksum downloads the SHA256SUMS file from the same release and
-// verifies the binary's hash against it. Returns (true, nil) if verified,
+// verifyBinaryChecksum downloads the SHA256SUMS file and verifies the binary's
+// hash against it. binaryName is the real asset filename (e.g. "ptt-server-linux")
+// used to look up the entry in SHA256SUMS. Returns (true, nil) if verified,
 // (false, nil) if hash mismatch, or (false, err) if checksum file unavailable.
 // NOTE: caller treats any error as fatal (fail closed) — only (true, nil) proceeds.
-func (s *Server) verifyBinaryChecksum(binaryPath, binaryURL, checksumURL, ghToken string) (bool, error) {
-	// Use explicit checksum URL if provided, otherwise derive from binary URL
+func (s *Server) verifyBinaryChecksum(binaryPath, binaryName, checksumURL, ghToken string) (bool, error) {
 	if checksumURL == "" {
-		derived := binaryURL
-		lastSlash := strings.LastIndex(derived, "/")
-		if lastSlash < 0 {
-			return false, fmt.Errorf("cannot derive checksum URL from binary URL")
-		}
-		checksumURL = derived[:lastSlash+1] + "SHA256SUMS"
+		return false, fmt.Errorf("no checksum URL provided")
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -1815,18 +1813,37 @@ func (s *Server) verifyBinaryChecksum(binaryPath, binaryURL, checksumURL, ghToke
 		return false, fmt.Errorf("failed to read checksums: %w", err)
 	}
 
+	log.Printf("Checksum verification: looking for binary_name=%q in SHA256SUMS", binaryName)
+
 	// Parse SHA256SUMS format: "hash  filename\n"
-	binaryName := filepath.Base(binaryURL)
+	// Try exact match first, then try common binary names as fallback
 	var expectedHash string
-	for _, line := range strings.Split(string(body), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) == 2 && parts[1] == binaryName {
-			expectedHash = parts[0]
+	namesToTry := []string{binaryName}
+	if binaryName != "ptt-server-linux" {
+		namesToTry = append(namesToTry, "ptt-server-linux")
+	}
+	if binaryName != "ptt-server" {
+		namesToTry = append(namesToTry, "ptt-server")
+	}
+
+	lines := strings.Split(string(body), "\n")
+	for _, name := range namesToTry {
+		if name == "" {
+			continue
+		}
+		for _, line := range lines {
+			parts := strings.Fields(line)
+			if len(parts) == 2 && parts[1] == name {
+				expectedHash = parts[0]
+				break
+			}
+		}
+		if expectedHash != "" {
 			break
 		}
 	}
 	if expectedHash == "" {
-		return false, fmt.Errorf("no checksum entry found for %s", binaryName)
+		return false, fmt.Errorf("no checksum entry found for %s in SHA256SUMS content: %s", binaryName, string(body))
 	}
 
 	// Compute actual hash
@@ -1842,6 +1859,7 @@ func (s *Server) verifyBinaryChecksum(binaryPath, binaryURL, checksumURL, ghToke
 	}
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 
+	log.Printf("Checksum verification: expected=%s actual=%s match=%v", expectedHash, actualHash, actualHash == expectedHash)
 	return actualHash == expectedHash, nil
 }
 

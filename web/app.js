@@ -1804,6 +1804,7 @@ function applyUpdate() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             binary_url: latestRelease.binary_url,
+            binary_name: latestRelease.binary_name || '',
             web_url: latestRelease.web_url || '',
             checksum_url: latestRelease.checksum_url || '',
             password: passwordInput.value
