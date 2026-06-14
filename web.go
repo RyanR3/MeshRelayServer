@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -65,9 +66,11 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/config", s.handleUpdateConfig).Methods("POST")
 	api.HandleFunc("/users", s.handleGetUsers).Methods("GET")
 	api.HandleFunc("/users", s.handleCreateUser).Methods("POST")
+	api.HandleFunc("/users/{username}", s.handleUpdateUser).Methods("PUT")
 	api.HandleFunc("/users/{username}", s.handleDeleteUser).Methods("DELETE")
 	api.HandleFunc("/users/{username}/password", s.handleUpdatePassword).Methods("PUT")
 	api.HandleFunc("/users/{username}/role", s.handleUpdateRole).Methods("PUT")
+	api.HandleFunc("/users/{username}/enroll", s.handleGenerateEnrollToken).Methods("POST")
 	api.HandleFunc("/auth/status", s.handleAuthStatus).Methods("GET")
 	api.HandleFunc("/auth/toggle", s.requireSuperAdmin(s.handleAuthToggle)).Methods("POST")
 	api.HandleFunc("/admin/change-password", s.handleAdminChangePassword).Methods("POST")
@@ -89,6 +92,9 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleGetMutualAid)).Methods("GET")
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
+
+	// Activity log
+	api.HandleFunc("/activity", s.handleGetActivity).Methods("GET")
 
 	// Debug endpoint (super_admin only)
 	api.HandleFunc("/debug/state", s.requireSuperAdmin(s.handleDebugState)).Methods("GET")
@@ -254,6 +260,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 
 	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, admin.Role, r.RemoteAddr)
+	s.activityLog.Add("admin_login", req.Username, fmt.Sprintf("Web dashboard login (role: %s)", admin.Role), admin.AgencyID)
 	w.Header().Set("Content-Type", "application/json")
 	mustChange := admin.MustChangePassword
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -458,6 +465,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	atomic.AddInt64(&s.wsConnCount, 1)
+	defer atomic.AddInt64(&s.wsConnCount, -1)
 
 	log.Printf("New WebSocket connection from %s", r.RemoteAddr)
 
@@ -511,14 +520,23 @@ func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
 	msg := WebSocketMessage{
 		Type: "update",
 		Data: map[string]interface{}{
-			"stats":    s.GetStats(""),
-			"clients":  s.GetClients(""),
-			"channels": s.GetChannels(""),
+			"stats":              s.GetStats(""),
+			"clients":            s.GetClients(""),
+			"channels":           s.GetChannels(""),
+			"network_timeseries": s.networkTimeSeries.GetPoints(),
+			"health":             s.CheckHealth(),
+			"activity":           s.activityLog.GetRecent(20),
 		},
 	}
 
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteJSON(msg)
+}
+
+func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	events := s.activityLog.GetRecent(50)
+	json.NewEncoder(w).Encode(events)
 }
 
 func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
@@ -543,6 +561,7 @@ func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
+		Name     string `json:"name"`
 		Password string `json:"password"`
 		AgencyID string `json:"agency_id"`
 		Role     string `json:"role"`
@@ -589,7 +608,8 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		req.Role = "user"
 	}
 
-	if err := s.AddUser(req.Username, req.Password, req.AgencyID, req.Role); err != nil {
+	enrollToken, err := s.AddUser(req.Username, req.Name, req.Password, req.AgencyID, req.Role)
+	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -598,7 +618,195 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username, "agency_id": req.AgencyID, "role": req.Role})
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":           "ok",
+		"username":         req.Username,
+		"agency_id":        req.AgencyID,
+		"role":             req.Role,
+		"enrollment_token": enrollToken,
+	})
+}
+
+// handleGenerateEnrollToken creates a new enrollment token for an existing user.
+// Used when the admin clicks QR Code for an existing user.
+func (s *Server) handleGenerateEnrollToken(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+	agencyID := r.URL.Query().Get("agency")
+
+	session := s.getSession(r)
+	if session != nil && session.Role == "agency_admin" {
+		agencyID = session.AgencyID
+	}
+	if agencyID == "" {
+		agencyID = "default"
+	}
+
+	s.mu.Lock()
+	key := userKey(agencyID, username)
+	user, exists := s.users[key]
+	if !exists {
+		// Try finding by username alone
+		for k, u := range s.users {
+			if u.Username == username {
+				user = u
+				key = k
+				exists = true
+				break
+			}
+		}
+	}
+	if !exists {
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"user not found"}`))
+		return
+	}
+
+	token := s.GenerateEnrollmentToken(user.Username, user.AgencyID, user.PasswordHash)
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"enrollment_token": token,
+		"username":         user.Username,
+		"agency_id":        user.AgencyID,
+	})
+}
+
+// handleUpdateUser updates a user's name, username, agency, and/or password.
+func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+	agencyID := r.URL.Query().Get("agency")
+
+	session := s.getSession(r)
+	if session != nil && session.Role == "agency_admin" {
+		agencyID = session.AgencyID
+	}
+	if agencyID == "" {
+		agencyID = "default"
+	}
+
+	var req struct {
+		Name        *string `json:"name"`
+		NewUsername  *string `json:"new_username"`
+		NewAgencyID *string `json:"new_agency_id"`
+		Password    *string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	oldKey := userKey(agencyID, username)
+	user, exists := s.users[oldKey]
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"user not found"}`))
+		return
+	}
+
+	// Agency admins can only edit users in their agency (not super_admin)
+	if session != nil && session.Role == "agency_admin" {
+		if user.AgencyID != session.AgencyID || user.Role == "super_admin" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"cannot edit this user"}`))
+			return
+		}
+		// Agency admins cannot move users to a different agency
+		if req.NewAgencyID != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"only super admins can change user agency"}`))
+			return
+		}
+	}
+
+	// Update name
+	if req.Name != nil {
+		user.Name = *req.Name
+	}
+
+	// Update password
+	if req.Password != nil && *req.Password != "" {
+		user.PasswordHash = hashPassword(*req.Password)
+		// Also update web admin password if applicable
+		if admin, ok := s.webAdmins[oldKey]; ok {
+			if bh, err := hashPasswordSecure(*req.Password); err == nil {
+				admin.PasswordHash = bh
+			} else {
+				admin.PasswordHash = hashPassword(*req.Password)
+			}
+		}
+	}
+
+	// Determine new key (username or agency may have changed)
+	newUsername := username
+	newAgency := agencyID
+	if req.NewUsername != nil && *req.NewUsername != "" {
+		newUsername = *req.NewUsername
+	}
+	if req.NewAgencyID != nil && *req.NewAgencyID != "" {
+		newAgency = *req.NewAgencyID
+		// Verify target agency exists
+		if _, ok := s.agencies[newAgency]; !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"target agency not found"}`))
+			return
+		}
+	}
+
+	newKey := userKey(newAgency, newUsername)
+
+	// If key changed, check for conflicts and re-key
+	if newKey != oldKey {
+		if _, conflict := s.users[newKey]; conflict {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"a user with that username already exists in the target agency"}`))
+			return
+		}
+		user.Username = newUsername
+		user.AgencyID = newAgency
+		delete(s.users, oldKey)
+		s.users[newKey] = user
+
+		// Re-key web admin if exists
+		if admin, ok := s.webAdmins[oldKey]; ok {
+			admin.Username = newUsername
+			admin.AgencyID = newAgency
+			delete(s.webAdmins, oldKey)
+			s.webAdmins[newKey] = admin
+			s.saveWebAdmins()
+		}
+	}
+
+	if err := s.saveUsers(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"failed to save"}`))
+		return
+	}
+
+	log.Printf("User updated: %s -> %s (agency: %s -> %s)", username, newUsername, agencyID, newAgency)
+	s.activityLog.Add("user_updated", newUsername, fmt.Sprintf("Updated user (was: %s in %s)", username, agencyID), newAgency)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":    "ok",
+		"username":  newUsername,
+		"agency_id": newAgency,
+	})
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -758,7 +966,9 @@ func (s *Server) handleAuthToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Authentication %s", map[bool]string{true: "enabled", false: "disabled"}[s.config.AuthEnabled])
+	status := map[bool]string{true: "enabled", false: "disabled"}[s.config.AuthEnabled]
+	log.Printf("Authentication %s", status)
+	s.activityLog.Add("auth_toggle", "", fmt.Sprintf("Authentication %s", status), "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if s.config.AuthEnabled {

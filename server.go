@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -44,6 +45,7 @@ type Agency struct {
 
 type UserAccount struct {
 	Username     string `json:"username"`
+	Name         string `json:"name,omitempty"`
 	PasswordHash string `json:"password_hash"`
 	AgencyID     string `json:"agency_id"`
 	Role         string `json:"role"` // "user", "admin", or "super_admin"
@@ -78,6 +80,16 @@ type WebSession struct {
 	AgencyID string
 }
 
+// EnrollmentToken is a temporary token that can be used in place of a password
+// during QR code enrollment. It expires after 15 minutes.
+type EnrollmentToken struct {
+	Token        string    `json:"token"`
+	Username     string    `json:"username"`
+	AgencyID     string    `json:"agency_id"`
+	PasswordHash string    `json:"-"` // the real password hash this token maps to
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
 type Server struct {
 	config            *Config
 	configFile        string
@@ -89,6 +101,7 @@ type Server struct {
 	agencies          map[string]*Agency         // agencyID -> agency
 	authenticatedAddrs map[string]string         // addr string -> agencyID
 	pendingChallenges  map[string][32]byte       // addr string -> nonce (Phase 4f challenge-response)
+	enrollmentTokens   map[string]*EnrollmentToken // token string -> enrollment token
 	webAdmins          map[string]*WebAdmin      // "agencyID:username" -> admin account (web dashboard)
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
@@ -96,6 +109,9 @@ type Server struct {
 	shutdown          chan struct{}
 	stats             *Stats
 	updateStatus      *UpdateStatus
+	activityLog       *ActivityLog
+	networkTimeSeries *NetworkTimeSeries
+	wsConnCount       int64 // atomic counter for active WebSocket connections
 }
 
 type Stats struct {
@@ -105,6 +121,300 @@ type Stats struct {
 	BytesSent       uint64
 	StartTime       time.Time
 	mu              sync.RWMutex
+}
+
+// --- Activity Logging ---
+
+type ActivityEvent struct {
+	Timestamp string `json:"timestamp"`
+	Type      string `json:"type"`
+	Username  string `json:"username"`
+	Details   string `json:"details"`
+	AgencyID  string `json:"agency_id"`
+}
+
+type ActivityLog struct {
+	Events   []*ActivityEvent `json:"events"`
+	mu       sync.RWMutex
+	filePath string
+	maxSize  int
+}
+
+func NewActivityLog(filePath string, maxSize int) *ActivityLog {
+	return &ActivityLog{
+		Events:   make([]*ActivityEvent, 0),
+		filePath: filePath,
+		maxSize:  maxSize,
+	}
+}
+
+func (al *ActivityLog) Load() {
+	file, err := os.Open(al.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("No activity log found at %s, starting fresh", al.filePath)
+			return
+		}
+		log.Printf("Error loading activity log: %v", err)
+		return
+	}
+	defer file.Close()
+
+	var events []*ActivityEvent
+	if err := json.NewDecoder(file).Decode(&events); err != nil {
+		log.Printf("Error parsing activity log: %v", err)
+		return
+	}
+
+	al.Events = events
+	log.Printf("Loaded %d activity events", len(al.Events))
+}
+
+func (al *ActivityLog) Save() error {
+	al.mu.RLock()
+	events := make([]*ActivityEvent, len(al.Events))
+	copy(events, al.Events)
+	al.mu.RUnlock()
+
+	file, err := os.Create(al.filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(events)
+}
+
+func (al *ActivityLog) Add(eventType, username, details, agencyID string) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+
+	event := &ActivityEvent{
+		Timestamp: time.Now().Format(time.RFC3339),
+		Type:      eventType,
+		Username:  username,
+		Details:   details,
+		AgencyID:  agencyID,
+	}
+
+	al.Events = append(al.Events, event)
+
+	// Trim to max size
+	if len(al.Events) > al.maxSize {
+		al.Events = al.Events[len(al.Events)-al.maxSize:]
+	}
+}
+
+func (al *ActivityLog) GetRecent(n int) []*ActivityEvent {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+
+	total := len(al.Events)
+	if n > total {
+		n = total
+	}
+	if n == 0 {
+		return []*ActivityEvent{}
+	}
+
+	// Return newest first
+	result := make([]*ActivityEvent, n)
+	for i := 0; i < n; i++ {
+		result[i] = al.Events[total-1-i]
+	}
+	return result
+}
+
+func (al *ActivityLog) startAutoSave(shutdown chan struct{}) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-shutdown:
+			return
+		case <-ticker.C:
+			if err := al.Save(); err != nil {
+				log.Printf("Error auto-saving activity log: %v", err)
+			}
+		}
+	}
+}
+
+// --- Network Time-Series ---
+
+type NetworkDataPoint struct {
+	Timestamp       time.Time `json:"timestamp"`
+	PacketsSent     uint64    `json:"packets_sent"`
+	PacketsReceived uint64    `json:"packets_received"`
+}
+
+type NetworkTimeSeries struct {
+	Points          []NetworkDataPoint `json:"points"`
+	lastPacketsSent uint64
+	lastPacketsRecv uint64
+	mu              sync.RWMutex
+}
+
+func NewNetworkTimeSeries() *NetworkTimeSeries {
+	return &NetworkTimeSeries{
+		Points: make([]NetworkDataPoint, 0, 60),
+	}
+}
+
+func (nts *NetworkTimeSeries) Record(currentSent, currentRecv uint64) {
+	nts.mu.Lock()
+	defer nts.mu.Unlock()
+
+	deltaSent := currentSent - nts.lastPacketsSent
+	deltaRecv := currentRecv - nts.lastPacketsRecv
+
+	// Skip first recording (delta would be total since startup)
+	if nts.lastPacketsSent > 0 || nts.lastPacketsRecv > 0 {
+		nts.Points = append(nts.Points, NetworkDataPoint{
+			Timestamp:       time.Now(),
+			PacketsSent:     deltaSent,
+			PacketsReceived: deltaRecv,
+		})
+
+		// Keep last 60 points (1 hour of minute-by-minute data)
+		if len(nts.Points) > 60 {
+			nts.Points = nts.Points[len(nts.Points)-60:]
+		}
+	}
+
+	nts.lastPacketsSent = currentSent
+	nts.lastPacketsRecv = currentRecv
+}
+
+func (nts *NetworkTimeSeries) GetPoints() []NetworkDataPoint {
+	nts.mu.RLock()
+	defer nts.mu.RUnlock()
+
+	result := make([]NetworkDataPoint, len(nts.Points))
+	copy(result, nts.Points)
+	return result
+}
+
+func (s *Server) startNetworkRecorder() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.shutdown:
+			return
+		case <-ticker.C:
+			s.stats.mu.RLock()
+			sent := s.stats.PacketsSent
+			recv := s.stats.PacketsReceived
+			s.stats.mu.RUnlock()
+			s.networkTimeSeries.Record(sent, recv)
+		}
+	}
+}
+
+// --- Health Checks ---
+
+type ServiceHealth struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Details string `json:"details"`
+}
+
+type HealthReport struct {
+	Services       []ServiceHealth `json:"services"`
+	OverallPercent int             `json:"overall_percent"`
+	HealthyCount   int             `json:"healthy_count"`
+	TotalCount     int             `json:"total_count"`
+}
+
+func (s *Server) CheckHealth() *HealthReport {
+	services := make([]ServiceHealth, 0, 5)
+	healthyCount := 0
+
+	// 1. Web Server — always healthy if we're responding
+	services = append(services, ServiceHealth{Name: "Web Server", Status: "healthy", Details: "Responding"})
+	healthyCount++
+
+	// 2. Database — check JSON data files
+	dbHealthy := true
+	dbDetails := "All files accessible"
+	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile} {
+		if _, err := os.Stat(f); err != nil {
+			dbHealthy = false
+			dbDetails = fmt.Sprintf("File inaccessible: %s", f)
+			break
+		}
+	}
+	if dbHealthy {
+		services = append(services, ServiceHealth{Name: "Database", Status: "healthy", Details: dbDetails})
+		healthyCount++
+	} else {
+		services = append(services, ServiceHealth{Name: "Database", Status: "warning", Details: dbDetails})
+	}
+
+	// 3. UDP Relay — check listener
+	if s.conn != nil {
+		services = append(services, ServiceHealth{Name: "Relay Service", Status: "healthy", Details: "Listener active"})
+		healthyCount++
+	} else {
+		services = append(services, ServiceHealth{Name: "Relay Service", Status: "error", Details: "Listener not active"})
+	}
+
+	// 4. WebSocket — check active connection count
+	wsCount := atomic.LoadInt64(&s.wsConnCount)
+	if wsCount > 0 {
+		services = append(services, ServiceHealth{Name: "WebSocket", Status: "healthy", Details: fmt.Sprintf("%d connections", wsCount)})
+		healthyCount++
+	} else {
+		services = append(services, ServiceHealth{Name: "WebSocket", Status: "warning", Details: "No active connections"})
+	}
+
+	// 5. Storage — check all data files accessible and get total size
+	storageHealthy := true
+	var totalSize int64
+	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, "activity_log.json"} {
+		info, err := os.Stat(f)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				storageHealthy = false
+			}
+			continue
+		}
+		totalSize += info.Size()
+	}
+	sizeStr := fmt.Sprintf("Total: %s", formatBytes(totalSize))
+	if storageHealthy {
+		services = append(services, ServiceHealth{Name: "Storage", Status: "healthy", Details: sizeStr})
+		healthyCount++
+	} else {
+		services = append(services, ServiceHealth{Name: "Storage", Status: "warning", Details: sizeStr})
+	}
+
+	totalCount := len(services)
+	pct := 0
+	if totalCount > 0 {
+		pct = (healthyCount * 100) / totalCount
+	}
+
+	return &HealthReport{
+		Services:       services,
+		OverallPercent: pct,
+		HealthyCount:   healthyCount,
+		TotalCount:     totalCount,
+	}
+}
+
+func formatBytes(b int64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%d B", b)
+	} else if b < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
 }
 
 // channelKey builds the map key for agency-scoped channels.
@@ -142,6 +452,7 @@ func NewServer(config *Config, configFile string) *Server {
 		agencies:          make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]string),
 		pendingChallenges:  make(map[string][32]byte),
+		enrollmentTokens:   make(map[string]*EnrollmentToken),
 		webAdmins:          make(map[string]*WebAdmin),
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
@@ -151,6 +462,10 @@ func NewServer(config *Config, configFile string) *Server {
 		},
 		updateStatus: &UpdateStatus{},
 	}
+
+	s.activityLog = NewActivityLog("activity_log.json", 1000)
+	s.activityLog.Load()
+	s.networkTimeSeries = NewNetworkTimeSeries()
 
 	s.loadAgencies()
 	s.loadUsers()
@@ -184,6 +499,11 @@ func (s *Server) StartPTT() error {
 
 	// Start heartbeat checker
 	go s.heartbeatChecker()
+
+	// Start network time-series recorder, activity log auto-save, and token cleanup
+	go s.startNetworkRecorder()
+	go s.activityLog.startAutoSave(s.shutdown)
+	s.startTokenCleanup()
 
 	// Start receiving packets
 	buffer := make([]byte, 65507) // Max UDP packet size
@@ -507,15 +827,21 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	// Check if client already exists
 	ck := userKey(agencyID, packet.Username)
 	client, exists := s.clients[ck]
+	var oldChannel int
+	isChannelSwitch := false
 
 	if exists {
 		// Client is rejoining, possibly switching channels
+		oldChannel = client.Channel
+		if oldChannel != packet.Channel {
+			isChannelSwitch = true
+		}
 		oldKey := channelKey(client.AgencyID, client.Channel)
-		oldChannel := s.channels[oldKey]
-		if oldChannel != nil {
-			oldChannel.mu.Lock()
-			delete(oldChannel.Clients, ck)
-			oldChannel.mu.Unlock()
+		oldCh := s.channels[oldKey]
+		if oldCh != nil {
+			oldCh.mu.Lock()
+			delete(oldCh.Clients, ck)
+			oldCh.mu.Unlock()
 		}
 
 		client.Channel = packet.Channel
@@ -576,6 +902,13 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	s.mu.Unlock()
 
+	// Log activity events outside the lock
+	if !exists {
+		s.activityLog.Add("client_connect", packet.Username, fmt.Sprintf("Joined channel %d", packet.Channel), agencyID)
+	} else if isChannelSwitch {
+		s.activityLog.Add("channel_switch", packet.Username, fmt.Sprintf("Switched from channel %d to channel %d", oldChannel, packet.Channel), agencyID)
+	}
+
 	// Send packets outside the lock
 	for _, p := range toSend {
 		s.sendPacket(p.data, p.addr)
@@ -626,6 +959,7 @@ func (s *Server) removeClient(client *Client) {
 	// Remove from clients map
 	delete(s.clients, ck)
 	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
+	s.activityLog.Add("client_disconnect", client.Username, fmt.Sprintf("Left channel %d", client.Channel), client.AgencyID)
 }
 
 func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
@@ -718,6 +1052,9 @@ func (s *Server) isShuttingDown() bool {
 
 func (s *Server) Shutdown() {
 	close(s.shutdown)
+	if s.activityLog != nil {
+		s.activityLog.Save()
+	}
 	if s.conn != nil {
 		s.conn.Close()
 	}
@@ -1016,13 +1353,40 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		[]byte(hex.EncodeToString(expectedHmac)),
 		[]byte(packet.PasswordHash)) == 1
 
+	// If real password didn't match, try enrollment tokens
+	usedEnrollToken := ""
+	if !authOk {
+		for token, et := range s.enrollmentTokens {
+			if et.Username == packet.Username && time.Now().Before(et.ExpiresAt) {
+				// The client used the enrollment token as a password:
+				// client computes SHA256(token), then HMAC(SHA256(token), nonce)
+				tokenHash := hashPassword(et.Token)
+				tokenHmac := computeHmacSha256([]byte(tokenHash), nonce[:])
+				if subtle.ConstantTimeCompare(
+					[]byte(hex.EncodeToString(tokenHmac)),
+					[]byte(packet.PasswordHash)) == 1 {
+					authOk = true
+					usedEnrollToken = token
+					break
+				}
+			}
+		}
+	}
+
 	if !authOk {
 		log.Printf("Auth failed: wrong password for user %s from %s", packet.Username, addr)
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid password"})
 		s.sendPacket(resp, addr)
 		return
 	}
-	log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
+
+	// Consume enrollment token after successful use
+	if usedEnrollToken != "" {
+		delete(s.enrollmentTokens, usedEnrollToken)
+		log.Printf("Auth (enrollment token) success: user %s from %s — token consumed", packet.Username, addr)
+	} else {
+		log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
+	}
 
 	// Remove old authenticated address for this user (in case they reconnected from a new port)
 	clientKey := userKey(user.AgencyID, user.Username)
@@ -1044,6 +1408,61 @@ func computeHmacSha256(key, data []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(data)
 	return mac.Sum(nil)
+}
+
+// --- Enrollment Tokens ---
+
+// GenerateEnrollmentToken creates a random 16-byte hex token for QR enrollment.
+// The token maps to the user's real password hash and expires after 15 minutes.
+// Must be called while s.mu is held.
+func (s *Server) GenerateEnrollmentToken(username, agencyID, passwordHash string) string {
+	tokenBytes := make([]byte, 8)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		log.Printf("Failed to generate enrollment token: %v", err)
+		return ""
+	}
+	token := hex.EncodeToString(tokenBytes)
+
+	s.enrollmentTokens[token] = &EnrollmentToken{
+		Token:        token,
+		Username:     username,
+		AgencyID:     agencyID,
+		PasswordHash: passwordHash,
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+	}
+
+	log.Printf("Enrollment token created for user %s (agency: %s), expires in 15 minutes", username, agencyID)
+	return token
+}
+
+// cleanupExpiredTokens removes expired enrollment tokens. Called periodically.
+func (s *Server) cleanupExpiredTokens() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	for token, et := range s.enrollmentTokens {
+		if now.After(et.ExpiresAt) {
+			delete(s.enrollmentTokens, token)
+			log.Printf("Enrollment token expired for user %s", et.Username)
+		}
+	}
+}
+
+// startTokenCleanup runs a goroutine that cleans up expired tokens every minute.
+func (s *Server) startTokenCleanup() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.cleanupExpiredTokens()
+			case <-s.shutdown:
+				return
+			}
+		}
+	}()
 }
 
 // --- User Management ---
@@ -1216,6 +1635,7 @@ func (s *Server) RemoveUser(agencyID, username string) error {
 	}
 
 	log.Printf("Removed user account: %s [%s]", username, agencyID)
+	s.activityLog.Add("user_deleted", username, fmt.Sprintf("Removed from agency %s", agencyID), agencyID)
 	return nil
 }
 
@@ -1249,6 +1669,7 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 
 		users = append(users, map[string]interface{}{
 			"username":   user.Username,
+			"name":       user.Name,
 			"agency_id":  user.AgencyID,
 			"role":       role,
 			"created_at": user.CreatedAt,
@@ -1462,7 +1883,8 @@ func (s *Server) migrateToAgencies() {
 	log.Printf("Agency migration complete: %d users and %d admins updated", len(s.users), len(s.webAdmins))
 }
 
-func (s *Server) AddUser(username, password, agencyID, role string) error {
+// AddUser creates a new user account and returns an enrollment token for QR enrollment.
+func (s *Server) AddUser(username, name, password, agencyID, role string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1473,20 +1895,22 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 	key := userKey(agencyID, username)
 
 	if _, exists := s.users[key]; exists {
-		return fmt.Errorf("user %s already exists in agency %s", username, agencyID)
+		return "", fmt.Errorf("user %s already exists in agency %s", username, agencyID)
 	}
 
 	if _, exists := s.agencies[agencyID]; !exists {
-		return fmt.Errorf("agency %s not found", agencyID)
+		return "", fmt.Errorf("agency %s not found", agencyID)
 	}
 
 	if role == "" {
 		role = "user"
 	}
 
+	pwHash := hashPassword(password)
 	s.users[key] = &UserAccount{
 		Username:     username,
-		PasswordHash: hashPassword(password),
+		Name:         name,
+		PasswordHash: pwHash,
 		AgencyID:     agencyID,
 		Role:         role,
 		CreatedAt:    time.Now().Format(time.RFC3339),
@@ -1522,11 +1946,15 @@ func (s *Server) AddUser(username, password, agencyID, role string) error {
 
 	if err := s.saveUsers(); err != nil {
 		delete(s.users, key)
-		return err
+		return "", err
 	}
 
+	// Generate enrollment token for QR code (expires in 15 minutes)
+	enrollToken := s.GenerateEnrollmentToken(username, agencyID, pwHash)
+
 	log.Printf("Created user account: %s (agency: %s, role: %s)", username, agencyID, role)
-	return nil
+	s.activityLog.Add("user_created", username, fmt.Sprintf("Created in agency %s with role %s", agencyID, role), agencyID)
+	return enrollToken, nil
 }
 
 // --- Mutual Aid ---

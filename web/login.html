@@ -8,17 +8,17 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: #000000;
-            color: #FFFFFF;
+            background: #0B0E14;
+            color: #E6EDF3;
             height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
         }
         .login-card {
-            background: #0A0A0A;
-            border: 1px solid #2A2A2A;
-            border-radius: 12px;
+            background: #0D1117;
+            border: 1px solid #1E2733;
+            border-radius: 14px;
             padding: 40px;
             width: 380px;
             text-align: center;
@@ -33,33 +33,35 @@
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 8px;
+            color: #E6EDF3;
         }
         .login-card p {
-            color: #888;
+            color: #8B949E;
             font-size: 14px;
             margin-bottom: 24px;
         }
         .login-input {
             width: 100%;
             padding: 12px 16px;
-            background: #1A1A1A;
-            border: 1px solid #333;
+            background: #151B23;
+            border: 1px solid #2A3441;
             border-radius: 8px;
-            color: #FFF;
+            color: #E6EDF3;
             font-size: 14px;
             margin-bottom: 12px;
             outline: none;
+            transition: border-color 0.2s;
         }
         .login-input:focus {
-            border-color: #4A9EFF;
+            border-color: #7C3AED;
         }
         .login-input::placeholder {
-            color: #666;
+            color: #4D5562;
         }
         .login-btn {
             width: 100%;
             padding: 12px;
-            background: #4A9EFF;
+            background: #7C3AED;
             color: #FFF;
             border: none;
             border-radius: 8px;
@@ -67,18 +69,19 @@
             font-weight: 600;
             cursor: pointer;
             margin-top: 8px;
+            transition: background 0.2s;
         }
         .login-btn:hover {
-            background: #3A8EEF;
+            background: #6D28D9;
         }
         .login-btn:disabled {
-            background: #333;
+            background: #2A3441;
             cursor: not-allowed;
         }
         .login-error {
-            background: rgba(255, 60, 60, 0.1);
-            border: 1px solid rgba(255, 60, 60, 0.3);
-            color: #FF6B6B;
+            background: rgba(248, 113, 113, 0.1);
+            border: 1px solid rgba(248, 113, 113, 0.25);
+            color: #F87171;
             padding: 10px;
             border-radius: 8px;
             font-size: 13px;

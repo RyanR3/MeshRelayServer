@@ -11,6 +11,21 @@ let currentRole = '';
 let currentAgencyId = '';
 let pttPort = 5000;
 let agenciesList = []; // cached for dropdowns
+let connectedClients = []; // updated by WebSocket for online status
+let allUsers = []; // full user list for pagination
+let currentUsersPage = 1;
+const USERS_PER_PAGE = 10;
+let lastStats = {}; // cache latest stats for system health panel
+let networkChart = null;
+let activityChart = null;
+let lastHealth = null;
+
+// --- Sidebar Collapse ---
+
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    sidebar.classList.toggle('collapsed');
+}
 
 // --- Page Navigation ---
 
@@ -32,6 +47,8 @@ function navigateTo(pageName) {
         fetchUsers();
     } else if (pageName === 'mutual-aid') {
         fetchMutualAid();
+    } else if (pageName === 'activity') {
+        fetchActivityPage();
     } else if (pageName === 'settings') {
         fetchAuthStatus();
         fetchVersionInfo();
@@ -119,9 +136,28 @@ function updateDashboard(data) {
             data.stats.total_clients = data.clients ? data.clients.length : 0;
         }
     }
+    connectedClients = data.clients || [];
+    lastStats = data.stats || {};
     updateStats(data.stats);
     updateChannels(data.channels);
     updateClients(data.clients);
+    updateUsersPageStats();
+
+    // Network activity chart
+    if (data.network_timeseries) {
+        updateNetworkChart(data.network_timeseries);
+    }
+
+    // System health from server
+    if (data.health) {
+        updateHealthFromServer(data.health);
+    }
+
+    // Activity feed
+    if (data.activity) {
+        updateActivityFeed(data.activity);
+        updateActivityChart(data.activity);
+    }
 }
 
 // Update statistics cards
@@ -135,17 +171,16 @@ function updateStats(stats) {
 // Update channels list
 function updateChannels(channels) {
     const channelList = document.getElementById('channel-list');
-
-    if (!channels || channels.length === 0) {
-        channelList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F4E1;</div><div>No active channels</div></div>';
-        return;
-    }
+    const topCount = document.getElementById('top-channels-count');
 
     // Sort channels by ID
-    channels.sort((a, b) => a.id - b.id);
+    if (channels) channels.sort((a, b) => a.id - b.id);
 
     // Only show channels with clients
-    const activeChannels = channels.filter(ch => ch.client_count > 0);
+    const activeChannels = channels ? channels.filter(ch => ch.client_count > 0) : [];
+
+    // Update top info count
+    if (topCount) topCount.textContent = activeChannels.length;
 
     if (activeChannels.length === 0) {
         channelList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F4E1;</div><div>No active channels</div></div>';
@@ -166,6 +201,9 @@ function updateChannels(channels) {
 // Update clients list
 function updateClients(clients) {
     const clientList = document.getElementById('client-list');
+    const topCount = document.getElementById('top-clients-count');
+
+    if (topCount) topCount.textContent = clients ? clients.length : 0;
 
     if (!clients || clients.length === 0) {
         clientList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F465;</div><div>No connected clients</div></div>';
@@ -261,6 +299,28 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Avatar color based on username hash
+const avatarColors = ['#7C3AED', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#06B6D4'];
+
+function getAvatarColor(username) {
+    let hash = 0;
+    for (let i = 0; i < username.length; i++) {
+        hash = username.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return avatarColors[Math.abs(hash) % avatarColors.length];
+}
+
+function isUserOnline(username) {
+    return connectedClients.some(c => c.username === username);
+}
+
+function filterUsersTable() {
+    currentUsersPage = 1;
+    renderUsersPage();
+}
+
+// (Top Info tabs removed — now side-by-side columns)
+
 // --- Modal Management ---
 
 function showModal(id) {
@@ -314,18 +374,45 @@ function fetchUsers() {
     }
     fetch(url)
         .then(r => r.json())
-        .then(users => renderUsersTable(users))
+        .then(users => {
+            allUsers = users || [];
+            currentUsersPage = 1;
+            renderUsersPage();
+        })
         .catch(err => console.error('Error fetching users:', err));
+}
+
+function getFilteredUsers() {
+    const query = (document.getElementById('users-search').value || '').toLowerCase();
+    if (!query) return allUsers;
+    return allUsers.filter(u => u.username.toLowerCase().includes(query) || (u.name || '').toLowerCase().includes(query) || (u.agency_id || '').toLowerCase().includes(query));
+}
+
+function renderUsersPage() {
+    const filtered = getFilteredUsers();
+    const total = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(total / USERS_PER_PAGE));
+
+    if (currentUsersPage > totalPages) currentUsersPage = totalPages;
+
+    const start = (currentUsersPage - 1) * USERS_PER_PAGE;
+    const pageUsers = filtered.slice(start, start + USERS_PER_PAGE);
+
+    renderUsersTable(pageUsers);
+    renderPagination(total, totalPages);
+    updateUsersPageStats();
 }
 
 function renderUsersTable(users) {
     const tbody = document.getElementById('users-table-body');
     const emptyState = document.getElementById('users-empty');
-    const table = document.querySelector('#page-users .data-table');
+    const table = document.getElementById('users-data-table');
+    const pagination = document.getElementById('users-pagination');
 
-    if (!users || users.length === 0) {
+    if (!allUsers || allUsers.length === 0) {
         tbody.innerHTML = '';
         if (table) table.style.display = 'none';
+        if (pagination) pagination.style.display = 'none';
         emptyState.style.display = 'block';
         return;
     }
@@ -333,16 +420,29 @@ function renderUsersTable(users) {
     if (table) table.style.display = 'table';
     emptyState.style.display = 'none';
 
+    if (!users || users.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #8B949E; padding: 30px;">No matching users</td></tr>';
+        return;
+    }
+
     tbody.innerHTML = users.map(user => {
         const created = user.created_at ? new Date(user.created_at).toLocaleString() : 'Unknown';
+        const safeName = escapeHtml(user.name || '');
         const safeUsername = escapeHtml(user.username);
         const safeAgency = escapeHtml(user.agency_id || 'default');
         const agencyCol = currentRole === 'super_admin' ? `<td><span class="agency-badge">${safeAgency}</span></td>` : '';
         const role = user.role || 'user';
         const superAdminOpt = currentRole === 'super_admin' ? `<option value="super_admin" ${role === 'super_admin' ? 'selected' : ''}>Super Admin</option>` : '';
+        const initial = (user.name || user.username).charAt(0).toUpperCase();
+        const avatarColor = getAvatarColor(user.username);
+        const online = isUserOnline(user.username);
+        const statusDot = online ? '<span class="status-dot-online"></span>' : '<span class="status-dot-offline"></span>';
         return `
             <tr>
+                <td><div class="user-avatar" style="background: ${avatarColor};">${initial}</div></td>
+                <td>${safeName || '<span style="color:#8B949E;">—</span>'}</td>
                 <td><strong>${safeUsername}</strong></td>
+                <td style="text-align: center;">${statusDot}</td>
                 ${agencyCol}
                 <td>
                     <select class="role-select" onchange="updateUserRole('${safeUsername}', this.value, '${safeAgency}')" data-current="${role}">
@@ -355,7 +455,7 @@ function renderUsersTable(users) {
                 <td>
                     <div class="actions-cell">
                         <button class="btn-action qr" onclick="showQRCode('${safeUsername}', '${safeAgency}')">QR Code</button>
-                        <button class="btn-action edit" onclick="showEditPassword('${safeUsername}', '${safeAgency}')">Edit</button>
+                        <button class="btn-action edit" onclick="showEditUser('${safeUsername}', '${safeAgency}')">Edit</button>
                         <button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>
                     </div>
                 </td>
@@ -364,9 +464,379 @@ function renderUsersTable(users) {
     }).join('');
 }
 
+function renderPagination(total, totalPages) {
+    const pagination = document.getElementById('users-pagination');
+    const info = document.getElementById('pagination-info');
+    const controls = document.getElementById('pagination-controls');
+
+    if (total <= USERS_PER_PAGE) {
+        pagination.style.display = 'none';
+        return;
+    }
+
+    pagination.style.display = 'flex';
+
+    const start = (currentUsersPage - 1) * USERS_PER_PAGE + 1;
+    const end = Math.min(currentUsersPage * USERS_PER_PAGE, total);
+    info.textContent = `Showing ${start}-${end} of ${total} users`;
+
+    let html = '';
+
+    // Previous button
+    html += `<button class="pagination-btn" onclick="goToUsersPage(${currentUsersPage - 1})" ${currentUsersPage === 1 ? 'disabled' : ''}>&laquo;</button>`;
+
+    // Page numbers (show max 5 centered around current)
+    let startPage = Math.max(1, currentUsersPage - 2);
+    let endPage = Math.min(totalPages, startPage + 4);
+    if (endPage - startPage < 4) startPage = Math.max(1, endPage - 4);
+
+    for (let i = startPage; i <= endPage; i++) {
+        html += `<button class="pagination-btn ${i === currentUsersPage ? 'active' : ''}" onclick="goToUsersPage(${i})">${i}</button>`;
+    }
+
+    // Next button
+    html += `<button class="pagination-btn" onclick="goToUsersPage(${currentUsersPage + 1})" ${currentUsersPage === totalPages ? 'disabled' : ''}>&raquo;</button>`;
+
+    controls.innerHTML = html;
+}
+
+function goToUsersPage(page) {
+    const filtered = getFilteredUsers();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / USERS_PER_PAGE));
+    if (page < 1 || page > totalPages) return;
+    currentUsersPage = page;
+    renderUsersPage();
+}
+
+function updateUsersPageStats() {
+    const totalEl = document.getElementById('users-total');
+    const onlineEl = document.getElementById('users-online');
+    const offlineEl = document.getElementById('users-offline');
+    const newEl = document.getElementById('users-new');
+
+    if (!totalEl) return; // not on users page
+
+    const total = allUsers.length;
+    const online = allUsers.filter(u => isUserOnline(u.username)).length;
+    const offline = total - online;
+
+    // Count users created in last 7 days
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const newUsers = allUsers.filter(u => u.created_at && new Date(u.created_at) > sevenDaysAgo).length;
+
+    totalEl.textContent = total;
+    onlineEl.textContent = online;
+    offlineEl.textContent = offline;
+    newEl.textContent = newUsers;
+}
+
+function updateHealthFromServer(health) {
+    lastHealth = health;
+
+    // Update Users page sidebar health panel
+    const clientsEl = document.getElementById('health-clients');
+    const uptimeEl = document.getElementById('health-uptime');
+    const versionEl = document.getElementById('health-version');
+    const sidebarVersion = document.getElementById('sidebar-version');
+
+    if (clientsEl) clientsEl.textContent = connectedClients.length;
+    if (uptimeEl) uptimeEl.textContent = formatUptime(lastStats.uptime_seconds || 0);
+    if (versionEl && lastStats.version) versionEl.textContent = lastStats.version;
+    if (sidebarVersion && lastStats.version) sidebarVersion.textContent = lastStats.version;
+
+    // Dashboard system health panel — data-driven from server
+    const serviceIds = ['health-web', 'health-db', 'health-relay', 'health-push', 'health-storage'];
+    health.services.forEach((svc, i) => {
+        const el = document.getElementById(serviceIds[i]);
+        if (!el) return;
+
+        el.textContent = svc.status === 'healthy' ? 'Healthy' : svc.status === 'warning' ? 'Warning' : 'Error';
+        el.className = 'health-svc-status ' + svc.status;
+
+        const dot = el.parentElement.querySelector('.health-svc-dot');
+        if (dot) {
+            dot.className = 'health-svc-dot ' + svc.status;
+        }
+    });
+
+    // Update health ring
+    const ringCircle = document.getElementById('health-ring-circle');
+    const ringPct = document.getElementById('health-ring-pct');
+    const ringSublabel = document.getElementById('health-ring-sublabel');
+    if (ringCircle) {
+        const pct = health.overall_percent;
+        const circumference = 2 * Math.PI * 15.5; // ~97.4
+        const offset = circumference - (pct / 100) * circumference;
+        ringCircle.style.strokeDashoffset = offset;
+        ringCircle.style.stroke = pct >= 80 ? '#34D399' : pct >= 50 ? '#FBBF24' : '#F87171';
+        if (ringPct) ringPct.textContent = pct + '%';
+        if (ringSublabel) ringSublabel.textContent = `${health.healthy_count} of ${health.total_count} services healthy`;
+    }
+}
+
+// --- Network Activity Chart ---
+
+function initNetworkChart() {
+    const canvas = document.getElementById('network-chart');
+    if (!canvas) return;
+
+    networkChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Packets Sent',
+                    data: [],
+                    borderColor: '#60A5FA',
+                    backgroundColor: 'rgba(96, 165, 250, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    pointHitRadius: 10,
+                },
+                {
+                    label: 'Packets Received',
+                    data: [],
+                    borderColor: '#A78BFA',
+                    backgroundColor: 'rgba(167, 139, 250, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    pointHitRadius: 10,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 300 },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: '#151B23',
+                    borderColor: '#1E2733',
+                    borderWidth: 1,
+                    titleColor: '#E6EDF3',
+                    bodyColor: '#8B949E',
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(30, 39, 51, 0.5)', drawBorder: false },
+                    ticks: { color: '#4D5562', font: { size: 10 }, maxTicksLimit: 10 }
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: { color: 'rgba(30, 39, 51, 0.5)', drawBorder: false },
+                    ticks: { color: '#4D5562', font: { size: 10 } }
+                }
+            },
+            interaction: { mode: 'nearest', axis: 'x', intersect: false }
+        }
+    });
+}
+
+function updateNetworkChart(timeseries) {
+    if (!timeseries || timeseries.length === 0) return;
+
+    if (!networkChart) initNetworkChart();
+    if (!networkChart) return;
+
+    const labels = timeseries.map(p => {
+        const d = new Date(p.timestamp);
+        return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: false });
+    });
+
+    networkChart.data.labels = labels;
+    networkChart.data.datasets[0].data = timeseries.map(p => p.packets_sent);
+    networkChart.data.datasets[1].data = timeseries.map(p => p.packets_received);
+    networkChart.update('none');
+}
+
+// --- Activity Overview Chart (Users sidebar) ---
+
+function initActivityChart() {
+    const canvas = document.getElementById('activity-chart');
+    if (!canvas) return;
+
+    activityChart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Events',
+                data: [],
+                backgroundColor: 'rgba(124, 58, 237, 0.6)',
+                borderColor: '#7C3AED',
+                borderWidth: 1,
+                borderRadius: 4,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 300 },
+            plugins: { legend: { display: false } },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: '#4D5562', font: { size: 9 } }
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: { color: 'rgba(30, 39, 51, 0.5)', drawBorder: false },
+                    ticks: { color: '#4D5562', font: { size: 9 }, stepSize: 1 }
+                }
+            }
+        }
+    });
+}
+
+function updateActivityChart(events) {
+    if (!events || events.length === 0) return;
+
+    if (!activityChart) initActivityChart();
+    if (!activityChart) return;
+
+    // Aggregate events by day (last 7 days)
+    const dayCounts = {};
+    const now = new Date();
+    for (let i = 6; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const key = d.toISOString().split('T')[0];
+        dayCounts[key] = 0;
+    }
+
+    events.forEach(e => {
+        const day = e.timestamp.split('T')[0];
+        if (day in dayCounts) dayCounts[day]++;
+    });
+
+    const labels = Object.keys(dayCounts).map(d => {
+        const parts = d.split('-');
+        return parts[1] + '/' + parts[2];
+    });
+
+    activityChart.data.labels = labels;
+    activityChart.data.datasets[0].data = Object.values(dayCounts);
+    activityChart.update('none');
+}
+
+// --- Recent Activity Feed ---
+
+function updateActivityFeed(events) {
+    const feed = document.getElementById('recent-activity-feed');
+    if (!feed) return;
+
+    if (!events || events.length === 0) {
+        feed.innerHTML = '<div class="activity-empty">No recent activity</div>';
+        return;
+    }
+
+    // Show up to 10 most recent events
+    const items = events.slice(0, 10);
+
+    feed.innerHTML = items.map(event => {
+        const dotClass = getEventDotClass(event.type);
+        const text = formatEventText(event);
+        const timeAgo = formatEventTime(event.timestamp);
+
+        return `<div class="activity-item">
+            <div class="activity-dot ${dotClass}"></div>
+            <div class="activity-item-content">
+                <div class="activity-item-text">${text}</div>
+                <div class="activity-item-time">${timeAgo}</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function getEventDotClass(type) {
+    switch (type) {
+        case 'client_connect': return 'connect';
+        case 'client_disconnect': return 'disconnect';
+        case 'channel_switch': return 'switch';
+        case 'user_created':
+        case 'user_deleted': return 'user';
+        case 'admin_login': return 'admin';
+        case 'auth_toggle': return 'auth';
+        default: return 'admin';
+    }
+}
+
+function formatEventText(event) {
+    const user = escapeHtml(event.username || 'System');
+    switch (event.type) {
+        case 'client_connect': return `<strong>${user}</strong> connected — ${escapeHtml(event.details)}`;
+        case 'client_disconnect': return `<strong>${user}</strong> disconnected — ${escapeHtml(event.details)}`;
+        case 'channel_switch': return `<strong>${user}</strong> ${escapeHtml(event.details)}`;
+        case 'user_created': return `User <strong>${user}</strong> created`;
+        case 'user_deleted': return `User <strong>${user}</strong> deleted`;
+        case 'admin_login': return `<strong>${user}</strong> logged into dashboard`;
+        case 'auth_toggle': return escapeHtml(event.details);
+        default: return `${user}: ${escapeHtml(event.details)}`;
+    }
+}
+
+function formatEventTime(timestamp) {
+    const now = new Date();
+    const then = new Date(timestamp);
+    const seconds = Math.floor((now - then) / 1000);
+
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+}
+
+function fetchActivityPage() {
+    fetch('/api/activity')
+    .then(r => r.json())
+    .then(events => {
+        const feed = document.getElementById('activity-page-feed');
+        if (!feed) return;
+        if (!events || events.length === 0) {
+            feed.innerHTML = '<div style="text-align: center; color: #8B949E; padding: 30px;">No activity recorded yet</div>';
+            return;
+        }
+        feed.innerHTML = events.map(event => {
+            const dotClass = getEventDotClass(event.type);
+            const text = formatEventText(event);
+            const timeAgo = formatEventTime(event.timestamp);
+            return `<div class="activity-item">
+                <div class="activity-dot ${dotClass}"></div>
+                <div class="activity-item-content">
+                    <div class="activity-item-text">${text}</div>
+                    <div class="activity-item-time">${timeAgo}</div>
+                </div>
+            </div>`;
+        }).join('');
+    })
+    .catch(() => {});
+}
+
+// --- Server Time ---
+
+function updateServerTime() {
+    const el = document.getElementById('server-time');
+    if (el) {
+        el.textContent = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+    }
+}
+setInterval(updateServerTime, 1000);
+updateServerTime();
+
 // --- Create User ---
 
 function showCreateUserModal() {
+    document.getElementById('newUserName').value = '';
     document.getElementById('newUsername').value = '';
     document.getElementById('newPassword').value = '';
     document.getElementById('newUserRole').value = 'user';
@@ -380,12 +850,14 @@ function showCreateUserModal() {
         superAdminOption.style.display = currentRole === 'super_admin' ? '' : 'none';
     }
     showModal('createUserModal');
-    document.getElementById('newUsername').focus();
+    document.getElementById('newUserName').focus();
 }
 
 function createUser() {
+    const nameEl = document.getElementById('newUserName');
     const usernameEl = document.getElementById('newUsername');
     const passwordEl = document.getElementById('newPassword');
+    const name = nameEl.value.trim();
     const username = usernameEl.value.trim();
     const password = passwordEl.value;
 
@@ -395,6 +867,7 @@ function createUser() {
     }
 
     const body = { username, password };
+    if (name) body.name = name;
     if (currentRole === 'super_admin') {
         const agencySelect = document.getElementById('newUserAgency');
         if (agencySelect && agencySelect.value) {
@@ -429,9 +902,14 @@ function createUser() {
         addLog(`User "${username}" created`, 'success');
         fetchUsers();
 
-        // Show QR code for the new user
-        const agencyForQr = body.agency_id || currentAgencyId || '';
-        showQRCodeWithData(username, password, agencyForQr);
+        // Show QR code with enrollment token (not the real password)
+        const agencyForQr = data.agency_id || currentAgencyId || '';
+        const enrollToken = data.enrollment_token || '';
+        if (enrollToken) {
+            showQRCodeWithEnrollment(username, enrollToken, agencyForQr);
+        } else {
+            showQRCode(username, agencyForQr);
+        }
     })
     .catch(err => {
         showStatus('user-status', `Failed to create user: ${err.message}`, 'error');
@@ -439,32 +917,63 @@ function createUser() {
     });
 }
 
-// --- Edit Password ---
+// --- Edit User ---
 
 var editingAgency = '';
+var editingUserData = null;
 
-function showEditPassword(username, agency) {
+function showEditUser(username, agency) {
     editingUsername = username;
     editingAgency = agency || '';
-    document.getElementById('editPasswordUser').textContent = username;
+
+    // Find the user data from allUsers
+    editingUserData = allUsers ? allUsers.find(u => u.username === username && (u.agency_id || 'default') === (agency || 'default')) : null;
+
+    document.getElementById('editUserTitle').textContent = username;
+    document.getElementById('editName').value = editingUserData ? (editingUserData.name || '') : '';
+    document.getElementById('editUsername').value = username;
     document.getElementById('editNewPassword').value = '';
-    showModal('editPasswordModal');
-    document.getElementById('editNewPassword').focus();
+
+    // Populate agency dropdown for super admins
+    if (currentRole === 'super_admin') {
+        populateAgencyDropdown('editAgency');
+        document.getElementById('editAgency').value = agency || 'default';
+    }
+
+    showModal('editUserModal');
+    document.getElementById('editName').focus();
 }
 
-function updatePassword() {
+function saveUserEdits() {
+    const name = document.getElementById('editName').value.trim();
+    const newUsername = document.getElementById('editUsername').value.trim();
     const password = document.getElementById('editNewPassword').value;
 
-    if (!password) {
-        showStatus('user-status', 'Password cannot be empty', 'warning');
+    if (!newUsername) {
+        showStatus('user-status', 'Username cannot be empty', 'warning');
         return;
     }
 
+    const body = {};
+    body.name = name;
+    if (newUsername !== editingUsername) {
+        body.new_username = newUsername;
+    }
+    if (currentRole === 'super_admin') {
+        const newAgency = document.getElementById('editAgency').value;
+        if (newAgency && newAgency !== editingAgency) {
+            body.new_agency_id = newAgency;
+        }
+    }
+    if (password) {
+        body.password = password;
+    }
+
     const agencyParam = editingAgency ? `?agency=${encodeURIComponent(editingAgency)}` : '';
-    fetch(`/api/users/${encodeURIComponent(editingUsername)}/password${agencyParam}`, {
+    fetch(`/api/users/${encodeURIComponent(editingUsername)}${agencyParam}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password })
+        body: JSON.stringify(body)
     })
     .then(r => r.text().then(text => ({ status: r.status, ok: r.ok, body: text })))
     .then(({ status, ok, body }) => {
@@ -479,13 +988,14 @@ function updatePassword() {
             throw new Error(data.error || `Server error (${status})`);
         }
 
-        closeModal('editPasswordModal');
-        showStatus('user-status', `Password updated for "${editingUsername}"`, 'success');
-        addLog(`Password updated for "${editingUsername}"`, 'success');
+        closeModal('editUserModal');
+        showStatus('user-status', `User "${editingUsername}" updated`, 'success');
+        addLog(`User "${editingUsername}" updated`, 'success');
+        fetchUsers();
     })
     .catch(err => {
-        showStatus('user-status', `Failed to update password: ${err.message}`, 'error');
-        addLog(`Failed to update password: ${err.message}`, 'error');
+        showStatus('user-status', `Failed to update user: ${err.message}`, 'error');
+        addLog(`Failed to update user: ${err.message}`, 'error');
     });
 }
 
@@ -546,14 +1056,41 @@ function updateUserRole(username, newRole, agency) {
 
 // --- QR Code ---
 
+let qrExpiryInterval = null;
+
 function showQRCode(username, agencyId) {
-    // Show QR with server address and username (no password since we don't store plaintext)
-    const serverUrl = 'client.meshrelayptt.com';
+    // Generate a fresh enrollment token for existing user
+    const agency = agencyId || currentAgencyId || '';
+    const agencyParam = agency ? `?agency=${encodeURIComponent(agency)}` : '';
+
+    fetch(`/api/users/${encodeURIComponent(username)}/enroll${agencyParam}`, {
+        method: 'POST'
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.enrollment_token) {
+            showQRCodeWithEnrollment(username, data.enrollment_token, data.agency_id || agency);
+        } else {
+            // Fallback: show QR without enrollment token
+            showQRCodeBasic(username, agency);
+        }
+    })
+    .catch(() => {
+        showQRCodeBasic(username, agency);
+    });
+}
+
+function showQRCodeBasic(username, agencyId) {
+    const serverUrl = window.location.hostname;
     const agency = agencyId || currentAgencyId || '';
     document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
     document.getElementById('qrServer').textContent = serverUrl;
     document.getElementById('qrUsername').textContent = username;
     document.getElementById('qrPassword').textContent = '(set in app)';
+
+    const expiryEl = document.getElementById('qrExpiry');
+    expiryEl.style.display = 'none';
+    if (qrExpiryInterval) { clearInterval(qrExpiryInterval); qrExpiryInterval = null; }
 
     const container = document.getElementById('qrCodeCanvas');
     container.innerHTML = '';
@@ -568,23 +1105,23 @@ function showQRCode(username, agencyId) {
 
     new QRCode(container, {
         text: qrData,
-        width: 200,
-        height: 200,
+        width: 256,
+        height: 256,
         colorDark: '#000000',
         colorLight: '#ffffff',
-        correctLevel: QRCode.CorrectLevel.H
+        correctLevel: QRCode.CorrectLevel.L
     });
 
     showModal('qrCodeModal');
 }
 
-function showQRCodeWithData(username, password, agencyId) {
-    const serverUrl = 'client.meshrelayptt.com';
+function showQRCodeWithEnrollment(username, enrollmentToken, agencyId) {
+    const serverUrl = window.location.hostname;
     const agency = agencyId || currentAgencyId || '';
-    document.getElementById('qrCodeTitle').textContent = `QR Code for ${username}`;
+    document.getElementById('qrCodeTitle').textContent = `QR Enrollment for ${username}`;
     document.getElementById('qrServer').textContent = serverUrl;
     document.getElementById('qrUsername').textContent = username;
-    document.getElementById('qrPassword').textContent = password;
+    document.getElementById('qrPassword').textContent = enrollmentToken;
 
     const container = document.getElementById('qrCodeCanvas');
     container.innerHTML = '';
@@ -593,21 +1130,61 @@ function showQRCodeWithData(username, password, agencyId) {
         server: serverUrl,
         port: pttPort,
         username: username,
-        password: password
+        password: enrollmentToken
     };
     if (agency) qrObj.agency_id = agency;
     const qrData = JSON.stringify(qrObj);
 
     new QRCode(container, {
         text: qrData,
-        width: 200,
-        height: 200,
+        width: 256,
+        height: 256,
         colorDark: '#000000',
         colorLight: '#ffffff',
-        correctLevel: QRCode.CorrectLevel.H
+        correctLevel: QRCode.CorrectLevel.L
     });
 
+    // Start expiry countdown (15 minutes from now)
+    startExpiryCountdown(15 * 60);
     showModal('qrCodeModal');
+}
+
+function startExpiryCountdown(seconds) {
+    const expiryEl = document.getElementById('qrExpiry');
+    expiryEl.style.display = 'block';
+    let remaining = seconds;
+
+    if (qrExpiryInterval) clearInterval(qrExpiryInterval);
+
+    function updateExpiry() {
+        if (remaining <= 0) {
+            expiryEl.className = 'qr-expiry expired';
+            expiryEl.textContent = 'Enrollment key expired — generate a new QR code';
+            clearInterval(qrExpiryInterval);
+            qrExpiryInterval = null;
+            return;
+        }
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        const timeStr = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+        if (remaining <= 120) {
+            expiryEl.className = 'qr-expiry expiring';
+            expiryEl.textContent = `Enrollment key expires in ${timeStr}`;
+        } else {
+            expiryEl.className = 'qr-expiry active';
+            expiryEl.textContent = `Enrollment key expires in ${timeStr}`;
+        }
+        remaining--;
+    }
+
+    updateExpiry();
+    qrExpiryInterval = setInterval(updateExpiry, 1000);
+}
+
+// Legacy function kept for compatibility
+function showQRCodeWithData(username, password, agencyId) {
+    showQRCodeWithEnrollment(username, password, agencyId);
 }
 
 // --- Mutual Aid ---
@@ -1061,6 +1638,11 @@ function fetchVersionInfo() {
             document.getElementById('current-version').textContent = ver;
             const dashVer = document.getElementById('dashboard-version');
             if (dashVer) dashVer.textContent = ver;
+            const healthVer = document.getElementById('health-version');
+            if (healthVer) healthVer.textContent = ver;
+            const sidebarVer = document.getElementById('sidebar-version');
+            if (sidebarVer) sidebarVer.textContent = ver;
+            lastStats.version = ver;
         })
         .catch(err => console.error('Error fetching version:', err));
 }
@@ -1425,7 +2007,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (e.key === 'Enter') createUser();
         });
         document.getElementById('editNewPassword').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') updatePassword();
+            if (e.key === 'Enter') saveUserEdits();
         });
         document.getElementById('adminConfirmPassword').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') changeAdminPassword();
