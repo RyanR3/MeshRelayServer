@@ -1715,6 +1715,27 @@ function checkForUpdates() {
         });
 }
 
+function autoCheckForUpdates() {
+    fetch('/api/update/check', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error || !data.update_available) return;
+            latestRelease = data;
+            const versionText = `${data.current_version} → ${data.latest_version}`;
+            const settingsBanner = document.getElementById('update-banner');
+            if (settingsBanner) {
+                settingsBanner.style.display = 'block';
+                document.getElementById('update-banner-version').textContent = versionText;
+            }
+            const dashBanner = document.getElementById('dashboard-update-banner');
+            if (dashBanner) {
+                dashBanner.style.display = 'block';
+                document.getElementById('dashboard-update-banner-version').textContent = versionText;
+            }
+        })
+        .catch(() => {});
+}
+
 function showUpdateModal() {
     if (!latestRelease) return;
 
@@ -1986,6 +2007,8 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchVersionInfo();
         if (currentRole === 'super_admin') {
             fetchAgencies();
+            // Auto-check for updates on login
+            autoCheckForUpdates();
         }
 
         // Set up navigation click handlers
