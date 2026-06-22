@@ -145,6 +145,113 @@ echo "${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_
 chmod 440 "$SUDOERS_FILE"
 echo -e "  Sudoers: ${SERVICE_USER} can only restart ${SERVICE_NAME}"
 
+# Router port forwarding reminder
+PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "unknown")
+echo ""
+echo -e "${YELLOW}============================================${NC}"
+echo -e "${YELLOW}  ACTION REQUIRED: Router Port Forwarding${NC}"
+echo -e "${YELLOW}============================================${NC}"
+echo ""
+echo -e "  Log into your router and forward these ports to this server:"
+echo ""
+echo -e "  ${GREEN}UDP 5000${NC}  → PTT audio (required for all clients)"
+echo -e "  ${GREEN}TCP 8080${NC}  → Web dashboard (required if accessing remotely)"
+echo -e "  ${GREEN}TCP 443${NC}   → HTTPS dashboard (required if you set up a domain below)"
+echo -e "  ${GREEN}TCP 80${NC}    → Temp only during domain cert setup (can close after)"
+echo ""
+if [ "$PUBLIC_IP" != "unknown" ]; then
+    echo -e "  This server's public IP appears to be: ${GREEN}${PUBLIC_IP}${NC}"
+fi
+echo -e "  This server's local IP is: ${GREEN}$(hostname -I 2>/dev/null | awk '{print $1}')${NC}"
+echo ""
+read -r -p "  Press Enter once port forwarding is configured (or to skip for now)..." _
+
+# Optional Step: FQDN + TLS via Let's Encrypt
+echo ""
+echo -e "${YELLOW}[Optional] Set up a domain name with HTTPS (Let's Encrypt)?${NC}"
+echo -e "  Requires a domain already pointed at this server's public IP (${PUBLIC_IP})."
+echo -e "  If you haven't created a DNS A record yet, do that now before continuing."
+echo ""
+read -r -p "  Enter your domain (e.g. ptt.example.com), or press Enter to skip: " DOMAIN
+if [ -n "$DOMAIN" ]; then
+    echo ""
+    echo -e "${YELLOW}  Before continuing, make sure:${NC}"
+    echo -e "  1. Your domain registrar has an A record: ${GREEN}${DOMAIN}${NC} → ${GREEN}${PUBLIC_IP}${NC}"
+    echo -e "  2. Router port 80 is forwarded to this server (needed for verification)"
+    echo -e "  3. DNS has had time to propagate (can take a few minutes)"
+    echo ""
+    read -r -p "  Press Enter when the A record is set and DNS is propagated, or Ctrl+C to abort: " _
+    echo -e "${YELLOW}  Installing certbot...${NC}"
+    apt-get install -y -qq certbot
+
+    # Open port 80 temporarily for ACME challenge
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+        ufw allow 80/tcp >/dev/null 2>&1 || true
+    fi
+
+    echo -e "${YELLOW}  Requesting certificate for ${DOMAIN}...${NC}"
+    if certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN"; then
+        CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
+
+        # Update config.json with cert paths
+        python3 - <<PYEOF
+import json, sys
+path = "${INSTALL_DIR}/config.json"
+with open(path) as f:
+    cfg = json.load(f)
+cfg["tls_cert_file"] = "${CERT_DIR}/fullchain.pem"
+cfg["tls_key_file"]  = "${CERT_DIR}/privkey.pem"
+cfg["web_port"]      = 443
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+print("  config.json updated")
+PYEOF
+
+        # Let the ptt service user read the certs
+        chown -R root:"$SERVICE_USER" "$CERT_DIR"
+        chmod 750 "$CERT_DIR"
+        chmod 640 "${CERT_DIR}/fullchain.pem" "${CERT_DIR}/privkey.pem"
+
+        # Also allow the service to bind to port 443
+        setcap 'cap_net_bind_service=+ep' "${INSTALL_DIR}/ptt-server" 2>/dev/null || true
+
+        # Open port 443, close 8080
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+            ufw allow 443/tcp comment 'MeshRelay Dashboard HTTPS' >/dev/null 2>&1 || true
+            ufw delete allow 8080/tcp >/dev/null 2>&1 || true
+            ufw delete allow 80/tcp >/dev/null 2>&1 || true
+        fi
+
+        # Set up auto-renewal and service restart
+        RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/ptt-server-restart.sh"
+        cat > "$RENEW_HOOK" << HOOK
+#!/bin/bash
+chown -R root:${SERVICE_USER} /etc/letsencrypt/live/${DOMAIN}
+chmod 750 /etc/letsencrypt/live/${DOMAIN}
+chmod 640 /etc/letsencrypt/live/${DOMAIN}/fullchain.pem /etc/letsencrypt/live/${DOMAIN}/privkey.pem
+systemctl restart ${SERVICE_NAME}
+HOOK
+        chmod +x "$RENEW_HOOK"
+
+        echo -e "  ${GREEN}TLS certificate installed for ${DOMAIN}${NC}"
+        echo -e "  ${GREEN}Dashboard will be available at https://${DOMAIN}${NC}"
+        echo -e "  Auto-renewal configured via certbot"
+        DASHBOARD_URL="https://${DOMAIN}"
+    else
+        echo -e "  ${RED}Certificate request failed.${NC}"
+        echo -e "  Make sure ${DOMAIN} points to this server's public IP and port 80 is reachable."
+        echo -e "  Continuing without TLS..."
+        DASHBOARD_URL="http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080"
+        # Re-close port 80 if we opened it
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+            ufw delete allow 80/tcp >/dev/null 2>&1 || true
+        fi
+    fi
+else
+    echo -e "  Skipping — dashboard will be available over HTTP"
+    DASHBOARD_URL="http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080"
+fi
+
 # Step 7: Start service
 echo -e "${YELLOW}[7/7] Starting server...${NC}"
 systemctl restart "$SERVICE_NAME"
@@ -152,16 +259,14 @@ sleep 2
 
 # Verify and print info
 if systemctl is-active --quiet "$SERVICE_NAME"; then
-    IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-    [ -z "$IP" ] && IP="your-server-ip"
     echo ""
     echo -e "${GREEN}============================================${NC}"
     echo -e "${GREEN}  MeshRelay Server is running!${NC}"
     echo -e "${GREEN}============================================${NC}"
     echo ""
-    echo -e "  Dashboard:  ${GREEN}https://${IP}:8080${NC}  (configure TLS in config.json)"
-    echo -e "  Login:      Check server log for initial admin password"
-    echo -e "              journalctl -u ${SERVICE_NAME} | grep 'INITIAL ADMIN PASSWORD'"
+    echo -e "  Dashboard:  ${GREEN}${DASHBOARD_URL}${NC}"
+    echo -e "  Login:      Get initial admin password with:"
+    echo -e "              journalctl -u ${SERVICE_NAME} --no-pager -o cat | grep 'INITIAL ADMIN PASSWORD'"
     echo -e "  PTT Port:   UDP 5000"
     echo ""
     echo -e "  Logs:       journalctl -u ${SERVICE_NAME} -f"
