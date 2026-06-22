@@ -208,9 +208,12 @@ print("  config.json updated")
 PYEOF
 
         # Let the ptt service user read the certs
+        # live/ contains symlinks into archive/ — must fix both
         chown -R root:"$SERVICE_USER" "$CERT_DIR"
+        chown -R root:"$SERVICE_USER" "/etc/letsencrypt/archive/${DOMAIN}"
         chmod 750 "$CERT_DIR"
-        chmod 640 "${CERT_DIR}/fullchain.pem" "${CERT_DIR}/privkey.pem"
+        chmod 750 "/etc/letsencrypt/archive/${DOMAIN}"
+        chmod 640 "/etc/letsencrypt/archive/${DOMAIN}"/*.pem
 
         # Also allow the service to bind to port 443
         setcap 'cap_net_bind_service=+ep' "${INSTALL_DIR}/ptt-server" 2>/dev/null || true
@@ -227,8 +230,10 @@ PYEOF
         cat > "$RENEW_HOOK" << HOOK
 #!/bin/bash
 chown -R root:${SERVICE_USER} /etc/letsencrypt/live/${DOMAIN}
+chown -R root:${SERVICE_USER} /etc/letsencrypt/archive/${DOMAIN}
 chmod 750 /etc/letsencrypt/live/${DOMAIN}
-chmod 640 /etc/letsencrypt/live/${DOMAIN}/fullchain.pem /etc/letsencrypt/live/${DOMAIN}/privkey.pem
+chmod 750 /etc/letsencrypt/archive/${DOMAIN}
+chmod 640 /etc/letsencrypt/archive/${DOMAIN}/*.pem
 systemctl restart ${SERVICE_NAME}
 HOOK
         chmod +x "$RENEW_HOOK"
