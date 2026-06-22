@@ -270,7 +270,7 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo ""
     echo -e "  Dashboard:  ${GREEN}${DASHBOARD_URL}${NC}"
     echo -e "  Login:      Get initial admin password with:"
-    echo -e "              journalctl -u ${SERVICE_NAME} --no-pager -o cat | grep 'INITIAL ADMIN PASSWORD'"
+    echo -e "              journalctl -u ${SERVICE_NAME} --no-pager -o cat | grep -A1 'INITIAL ADMIN PASSWORD'"
     echo -e "  PTT Port:   UDP 5000"
     echo ""
     echo -e "  Logs:       journalctl -u ${SERVICE_NAME} -f"
