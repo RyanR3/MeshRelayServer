@@ -193,31 +193,26 @@ if [ -n "$DOMAIN" ]; then
     if certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN"; then
         CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 
-        # Update config.json with cert paths
+        # Copy certs into the install directory so the ptt service user can read them
+        # without needing to navigate letsencrypt's restrictive directory permissions.
+        cp "$CERT_DIR/fullchain.pem" "$INSTALL_DIR/fullchain.pem"
+        cp "$CERT_DIR/privkey.pem"   "$INSTALL_DIR/privkey.pem"
+        chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/fullchain.pem" "$INSTALL_DIR/privkey.pem"
+        chmod 640 "$INSTALL_DIR/fullchain.pem" "$INSTALL_DIR/privkey.pem"
+
+        # Update config.json to point at the local cert copies
         python3 - <<PYEOF
-import json, sys
+import json
 path = "${INSTALL_DIR}/config.json"
 with open(path) as f:
     cfg = json.load(f)
-cfg["tls_cert_file"] = "${CERT_DIR}/fullchain.pem"
-cfg["tls_key_file"]  = "${CERT_DIR}/privkey.pem"
+cfg["tls_cert_file"] = "fullchain.pem"
+cfg["tls_key_file"]  = "privkey.pem"
 cfg["web_port"]      = 443
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
 print("  config.json updated")
 PYEOF
-
-        # Let the ptt service user read the certs
-        # live/ contains symlinks into archive/ — must fix both dirs and the actual files
-        ARCHIVE_DIR="/etc/letsencrypt/archive/${DOMAIN}"
-        chown root:"$SERVICE_USER" "$CERT_DIR"
-        chown root:"$SERVICE_USER" "$ARCHIVE_DIR"
-        chmod 750 "$CERT_DIR"
-        chmod 750 "$ARCHIVE_DIR"
-        # Fix each file explicitly (glob fails if dir is not yet traversable)
-        for pem in "$ARCHIVE_DIR"/cert*.pem "$ARCHIVE_DIR"/chain*.pem "$ARCHIVE_DIR"/fullchain*.pem "$ARCHIVE_DIR"/privkey*.pem; do
-            [ -f "$pem" ] && chown root:"$SERVICE_USER" "$pem" && chmod 640 "$pem"
-        done
 
         # Also allow the service to bind to port 443
         setcap 'cap_net_bind_service=+ep' "${INSTALL_DIR}/ptt-server" 2>/dev/null || true
@@ -233,13 +228,11 @@ PYEOF
         RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/ptt-server-restart.sh"
         cat > "$RENEW_HOOK" << HOOK
 #!/bin/bash
-chown root:${SERVICE_USER} /etc/letsencrypt/live/${DOMAIN}
-chown root:${SERVICE_USER} /etc/letsencrypt/archive/${DOMAIN}
-chmod 750 /etc/letsencrypt/live/${DOMAIN}
-chmod 750 /etc/letsencrypt/archive/${DOMAIN}
-for pem in /etc/letsencrypt/archive/${DOMAIN}/*.pem; do
-    [ -f "\$pem" ] && chown root:${SERVICE_USER} "\$pem" && chmod 640 "\$pem"
-done
+# Re-copy renewed certs into the server directory and restart
+cp /etc/letsencrypt/live/${DOMAIN}/fullchain.pem ${INSTALL_DIR}/fullchain.pem
+cp /etc/letsencrypt/live/${DOMAIN}/privkey.pem   ${INSTALL_DIR}/privkey.pem
+chown ${SERVICE_USER}:${SERVICE_USER} ${INSTALL_DIR}/fullchain.pem ${INSTALL_DIR}/privkey.pem
+chmod 640 ${INSTALL_DIR}/fullchain.pem ${INSTALL_DIR}/privkey.pem
 systemctl restart ${SERVICE_NAME}
 HOOK
         chmod +x "$RENEW_HOOK"
