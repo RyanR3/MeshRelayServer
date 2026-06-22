@@ -40,7 +40,7 @@ fi
 
 # Step 2: Build binary
 echo -e "${YELLOW}[2/7] Building server...${NC}"
-VERSION=$(git -C "$INSTALL_DIR" describe --tags --always 2>/dev/null || echo "dev")
+VERSION=$(git -C "$INSTALL_DIR" describe --tags --always 2>/dev/null || cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "dev")
 cd "$INSTALL_DIR"
 
 # Build as the non-root user so Go cache doesn't get owned by root
