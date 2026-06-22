@@ -208,12 +208,16 @@ print("  config.json updated")
 PYEOF
 
         # Let the ptt service user read the certs
-        # live/ contains symlinks into archive/ — must fix both
-        chown -R root:"$SERVICE_USER" "$CERT_DIR"
-        chown -R root:"$SERVICE_USER" "/etc/letsencrypt/archive/${DOMAIN}"
+        # live/ contains symlinks into archive/ — must fix both dirs and the actual files
+        ARCHIVE_DIR="/etc/letsencrypt/archive/${DOMAIN}"
+        chown root:"$SERVICE_USER" "$CERT_DIR"
+        chown root:"$SERVICE_USER" "$ARCHIVE_DIR"
         chmod 750 "$CERT_DIR"
-        chmod 750 "/etc/letsencrypt/archive/${DOMAIN}"
-        chmod 640 "/etc/letsencrypt/archive/${DOMAIN}"/*.pem
+        chmod 750 "$ARCHIVE_DIR"
+        # Fix each file explicitly (glob fails if dir is not yet traversable)
+        for pem in "$ARCHIVE_DIR"/cert*.pem "$ARCHIVE_DIR"/chain*.pem "$ARCHIVE_DIR"/fullchain*.pem "$ARCHIVE_DIR"/privkey*.pem; do
+            [ -f "$pem" ] && chown root:"$SERVICE_USER" "$pem" && chmod 640 "$pem"
+        done
 
         # Also allow the service to bind to port 443
         setcap 'cap_net_bind_service=+ep' "${INSTALL_DIR}/ptt-server" 2>/dev/null || true
@@ -229,11 +233,13 @@ PYEOF
         RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/ptt-server-restart.sh"
         cat > "$RENEW_HOOK" << HOOK
 #!/bin/bash
-chown -R root:${SERVICE_USER} /etc/letsencrypt/live/${DOMAIN}
-chown -R root:${SERVICE_USER} /etc/letsencrypt/archive/${DOMAIN}
+chown root:${SERVICE_USER} /etc/letsencrypt/live/${DOMAIN}
+chown root:${SERVICE_USER} /etc/letsencrypt/archive/${DOMAIN}
 chmod 750 /etc/letsencrypt/live/${DOMAIN}
 chmod 750 /etc/letsencrypt/archive/${DOMAIN}
-chmod 640 /etc/letsencrypt/archive/${DOMAIN}/*.pem
+for pem in /etc/letsencrypt/archive/${DOMAIN}/*.pem; do
+    [ -f "\$pem" ] && chown root:${SERVICE_USER} "\$pem" && chmod 640 "\$pem"
+done
 systemctl restart ${SERVICE_NAME}
 HOOK
         chmod +x "$RENEW_HOOK"
