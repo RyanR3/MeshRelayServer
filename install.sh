@@ -98,7 +98,7 @@ done
 echo -e "  Ownership set to ${SERVICE_USER}"
 
 # Restrict sensitive data files to owner-read/write only
-for f in config.json users.json web_admins.json agencies.json mutual_aid.json; do
+for f in config.json users.json web_admins.json agencies.json mutual_aid.json guest_events.json; do
     if [ -f "$INSTALL_DIR/$f" ]; then
         chmod 600 "$INSTALL_DIR/$f"
     fi

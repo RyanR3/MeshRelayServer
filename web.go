@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -93,6 +95,15 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
+	// Guest Event management (super_admin only)
+	api.HandleFunc("/guest-events", s.requireSuperAdmin(s.handleGetGuestEvents)).Methods("GET")
+	api.HandleFunc("/guest-events", s.requireSuperAdmin(s.handleCreateGuestEvent)).Methods("POST")
+	api.HandleFunc("/guest-events/{id}", s.requireSuperAdmin(s.handleDeleteGuestEvent)).Methods("DELETE")
+
+	// Dispatch console API
+	api.HandleFunc("/dispatch/clients", s.requireDispatchOrAdmin(s.handleDispatchClients)).Methods("GET")
+	api.HandleFunc("/dispatch/channel", s.requireDispatchOrAdmin(s.handleDispatchSetChannel)).Methods("POST")
+
 	// Activity log
 	api.HandleFunc("/activity", s.handleGetActivity).Methods("GET")
 
@@ -101,6 +112,9 @@ func (s *Server) StartWeb() error {
 
 	// WebSocket for real-time updates
 	r.HandleFunc("/ws", s.handleWebSocket)
+
+	// WebSocket for dispatch console (bidirectional audio + client list)
+	r.HandleFunc("/ws/dispatch", s.handleDispatchWebSocket)
 
 	// Serve static files (web GUI)
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./web")))
@@ -150,7 +164,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Allow unauthenticated access to login-related paths
 		if path == "/api/login" || path == "/api/session" ||
-			path == "/login.html" || path == "/style.css" ||
+			path == "/login.html" || path == "/dispatch.html" ||
+			path == "/dispatch.js" || path == "/dispatch.css" ||
+			path == "/style.css" ||
 			path == "/logo.png" || path == "/favicon.ico" {
 			next.ServeHTTP(w, r)
 			return
@@ -190,7 +206,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				// Allow static assets so the dashboard page (with password change modal) can load
 				path == "/" || path == "/index.html" ||
 				path == "/app.js" || path == "/style.css" ||
-				path == "/logo.png" || path == "/favicon.ico"
+				path == "/logo.png" || path == "/favicon.ico" ||
+				path == "/dispatch.html" || path == "/dispatch.js" || path == "/dispatch.css"
 			if !allowedWhenForced {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
@@ -606,6 +623,31 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	if req.Role == "" {
 		req.Role = "user"
+	}
+
+	// Dispatch users are web-only (no PTT account needed) — create a WebAdmin entry directly
+	if req.Role == "dispatch" {
+		if req.Username == "" || req.Password == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"username and password required"}`))
+			return
+		}
+		if err := s.AddDispatchUser(req.Username, req.Name, req.Password, req.AgencyID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":    "ok",
+			"username":  req.Username,
+			"agency_id": req.AgencyID,
+			"role":      "dispatch",
+		})
+		return
 	}
 
 	enrollToken, err := s.AddUser(req.Username, req.Name, req.Password, req.AgencyID, req.Role)
@@ -1452,6 +1494,372 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Deleted mutual aid link: %v on channel %d", agencies, oldChannel)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// --- Guest Events ---
+
+func (s *Server) handleGetGuestEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	events := make([]map[string]interface{}, 0, len(s.guestEvents))
+	for _, ev := range s.guestEvents {
+		agencyName := ev.AgencyID
+		if a, ok := s.agencies[ev.AgencyID]; ok {
+			agencyName = a.Name
+		}
+		// Count currently connected clients for this guest user
+		connectedCount := 0
+		guestKey := userKey(ev.AgencyID, ev.Username)
+		for k := range s.clients {
+			if k == guestKey {
+				connectedCount++
+			}
+		}
+		e := map[string]interface{}{
+			"id":          ev.ID,
+			"name":        ev.Name,
+			"agency_id":   ev.AgencyID,
+			"agency_name": agencyName,
+			"channel":     ev.Channel,
+			"username":    ev.Username,
+			"token":       ev.Token,
+			"created_at":  ev.CreatedAt,
+			"created_by":  ev.CreatedBy,
+			"connected":   connectedCount,
+		}
+		if ev.ExpiresAt != nil {
+			e["expires_at"] = ev.ExpiresAt.Format(time.RFC3339)
+		}
+		events = append(events, e)
+	}
+	json.NewEncoder(w).Encode(events)
+}
+
+func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		Name      string `json:"name"`
+		Channel   int    `json:"channel"`
+		ExpiresIn string `json:"expires_in"` // e.g. "2h", "24h", "72h", "" = never
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	if req.Name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"event name is required"}`))
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresIn != "" {
+		dur, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid expires_in duration (use e.g. 2h, 24h, 168h)"}`))
+			return
+		}
+		t := time.Now().Add(dur)
+		expiresAt = &t
+	}
+
+	session := s.getSession(r)
+	createdBy := ""
+	if session != nil {
+		createdBy = session.Username
+	}
+
+	ev, err := s.CreateGuestEvent(req.Name, "", req.Channel, expiresAt, createdBy)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+		return
+	}
+
+	resp := map[string]interface{}{
+		"status":    "ok",
+		"id":        ev.ID,
+		"name":      ev.Name,
+		"username":  ev.Username,
+		"token":     ev.Token,
+		"channel":   ev.Channel,
+		"agency_id": ev.AgencyID,
+	}
+	if ev.ExpiresAt != nil {
+		resp["expires_at"] = ev.ExpiresAt.Format(time.RFC3339)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleDeleteGuestEvent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if err := s.DeleteGuestEvent(id); err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// --- Dispatch Console ---
+
+// requireDispatchOrAdmin allows dispatch, agency_admin, and super_admin roles.
+func (s *Server) requireDispatchOrAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session := s.getSession(r)
+		if session == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if session.Role != "dispatch" && session.Role != "agency_admin" && session.Role != "super_admin" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"dispatch access required"}`))
+			return
+		}
+		next(w, r)
+	}
+}
+
+// handleDispatchClients returns the list of active PTT clients for the dispatch user's agency.
+func (s *Server) handleDispatchClients(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	session := s.getSession(r)
+	if session == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	clients := s.GetClients(session.AgencyID)
+	json.NewEncoder(w).Encode(clients)
+}
+
+// handleDispatchSetChannel updates the dispatch user's active listening/transmit channel.
+func (s *Server) handleDispatchSetChannel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	session := s.getSession(r)
+	if session == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Channel int `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+
+	key := userKey(session.AgencyID, session.Username)
+	s.mu.Lock()
+	if client, ok := s.clients[key]; ok {
+		client.Channel = req.Channel
+	}
+	s.mu.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "channel": req.Channel})
+}
+
+// handleDispatchWebSocket handles the bidirectional dispatch WebSocket connection.
+// Binary frames from browser → relay as audio to PTT clients on the dispatch user's channel.
+// Binary audio frames from PTT clients → pushed to dispatch browser.
+// JSON frames from browser → handle channel switch.
+func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request) {
+	session := s.getSession(r)
+	if session == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if session.Role != "dispatch" && session.Role != "agency_admin" && session.Role != "super_admin" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Dispatch WebSocket upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	key := userKey(session.AgencyID, session.Username)
+	dc := &DispatchConn{Send: make(chan []byte, 64)}
+
+	// Register virtual PTT client for this dispatch user (channel 0 by default)
+	fakeAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+	virtualClient := &Client{
+		Username:      session.Username,
+		AgencyID:      session.AgencyID,
+		Addr:          fakeAddr,
+		Channel:       0,
+		LastHeartbeat: time.Now(),
+		ConnectedAt:   time.Now(),
+	}
+	s.mu.Lock()
+	s.clients[key] = virtualClient
+	s.dispatchConns[key] = dc
+	s.mu.Unlock()
+
+	log.Printf("Dispatch connected: %s [%s]", session.Username, session.AgencyID)
+	s.activityLog.Add("dispatch_connect", session.Username, "Dispatch console connected", session.AgencyID)
+
+	defer func() {
+		// Only tear down the registration if it still points to THIS connection.
+		// On a quick refresh the new connection registers under the same key
+		// before this old connection's cleanup runs; deleting blindly would
+		// deregister the live connection and silently break audio fan-out.
+		s.mu.Lock()
+		if s.dispatchConns[key] == dc {
+			delete(s.dispatchConns, key)
+			delete(s.clients, key)
+			s.mu.Unlock()
+			log.Printf("Dispatch disconnected: %s [%s]", session.Username, session.AgencyID)
+			s.activityLog.Add("dispatch_disconnect", session.Username, "Dispatch console disconnected", session.AgencyID)
+		} else {
+			s.mu.Unlock()
+			log.Printf("Dispatch stale connection closed for %s [%s] (newer connection active)", session.Username, session.AgencyID)
+		}
+	}()
+
+	// Set up ping/pong
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	// Send initial client list
+	s.sendDispatchUpdate(conn, session.AgencyID)
+
+	// Read pump — handles inbound binary audio + JSON channel switch
+	go func() {
+		for {
+			msgType, data, err := conn.ReadMessage()
+			if err != nil {
+				log.Printf("Dispatch read pump closing for %s [%s]: %v", session.Username, session.AgencyID, err)
+				conn.Close()
+				return
+			}
+			if msgType == websocket.BinaryMessage {
+				// PCM audio from dispatch browser → relay to PTT clients on current channel
+				s.mu.RLock()
+				dispClient := s.clients[key]
+				s.mu.RUnlock()
+				if dispClient != nil {
+					pkt := &AudioPacket{
+						Username:  session.Username,
+						AudioData: data,
+					}
+					s.handleDispatchAudio(pkt, dispClient)
+				}
+			} else if msgType == websocket.TextMessage {
+				// JSON control message (e.g., channel switch)
+				var msg struct {
+					Type    string `json:"type"`
+					Channel int    `json:"channel"`
+				}
+				if err := json.Unmarshal(data, &msg); err == nil && msg.Type == "channel" {
+					s.mu.Lock()
+					if c, ok := s.clients[key]; ok {
+						c.Channel = msg.Channel
+					}
+					s.mu.Unlock()
+					log.Printf("Dispatch %s switched to channel %d", session.Username, msg.Channel)
+				}
+			}
+		}
+	}()
+
+	// Send loop — pump outbound audio frames and periodic JSON updates to browser
+	ticker := time.NewTicker(2 * time.Second)
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-s.shutdown:
+			return
+		case frame := <-dc.Send:
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if err := s.sendDispatchUpdate(conn, session.AgencyID); err != nil {
+				return
+			}
+		case <-pingTicker.C:
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// sendDispatchUpdate sends a JSON client-list update to a dispatch browser connection.
+func (s *Server) sendDispatchUpdate(conn *websocket.Conn, agencyID string) error {
+	msg := WebSocketMessage{
+		Type: "update",
+		Data: map[string]interface{}{
+			"clients": s.GetClients(agencyID),
+		},
+	}
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return conn.WriteJSON(msg)
+}
+
+// handleDispatchAudio relays audio received from the dispatch browser to PTT clients
+// on the same agency+channel, skipping the normal UDP auth checks since dispatch
+// is already authenticated via WebSocket session.
+func (s *Server) handleDispatchAudio(packet *AudioPacket, dispClient *Client) {
+	audioData := append([]byte{PacketTypeAudio}, SerializeAudioPacket(packet)...)
+
+	// Collect the target channels. A super_admin dispatch user (empty
+	// AgencyID) transmits to every agency's matching channel number; an
+	// agency-scoped dispatch user transmits only to its own agency channel.
+	s.mu.RLock()
+	var targets []*Channel
+	if dispClient.AgencyID == "" {
+		for key, ch := range s.channels {
+			parts := strings.SplitN(key, ":", 2)
+			if len(parts) == 2 && parts[1] == strconv.Itoa(dispClient.Channel) {
+				targets = append(targets, ch)
+			}
+		}
+	} else if ch := s.channels[channelKey(dispClient.AgencyID, dispClient.Channel)]; ch != nil {
+		targets = append(targets, ch)
+	}
+	s.mu.RUnlock()
+
+	sent := 0
+	for _, channel := range targets {
+		channel.mu.RLock()
+		for _, otherClient := range channel.Clients {
+			if otherClient.Username != dispClient.Username {
+				s.sendPacket(audioData, otherClient.Addr)
+				sent++
+			}
+		}
+		channel.mu.RUnlock()
+	}
+
+	log.Printf("Dispatch audio from %s [%s] on channel %d to %d clients (%d bytes)",
+		packet.Username, dispClient.AgencyID, dispClient.Channel, sent, len(packet.AudioData))
 }
 
 // --- Update Management ---

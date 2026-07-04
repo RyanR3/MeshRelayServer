@@ -80,14 +80,37 @@ type WebSession struct {
 	AgencyID string
 }
 
+// DispatchConn represents an active dispatch browser WebSocket connection.
+// It wraps the WebSocket connection with a send channel to avoid concurrent writes.
+type DispatchConn struct {
+	Send chan []byte // buffered channel for outbound frames
+}
+
 // EnrollmentToken is a temporary token that can be used in place of a password
 // during QR code enrollment. It expires after 15 minutes.
+// Guest event tokens have IsGuest=true and are NOT deleted after use.
 type EnrollmentToken struct {
 	Token        string    `json:"token"`
 	Username     string    `json:"username"`
 	AgencyID     string    `json:"agency_id"`
 	PasswordHash string    `json:"-"` // the real password hash this token maps to
 	ExpiresAt    time.Time `json:"expires_at"`
+	IsGuest      bool      `json:"is_guest,omitempty"` // guest event tokens: multi-use, long-lived
+}
+
+// GuestEvent is a temporary shared account for mutual aid / pop-up events.
+// Multiple clients can scan the same QR code simultaneously.
+type GuestEvent struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	AgencyID     string    `json:"agency_id"`
+	Channel      int       `json:"channel"`
+	Username     string    `json:"username"`     // auto-generated guest username
+	Token        string    `json:"token"`        // enrollment token (multi-use)
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"` // nil = no expiry
+	CreatedAt    string    `json:"created_at"`
+	CreatedBy    string    `json:"created_by"`
+	OwnsAgency   bool      `json:"owns_agency,omitempty"` // true if AgencyID was auto-created for this event and should be deleted with it
 }
 
 type Server struct {
@@ -102,7 +125,9 @@ type Server struct {
 	authenticatedAddrs map[string]string         // addr string -> agencyID
 	pendingChallenges  map[string][32]byte       // addr string -> nonce (Phase 4f challenge-response)
 	enrollmentTokens   map[string]*EnrollmentToken // token string -> enrollment token
+	guestEvents        map[string]*GuestEvent     // eventID -> guest event
 	webAdmins          map[string]*WebAdmin      // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns      map[string]*DispatchConn  // "agencyID:username" -> active dispatch WebSocket
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
 	mu                sync.RWMutex
@@ -376,7 +401,7 @@ func (s *Server) CheckHealth() *HealthReport {
 	// 5. Storage — check all data files accessible and get total size
 	storageHealthy := true
 	var totalSize int64
-	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, "activity_log.json"} {
+	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, "guest_events.json", "activity_log.json"} {
 		info, err := os.Stat(f)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -453,7 +478,9 @@ func NewServer(config *Config, configFile string) *Server {
 		authenticatedAddrs: make(map[string]string),
 		pendingChallenges:  make(map[string][32]byte),
 		enrollmentTokens:   make(map[string]*EnrollmentToken),
+		guestEvents:        make(map[string]*GuestEvent),
 		webAdmins:          make(map[string]*WebAdmin),
+		dispatchConns:      make(map[string]*DispatchConn),
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
 		shutdown:          make(chan struct{}),
@@ -471,6 +498,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadUsers()
 	s.loadWebAdmins()
 	s.loadMutualAid()
+	s.loadGuestEvents()
 
 	// Migrate to agency model if needed (creates default agency, backfills users/admins)
 	s.migrateToAgencies()
@@ -630,6 +658,30 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 
 	log.Printf("Relayed audio from %s [%s] to %d clients in channel %d (%d bytes)",
 		packet.Username, client.AgencyID, relayCount, client.Channel, len(packet.AudioData))
+
+	// Fan out to dispatch browser connections listening on this channel.
+	// A dispatch user with an empty AgencyID (super_admin) monitors all
+	// agencies, so it matches on channel only; an agency-scoped dispatch
+	// user must also match the sender's agency.
+	dispatchSent := 0
+	s.mu.RLock()
+	for connKey, dc := range s.dispatchConns {
+		if dispClient, ok := s.clients[connKey]; ok {
+			agencyMatch := dispClient.AgencyID == "" || dispClient.AgencyID == client.AgencyID
+			if agencyMatch && dispClient.Channel == client.Channel {
+				select {
+				case dc.Send <- audioData:
+					dispatchSent++
+				default:
+					// dispatch send buffer full — drop frame
+				}
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if dispatchSent > 0 {
+		log.Printf("Fan out audio from %s [%s] ch %d to %d dispatch console(s)", client.Username, client.AgencyID, client.Channel, dispatchSent)
+	}
 }
 
 func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UDPAddr) {
@@ -1383,12 +1435,19 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	// Enrollment token used — update the PTT password hash so the client
 	// can reconnect with the stored token. Web admin password (bcrypt) is
 	// left unchanged so web portal login still uses the original password.
+	// Guest event tokens (IsGuest=true) are NOT deleted — they are multi-use.
 	if usedEnrollToken != "" {
 		et := s.enrollmentTokens[usedEnrollToken]
-		user.PasswordHash = hashPassword(et.Token)
-		s.saveUsers()
-		delete(s.enrollmentTokens, usedEnrollToken)
-		log.Printf("Auth (enrollment token) success: user %s from %s — PTT password updated to enrollment token", packet.Username, addr)
+		if et.IsGuest {
+			// Guest tokens: don't modify the user's password hash (the token IS the password)
+			// and don't delete the token so unlimited clients can scan the same QR
+			log.Printf("Auth (guest token) success: user %s from %s — guest event login", packet.Username, addr)
+		} else {
+			user.PasswordHash = hashPassword(et.Token)
+			s.saveUsers()
+			delete(s.enrollmentTokens, usedEnrollToken)
+			log.Printf("Auth (enrollment token) success: user %s from %s — PTT password updated to enrollment token", packet.Username, addr)
+		}
 	} else {
 		log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
 	}
@@ -1440,18 +1499,22 @@ func (s *Server) GenerateEnrollmentToken(username, agencyID, passwordHash string
 	return token
 }
 
-// cleanupExpiredTokens removes expired enrollment tokens. Called periodically.
+// cleanupExpiredTokens removes expired enrollment tokens and guest events. Called periodically.
 func (s *Server) cleanupExpiredTokens() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := time.Now()
 	for token, et := range s.enrollmentTokens {
-		if now.After(et.ExpiresAt) {
+		if now.After(et.ExpiresAt) && !et.IsGuest {
 			delete(s.enrollmentTokens, token)
 			log.Printf("Enrollment token expired for user %s", et.Username)
 		}
 	}
+
+	// Check for expired guest events and remove them (releases and re-acquires lock internally)
+	s.cleanupExpiredGuestEvents()
+
+	s.mu.Unlock()
 }
 
 // startTokenCleanup runs a goroutine that cleans up expired tokens every minute.
@@ -1621,7 +1684,19 @@ func (s *Server) RemoveUser(agencyID, username string) error {
 
 	key := userKey(agencyID, username)
 	user, exists := s.users[key]
+
+	// Handle dispatch users (web-only — no PTT account)
 	if !exists {
+		admin, adminExists := s.webAdmins[key]
+		if adminExists && admin.Role == "dispatch" {
+			delete(s.webAdmins, key)
+			if err := s.saveWebAdmins(); err != nil {
+				return fmt.Errorf("failed to remove dispatch user: %w", err)
+			}
+			log.Printf("Removed dispatch user: %s [%s]", username, agencyID)
+			s.activityLog.Add("dispatch_user_deleted", username, fmt.Sprintf("Removed from agency %s", agencyID), agencyID)
+			return nil
+		}
 		return fmt.Errorf("user %s not found", username)
 	}
 
@@ -1648,7 +1723,7 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	users := make([]map[string]interface{}, 0, len(s.users))
+	users := make([]map[string]interface{}, 0, len(s.users)+4)
 	for _, user := range s.users {
 		if agencyFilter != "" && user.AgencyID != agencyFilter {
 			continue
@@ -1680,6 +1755,27 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 			"created_at": user.CreatedAt,
 		})
 	}
+
+	// Also include dispatch users (web-admin only, no PTT account)
+	for _, admin := range s.webAdmins {
+		if admin.Role != "dispatch" {
+			continue
+		}
+		if agencyFilter != "" && admin.AgencyID != agencyFilter {
+			continue
+		}
+		if callerRole == "agency_admin" && admin.AgencyID != callerAgency {
+			continue
+		}
+		users = append(users, map[string]interface{}{
+			"username":   admin.Username,
+			"name":       admin.Username,
+			"agency_id":  admin.AgencyID,
+			"role":       "dispatch",
+			"created_at": "",
+		})
+	}
+
 	return users
 }
 
@@ -1962,6 +2058,46 @@ func (s *Server) AddUser(username, name, password, agencyID, role string) (strin
 	return enrollToken, nil
 }
 
+// AddDispatchUser creates a web-only dispatch user (WebAdmin entry, no PTT account).
+func (s *Server) AddDispatchUser(username, name, password, agencyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if agencyID == "" {
+		agencyID = "default"
+	}
+	if _, ok := s.agencies[agencyID]; !ok {
+		return fmt.Errorf("agency %s not found", agencyID)
+	}
+
+	key := userKey(agencyID, username)
+	if _, exists := s.webAdmins[key]; exists {
+		return fmt.Errorf("dispatch user %s already exists in agency %s", username, agencyID)
+	}
+
+	pwHash, err := hashPasswordSecure(password)
+	if err != nil {
+		pwHash = hashPassword(password)
+	}
+
+	s.webAdmins[key] = &WebAdmin{
+		Username:           username,
+		PasswordHash:       pwHash,
+		Role:               "dispatch",
+		AgencyID:           agencyID,
+		MustChangePassword: false,
+	}
+
+	if err := s.saveWebAdmins(); err != nil {
+		delete(s.webAdmins, key)
+		return err
+	}
+
+	log.Printf("Created dispatch user: %s (agency: %s)", username, agencyID)
+	s.activityLog.Add("dispatch_user_created", username, fmt.Sprintf("Dispatch user created in agency %s", agencyID), agencyID)
+	return nil
+}
+
 // --- Mutual Aid ---
 
 func (s *Server) loadMutualAid() {
@@ -2131,4 +2267,261 @@ func (s *Server) pickMutualAidChannel() int {
 		}
 	}
 	return 19 // fallback
+}
+
+// --- Guest Events ---
+
+func (s *Server) loadGuestEvents() {
+	file, err := os.Open("guest_events.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		log.Printf("Error loading guest events: %v", err)
+		return
+	}
+	defer file.Close()
+
+	var events []*GuestEvent
+	if err := json.NewDecoder(file).Decode(&events); err != nil {
+		log.Printf("Error parsing guest events: %v", err)
+		return
+	}
+
+	now := time.Now()
+	for _, ev := range events {
+		// Skip already-expired events on load
+		if ev.ExpiresAt != nil && now.After(*ev.ExpiresAt) {
+			log.Printf("Guest event %s (%s) expired, skipping on load", ev.ID, ev.Name)
+			continue
+		}
+		s.guestEvents[ev.ID] = ev
+		// Re-register multi-use enrollment token in memory
+		s.enrollmentTokens[ev.Token] = &EnrollmentToken{
+			Token:     ev.Token,
+			Username:  ev.Username,
+			AgencyID:  ev.AgencyID,
+			ExpiresAt: guestTokenExpiry(ev.ExpiresAt),
+			IsGuest:   true,
+		}
+	}
+	log.Printf("Loaded %d guest events", len(s.guestEvents))
+}
+
+// guestTokenExpiry returns the expiry time for the in-memory token.
+// If the event has no expiry, the token gets a far-future expiry so it's never cleaned up.
+func guestTokenExpiry(eventExpiry *time.Time) time.Time {
+	if eventExpiry != nil {
+		return *eventExpiry
+	}
+	return time.Now().Add(365 * 24 * time.Hour) // 1 year; refreshed on every load
+}
+
+func (s *Server) saveGuestEvents() error {
+	events := make([]*GuestEvent, 0, len(s.guestEvents))
+	for _, ev := range s.guestEvents {
+		events = append(events, ev)
+	}
+
+	file, err := os.Create("guest_events.json")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(events)
+}
+
+// CreateGuestEvent creates a guest event with a shared user account and multi-use token.
+// Must be called without s.mu held (it acquires it internally).
+// CreateGuestEvent creates a guest event. Each event gets its own temporary
+// agency named after the event; the agency (and all its users) is deleted when
+// the event ends. The agencyID parameter is ignored — kept for signature compat.
+func (s *Server) CreateGuestEvent(name, agencyID string, channel int, expiresAt *time.Time, createdBy string) (*GuestEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Generate unique event ID and guest username
+	idBytes := make([]byte, 8)
+	rand.Read(idBytes)
+	eventID := hex.EncodeToString(idBytes)
+
+	tokenBytes := make([]byte, 16)
+	rand.Read(tokenBytes)
+	token := hex.EncodeToString(tokenBytes)
+
+	// Create a temporary agency dedicated to this event.
+	eventAgencyID := "event-" + eventID[:8]
+	s.agencies[eventAgencyID] = &Agency{
+		ID:          eventAgencyID,
+		Name:        name,
+		CreatedAt:   time.Now().Format(time.RFC3339),
+		MaxUsers:    1000,
+		MaxChannels: 20,
+	}
+	s.ensureAgencyChannels(eventAgencyID)
+	if err := s.saveAgencies(); err != nil {
+		delete(s.agencies, eventAgencyID)
+		return nil, fmt.Errorf("failed to save agency: %w", err)
+	}
+
+	// Guest username: "guest-<eventID[:8]>"
+	username := "guest-" + eventID[:8]
+
+	// Create the PTT user account with token as the password
+	pwHash := hashPassword(token)
+	key := userKey(eventAgencyID, username)
+	s.users[key] = &UserAccount{
+		Username:     username,
+		Name:         name + " (Guest)",
+		PasswordHash: pwHash,
+		AgencyID:     eventAgencyID,
+		Role:         "user",
+		CreatedAt:    time.Now().Format(time.RFC3339),
+	}
+	if err := s.saveUsers(); err != nil {
+		delete(s.users, key)
+		delete(s.agencies, eventAgencyID)
+		s.saveAgencies()
+		return nil, fmt.Errorf("failed to save user: %w", err)
+	}
+
+	// Register multi-use enrollment token
+	s.enrollmentTokens[token] = &EnrollmentToken{
+		Token:     token,
+		Username:  username,
+		AgencyID:  eventAgencyID,
+		ExpiresAt: guestTokenExpiry(expiresAt),
+		IsGuest:   true,
+	}
+
+	ev := &GuestEvent{
+		ID:         eventID,
+		Name:       name,
+		AgencyID:   eventAgencyID,
+		Channel:    channel,
+		Username:   username,
+		Token:      token,
+		ExpiresAt:  expiresAt,
+		CreatedAt:  time.Now().Format(time.RFC3339),
+		CreatedBy:  createdBy,
+		OwnsAgency: true,
+	}
+	s.guestEvents[eventID] = ev
+
+	if err := s.saveGuestEvents(); err != nil {
+		log.Printf("Warning: failed to save guest events: %v", err)
+	}
+
+	log.Printf("Created guest event: %s (%s) agency=%s channel=%d by %s", eventID, name, eventAgencyID, channel, createdBy)
+	s.activityLog.Add("guest_event_created", createdBy, fmt.Sprintf("Guest event '%s' created (user: %s, agency: %s)", name, username, eventAgencyID), eventAgencyID)
+	return ev, nil
+}
+
+// DeleteGuestEvent removes a guest event, its user account, and kicks connected clients.
+// Must be called without s.mu held.
+func (s *Server) DeleteGuestEvent(eventID string) error {
+	s.mu.Lock()
+
+	ev, ok := s.guestEvents[eventID]
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("guest event not found")
+	}
+
+	// Remove enrollment token
+	delete(s.enrollmentTokens, ev.Token)
+
+	// Remove user account
+	key := userKey(ev.AgencyID, ev.Username)
+	delete(s.users, key)
+
+	// Collect addresses of any connected clients in this event's agency so we
+	// can kick them. With a dedicated per-event agency, that's every client
+	// whose key is scoped to ev.AgencyID.
+	var kickAddrs []*net.UDPAddr
+	var kickKeys []string
+	for clientKey, client := range s.clients {
+		if strings.HasPrefix(clientKey, ev.AgencyID+":") {
+			kickAddrs = append(kickAddrs, client.Addr)
+			kickKeys = append(kickKeys, clientKey)
+		}
+	}
+
+	// Cascade-delete the temporary agency this event owns: its users,
+	// channels, and any enrollment tokens scoped to it.
+	if ev.OwnsAgency {
+		for uKey, u := range s.users {
+			if u.AgencyID == ev.AgencyID {
+				delete(s.users, uKey)
+			}
+		}
+		for tok, et := range s.enrollmentTokens {
+			if et.AgencyID == ev.AgencyID {
+				delete(s.enrollmentTokens, tok)
+			}
+		}
+		for chKey := range s.channels {
+			if strings.HasPrefix(chKey, ev.AgencyID+":") {
+				delete(s.channels, chKey)
+			}
+		}
+		for adminUser, admin := range s.webAdmins {
+			if admin.AgencyID == ev.AgencyID {
+				delete(s.webAdmins, adminUser)
+			}
+		}
+		delete(s.agencies, ev.AgencyID)
+	}
+
+	s.saveUsers()
+
+	delete(s.guestEvents, eventID)
+	s.mu.Unlock()
+
+	// Kick connected clients (outside lock)
+	for i, addr := range kickAddrs {
+		resp := SerializeAuthResponse(&AuthResponsePacket{
+			Success: false,
+			Message: "Guest event ended",
+		})
+		s.sendPacket(resp, addr)
+		s.mu.Lock()
+		delete(s.clients, kickKeys[i])
+		delete(s.authenticatedAddrs, addr.String())
+		s.mu.Unlock()
+	}
+
+	if ev.OwnsAgency {
+		s.saveAgencies()
+		s.saveWebAdmins()
+	}
+
+	if err := s.saveGuestEvents(); err != nil {
+		log.Printf("Warning: failed to save guest events: %v", err)
+	}
+
+	log.Printf("Deleted guest event: %s (%s), removed agency %s, kicked %d clients", eventID, ev.Name, ev.AgencyID, len(kickAddrs))
+	s.activityLog.Add("guest_event_deleted", "", fmt.Sprintf("Guest event '%s' deleted (agency %s removed), kicked %d clients", ev.Name, ev.AgencyID, len(kickAddrs)), ev.AgencyID)
+	return nil
+}
+
+// cleanupExpiredGuestEvents removes guest events that have passed their expiry time.
+// Called from cleanupExpiredTokens.
+func (s *Server) cleanupExpiredGuestEvents() {
+	now := time.Now()
+	var expired []string
+	for id, ev := range s.guestEvents {
+		if ev.ExpiresAt != nil && now.After(*ev.ExpiresAt) {
+			expired = append(expired, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, id := range expired {
+		log.Printf("Guest event %s expired, auto-deleting", id)
+		s.DeleteGuestEvent(id)
+	}
+	s.mu.Lock()
 }
