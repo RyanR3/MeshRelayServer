@@ -116,7 +116,9 @@ After=network.target
 Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
+ExecStartPre=/sbin/setcap cap_net_bind_service=+ep ${INSTALL_DIR}/ptt-server
 ExecStart=${INSTALL_DIR}/ptt-server
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=5
 StandardOutput=journal

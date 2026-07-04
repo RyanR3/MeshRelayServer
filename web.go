@@ -2162,6 +2162,9 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghTok
 	}
 	os.Chmod(currentBinary, 0755)
 
+	// Re-apply setcap so the new binary can bind to privileged ports (e.g. 443)
+	exec.Command("setcap", "cap_net_bind_service=+ep", currentBinary).Run()
+
 	if tmpWebDir != "" {
 		entries, _ := os.ReadDir(tmpWebDir)
 		for _, entry := range entries {
