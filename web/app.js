@@ -47,6 +47,8 @@ function navigateTo(pageName) {
         fetchUsers();
     } else if (pageName === 'mutual-aid') {
         fetchMutualAid();
+    } else if (pageName === 'guest-events') {
+        fetchGuestEvents();
     } else if (pageName === 'activity') {
         fetchActivityPage();
     } else if (pageName === 'settings') {
@@ -437,6 +439,20 @@ function renderUsersTable(users) {
         const avatarColor = getAvatarColor(user.username);
         const online = isUserOnline(user.username);
         const statusDot = online ? '<span class="status-dot-online"></span>' : '<span class="status-dot-offline"></span>';
+        // Dispatch users are web-only — show badge instead of editable role dropdown; no QR/Edit
+        const isDispatch = role === 'dispatch';
+        const roleCell = isDispatch
+            ? `<span class="link-status" style="background:rgba(99,102,241,0.15);color:#818CF8;border-color:rgba(99,102,241,0.3);">Dispatch</span>`
+            : `<select class="role-select" onchange="updateUserRole('${safeUsername}', this.value, '${safeAgency}')" data-current="${role}">
+                    <option value="user" ${role === 'user' ? 'selected' : ''}>User</option>
+                    <option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin</option>
+                    ${superAdminOpt}
+               </select>`;
+        const actionButtons = isDispatch
+            ? `<button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>`
+            : `<button class="btn-action qr" onclick="showQRCode('${safeUsername}', '${safeAgency}')">QR Code</button>
+               <button class="btn-action edit" onclick="showEditUser('${safeUsername}', '${safeAgency}')">Edit</button>
+               <button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>`;
         return `
             <tr>
                 <td><div class="user-avatar" style="background: ${avatarColor};">${initial}</div></td>
@@ -444,20 +460,10 @@ function renderUsersTable(users) {
                 <td><strong>${safeUsername}</strong></td>
                 <td style="text-align: center;">${statusDot}</td>
                 ${agencyCol}
-                <td>
-                    <select class="role-select" onchange="updateUserRole('${safeUsername}', this.value, '${safeAgency}')" data-current="${role}">
-                        <option value="user" ${role === 'user' ? 'selected' : ''}>User</option>
-                        <option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin</option>
-                        ${superAdminOpt}
-                    </select>
-                </td>
+                <td>${roleCell}</td>
                 <td>${created}</td>
                 <td>
-                    <div class="actions-cell">
-                        <button class="btn-action qr" onclick="showQRCode('${safeUsername}', '${safeAgency}')">QR Code</button>
-                        <button class="btn-action edit" onclick="showEditUser('${safeUsername}', '${safeAgency}')">Edit</button>
-                        <button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>
-                    </div>
+                    <div class="actions-cell">${actionButtons}</div>
                 </td>
             </tr>
         `;
@@ -1323,6 +1329,151 @@ function deleteMutualAidLink(id) {
     })
     .catch(err => {
         showStatus('mutual-aid-status', 'Failed to remove link: ' + err.message, 'error');
+    });
+}
+
+// --- Guest Events ---
+
+function fetchGuestEvents() {
+    fetch('/api/guest-events')
+    .then(r => r.json())
+    .then(events => renderGuestEventsTable(events))
+    .catch(err => console.error('Failed to fetch guest events:', err));
+}
+
+function renderGuestEventsTable(events) {
+    const tbody = document.getElementById('guest-events-table-body');
+    const table = document.getElementById('guest-events-table');
+    const empty = document.getElementById('guest-events-empty');
+
+    if (!events || events.length === 0) {
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+    }
+
+    table.style.display = '';
+    empty.style.display = 'none';
+
+    tbody.innerHTML = events.map(ev => {
+        const created = new Date(ev.created_at).toLocaleDateString();
+        const safeId = ev.id.replace(/'/g, "\\'");
+        const safeName = ev.name.replace(/'/g, "\\'");
+        const safeUsername = ev.username.replace(/'/g, "\\'");
+        const safeToken = ev.token.replace(/'/g, "\\'");
+        const safeAgency = (ev.agency_id || '').replace(/'/g, "\\'");
+        const expiresText = ev.expires_at ? new Date(ev.expires_at).toLocaleString() : 'Never';
+        const connected = ev.connected || 0;
+        return `<tr>
+            <td><strong>${ev.name}</strong></td>
+            <td>${ev.agency_name || ev.agency_id} <span class="agency-badge">${ev.agency_id}</span></td>
+            <td>Ch ${ev.channel}</td>
+            <td><span class="${connected > 0 ? 'status-active' : ''}">${connected} online</span></td>
+            <td>${expiresText}</td>
+            <td>${created}</td>
+            <td class="actions-cell">
+                <button class="btn-action qr" onclick="showGuestEventQR('${safeId}', '${safeName}', '${safeUsername}', '${safeToken}', ${JSON.stringify(ev.expires_at || null)}, '${safeAgency}')">QR Code</button>
+                <button class="btn-action delete" onclick="deleteGuestEvent('${safeId}', '${safeName}')">End Event</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function showCreateGuestEventModal() {
+    document.getElementById('guestEventName').value = '';
+    document.getElementById('guestEventChannel').value = '0';
+    document.getElementById('guestEventExpiry').value = '';
+    document.getElementById('guestEventError').style.display = 'none';
+    showModal('createGuestEventModal');
+}
+
+function createGuestEvent() {
+    const name = document.getElementById('guestEventName').value.trim();
+    const channel = parseInt(document.getElementById('guestEventChannel').value, 10);
+    const expiresIn = document.getElementById('guestEventExpiry').value;
+    const errorEl = document.getElementById('guestEventError');
+
+    if (!name) {
+        errorEl.textContent = 'Event name is required';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    errorEl.style.display = 'none';
+
+    fetch('/api/guest-events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, channel, expires_in: expiresIn })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
+            return;
+        }
+        closeModal('createGuestEventModal');
+        showStatus('guest-events-status', `Guest event "${data.name}" created`, 'success');
+        fetchGuestEvents();
+        // Show QR code immediately
+        showGuestEventQR(data.id, data.name, data.username, data.token, data.expires_at || null, data.agency_id);
+    })
+    .catch(err => {
+        errorEl.textContent = 'Failed to create event: ' + err.message;
+        errorEl.style.display = 'block';
+    });
+}
+
+function showGuestEventQR(id, name, username, token, expiresAt, agencyId) {
+    const serverUrl = window.location.hostname;
+    document.getElementById('guestQRTitle').textContent = `Guest: ${name}`;
+    document.getElementById('guestQRServer').textContent = serverUrl;
+    document.getElementById('guestQRUsername').textContent = username;
+    document.getElementById('guestQRToken').textContent = token;
+
+    const expiryRow = document.getElementById('guestQRExpiryRow');
+    if (expiresAt) {
+        expiryRow.style.display = '';
+        document.getElementById('guestQRExpiry').textContent = new Date(expiresAt).toLocaleString();
+    } else {
+        expiryRow.style.display = 'none';
+    }
+
+    const container = document.getElementById('guestQRCanvas');
+    container.innerHTML = '';
+
+    const qrObj = { server: serverUrl, port: pttPort, username: username, password: token };
+    if (agencyId) qrObj.agency_id = agencyId;
+    new QRCode(container, {
+        text: JSON.stringify(qrObj),
+        width: 256,
+        height: 256,
+        colorDark: '#000000',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.L
+    });
+
+    showModal('guestEventQRModal');
+}
+
+function deleteGuestEvent(id, name) {
+    if (!confirm(`End guest event "${name}"?\n\nThis will immediately kick all connected clients and revoke the QR code.`)) {
+        return;
+    }
+
+    fetch('/api/guest-events/' + id, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            showStatus('guest-events-status', data.error, 'error');
+            return;
+        }
+        showStatus('guest-events-status', `Guest event "${name}" ended — clients kicked`, 'success');
+        fetchGuestEvents();
+    })
+    .catch(err => {
+        showStatus('guest-events-status', 'Failed to end event: ' + err.message, 'error');
     });
 }
 

@@ -134,7 +134,7 @@
                     btn.textContent = 'Sign In';
                     return;
                 }
-                window.location.href = '/';
+                window.location.href = data.role === 'dispatch' ? '/dispatch.html' : '/';
             })
             .catch(() => {
                 errorEl.textContent = 'Connection error';
@@ -154,10 +154,15 @@
             if (e.key === 'Enter') document.getElementById('password').focus();
         });
 
-        // If already logged in, redirect to dashboard
-        fetch('/api/session', { credentials: 'same-origin' }).then(r => {
-            if (r.ok) window.location.href = '/';
-        });
+        // If already logged in, redirect to appropriate page based on role
+        fetch('/api/session', { credentials: 'same-origin' })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (data && data.status === 'ok') {
+                window.location.href = data.role === 'dispatch' ? '/dispatch.html' : '/';
+            }
+        })
+        .catch(() => {});
 
         document.getElementById('agency').focus();
     </script>
