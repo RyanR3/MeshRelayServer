@@ -111,6 +111,7 @@ type GuestEvent struct {
 	CreatedAt    string    `json:"created_at"`
 	CreatedBy    string    `json:"created_by"`
 	OwnsAgency   bool      `json:"owns_agency,omitempty"` // true if AgencyID was auto-created for this event and should be deleted with it
+	OwnerAgencyID string   `json:"owner_agency_id,omitempty"` // the real agency that created this event; "" = created by super_admin
 }
 
 type Server struct {
@@ -248,6 +249,26 @@ func (al *ActivityLog) GetRecent(n int) []*ActivityEvent {
 	result := make([]*ActivityEvent, n)
 	for i := 0; i < n; i++ {
 		result[i] = al.Events[total-1-i]
+	}
+	return result
+}
+
+// GetRecentForAgency returns up to n newest events scoped to a single agency.
+// An empty agencyID returns all events (super_admin view).
+func (al *ActivityLog) GetRecentForAgency(n int, agencyID string) []*ActivityEvent {
+	if agencyID == "" {
+		return al.GetRecent(n)
+	}
+
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+
+	result := make([]*ActivityEvent, 0, n)
+	// Walk newest-first, collecting only this agency's events up to n.
+	for i := len(al.Events) - 1; i >= 0 && len(result) < n; i-- {
+		if al.Events[i].AgencyID == agencyID {
+			result = append(result, al.Events[i])
+		}
 	}
 	return result
 }
@@ -2336,10 +2357,11 @@ func (s *Server) saveGuestEvents() error {
 
 // CreateGuestEvent creates a guest event with a shared user account and multi-use token.
 // Must be called without s.mu held (it acquires it internally).
-// CreateGuestEvent creates a guest event. Each event gets its own temporary
-// agency named after the event; the agency (and all its users) is deleted when
-// the event ends. The agencyID parameter is ignored — kept for signature compat.
-func (s *Server) CreateGuestEvent(name, agencyID string, channel int, expiresAt *time.Time, createdBy string) (*GuestEvent, error) {
+// Each event gets its own temporary agency named after the event; the agency
+// (and all its users) is deleted when the event ends. The ownerAgencyID records
+// which real agency created the event, for agency-scoped visibility; "" means it
+// was created by a super_admin and is visible to super_admins only.
+func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expiresAt *time.Time, createdBy string) (*GuestEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2405,9 +2427,10 @@ func (s *Server) CreateGuestEvent(name, agencyID string, channel int, expiresAt 
 		Username:   username,
 		Token:      token,
 		ExpiresAt:  expiresAt,
-		CreatedAt:  time.Now().Format(time.RFC3339),
-		CreatedBy:  createdBy,
-		OwnsAgency: true,
+		CreatedAt:     time.Now().Format(time.RFC3339),
+		CreatedBy:     createdBy,
+		OwnsAgency:    true,
+		OwnerAgencyID: ownerAgencyID,
 	}
 	s.guestEvents[eventID] = ev
 
