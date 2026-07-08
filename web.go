@@ -95,10 +95,10 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
-	// Guest Event management (super_admin only)
-	api.HandleFunc("/guest-events", s.requireSuperAdmin(s.handleGetGuestEvents)).Methods("GET")
-	api.HandleFunc("/guest-events", s.requireSuperAdmin(s.handleCreateGuestEvent)).Methods("POST")
-	api.HandleFunc("/guest-events/{id}", s.requireSuperAdmin(s.handleDeleteGuestEvent)).Methods("DELETE")
+	// Guest Event management (super_admin sees all; agency_admin scoped to own agency)
+	api.HandleFunc("/guest-events", s.requireAdmin(s.handleGetGuestEvents)).Methods("GET")
+	api.HandleFunc("/guest-events", s.requireAdmin(s.handleCreateGuestEvent)).Methods("POST")
+	api.HandleFunc("/guest-events/{id}", s.requireAdmin(s.handleDeleteGuestEvent)).Methods("DELETE")
 
 	// Dispatch console API
 	api.HandleFunc("/dispatch/clients", s.requireDispatchOrAdmin(s.handleDispatchClients)).Methods("GET")
@@ -363,6 +363,20 @@ func (s *Server) requireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireAdmin wraps a handler to require super_admin or agency_admin role.
+func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session := s.getSession(r)
+		if session == nil || (session.Role != "super_admin" && session.Role != "agency_admin") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	agencyFilter := ""
@@ -552,7 +566,12 @@ func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
 
 func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	events := s.activityLog.GetRecent(50)
+	session := s.getSession(r)
+	agencyFilter := ""
+	if session != nil && session.Role == "agency_admin" {
+		agencyFilter = session.AgencyID
+	}
+	events := s.activityLog.GetRecentForAgency(50, agencyFilter)
 	json.NewEncoder(w).Encode(events)
 }
 
@@ -1500,11 +1519,22 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetGuestEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	// Agency admins only see events their agency created; super_admins see all.
+	session := s.getSession(r)
+	ownerFilter := ""
+	if session != nil && session.Role == "agency_admin" {
+		ownerFilter = session.AgencyID
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	events := make([]map[string]interface{}, 0, len(s.guestEvents))
 	for _, ev := range s.guestEvents {
+		if ownerFilter != "" && ev.OwnerAgencyID != ownerFilter {
+			continue
+		}
 		agencyName := ev.AgencyID
 		if a, ok := s.agencies[ev.AgencyID]; ok {
 			agencyName = a.Name
@@ -1571,11 +1601,16 @@ func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) 
 
 	session := s.getSession(r)
 	createdBy := ""
+	ownerAgencyID := ""
 	if session != nil {
 		createdBy = session.Username
+		// Agency admins own the events they create; super_admin events are unscoped.
+		if session.Role == "agency_admin" {
+			ownerAgencyID = session.AgencyID
+		}
 	}
 
-	ev, err := s.CreateGuestEvent(req.Name, "", req.Channel, expiresAt, createdBy)
+	ev, err := s.CreateGuestEvent(req.Name, ownerAgencyID, req.Channel, expiresAt, createdBy)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -1601,6 +1636,28 @@ func (s *Server) handleDeleteGuestEvent(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	vars := mux.Vars(r)
 	id := vars["id"]
+
+	// Agency admins may only delete events their own agency created.
+	session := s.getSession(r)
+	if session != nil && session.Role == "agency_admin" {
+		s.mu.RLock()
+		ev, ok := s.guestEvents[id]
+		owner := ""
+		if ok {
+			owner = ev.OwnerAgencyID
+		}
+		s.mu.RUnlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"guest event not found"}`))
+			return
+		}
+		if owner != session.AgencyID {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"not authorized to delete this event"}`))
+			return
+		}
+	}
 
 	if err := s.DeleteGuestEvent(id); err != nil {
 		w.WriteHeader(http.StatusNotFound)

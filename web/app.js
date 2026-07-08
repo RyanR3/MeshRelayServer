@@ -137,6 +137,9 @@ function updateDashboard(data) {
         if (data.stats) {
             data.stats.total_clients = data.clients ? data.clients.length : 0;
         }
+        if (data.activity) {
+            data.activity = data.activity.filter(e => e.agency_id === currentAgencyId);
+        }
     }
     connectedClients = data.clients || [];
     lastStats = data.stats || {};
@@ -850,10 +853,20 @@ function showCreateUserModal() {
     if (currentRole === 'super_admin') {
         populateAgencyDropdown('newUserAgency');
     }
-    // Show/hide super_admin option based on role
-    const superAdminOption = document.querySelector('#newUserRole option[value="super_admin"]');
-    if (superAdminOption) {
-        superAdminOption.style.display = currentRole === 'super_admin' ? '' : 'none';
+    // Show/hide super_admin option based on role. Hiding an <option> via CSS
+    // is unreliable in native selects, so add/remove the option outright.
+    const roleSelect = document.getElementById('newUserRole');
+    const superAdminOption = roleSelect.querySelector('option[value="super_admin"]');
+    if (currentRole === 'super_admin') {
+        if (!superAdminOption) {
+            const opt = document.createElement('option');
+            opt.value = 'super_admin';
+            opt.textContent = 'Super Admin';
+            opt.className = 'super-admin-only';
+            roleSelect.appendChild(opt);
+        }
+    } else if (superAdminOption) {
+        superAdminOption.remove();
     }
     showModal('createUserModal');
     document.getElementById('newUserName').focus();
@@ -1534,6 +1547,12 @@ function applyRoleUI() {
     // Show/hide super-admin-only elements
     document.querySelectorAll('.super-admin-only').forEach(el => {
         el.style.display = isSuperAdmin ? '' : 'none';
+    });
+
+    // admin-only elements are visible to super_admin AND agency_admin
+    const isAdmin = isSuperAdmin || currentRole === 'agency_admin';
+    document.querySelectorAll('.admin-only').forEach(el => {
+        el.style.display = isAdmin ? '' : 'none';
     });
 
     // Hide settings panels that agency admins shouldn't see
