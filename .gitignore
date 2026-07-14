@@ -6,11 +6,15 @@ ptt-server-linux
 users.json
 web_admins.json
 
+# Zello bridge config — contains Zello credentials / API key. NEVER commit.
+zello_bridges.json
+
 # Config (contains server-specific settings)
 config.json
 
 # Build artifacts
 web.tar.gz
+SHA256SUMS
 
 # Backups
 backups/

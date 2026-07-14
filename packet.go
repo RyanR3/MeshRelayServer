@@ -27,12 +27,40 @@ const (
 	PacketTypeAuthChallengeReq byte = 0x0D // Client requests challenge nonce
 	PacketTypeAuthChallenge    byte = 0x0E // Server sends challenge nonce
 	PacketTypeKeyAnnounce      byte = 0x0F // Wrapped key announcement for group propagation
+
+	// Opus-compressed audio. Body layout is identical to PacketTypeAudio
+	// (u16 usernameLen | username | u32 audioLen | audio) but the audio payload
+	// is Opus rather than raw PCM. A distinct type keeps legacy PCM-only clients
+	// safe: they hit the "unknown type" default branch and ignore the frame
+	// instead of mis-parsing a flag byte and playing noise.
+	PacketTypeAudioOpus byte = 0x10
+
+	// Roster: server -> client authoritative list of connected usernames in the
+	// client's agency. Lets clients show an accurate online-users list in server
+	// mode (where peer heartbeats aren't broadcast). Body:
+	//   u16 count | { u16 nameLen | name } * count
+	PacketTypeRoster byte = 0x11
+
+	// PacketTypeMonitorChannels: client -> server, the set of channels the client
+	// wants to always LISTEN to (in addition to its active channel), so it hears
+	// mutual-aid/Zello channels regardless of which channel it's tuned to talk on.
+	// Body: u16 count | (i32 channel)*
+	PacketTypeMonitorChannels byte = 0x12
 )
 
-// AudioPacket represents an audio packet
+// Audio codec identifiers for AudioPacket.Codec.
+const (
+	CodecPCM  = 0 // raw PCM int16, 32kHz mono (legacy default)
+	CodecOpus = 1 // Opus, 32kHz mono, 640-sample/20ms frames
+)
+
+// AudioPacket represents an audio packet. Codec indicates how AudioData is
+// encoded; it is derived from the packet type on the wire (PacketTypeAudio =>
+// PCM, PacketTypeAudioOpus => Opus) and is not itself serialized into the body.
 type AudioPacket struct {
 	Username  string
 	AudioData []byte
+	Codec     int
 }
 
 // DirectAudioPacket represents a direct audio packet for group voice
@@ -114,6 +142,13 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 	case PacketTypeAudio:
 		pkt, err := ParseAudioPacket(payload)
 		return packetType, pkt, err
+	case PacketTypeAudioOpus:
+		// Identical body to PCM audio; only the payload encoding differs.
+		pkt, err := ParseAudioPacket(payload)
+		if pkt != nil {
+			pkt.Codec = CodecOpus
+		}
+		return packetType, pkt, err
 	case PacketTypeDirectAudio:
 		pkt, err := ParseDirectAudioPacket(payload)
 		return packetType, pkt, err
@@ -140,9 +175,38 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 	case PacketTypeKeyJoinRequest, PacketTypeKeyJoinResponse, PacketTypeKeyAnnounce:
 		// Pass through — relayed to channel peers
 		return packetType, payload, nil
+	case PacketTypeMonitorChannels:
+		pkt, err := ParseMonitorChannelsPacket(payload)
+		return packetType, pkt, err
 	default:
 		return packetType, nil, errors.New("unknown packet type")
 	}
+}
+
+// MonitorChannelsPacket carries the channels a client wants to always listen to.
+type MonitorChannelsPacket struct {
+	Channels []int
+}
+
+// ParseMonitorChannelsPacket: u16 count | (i32 channel)*
+func ParseMonitorChannelsPacket(data []byte) (*MonitorChannelsPacket, error) {
+	buf := bytes.NewReader(data)
+	var count uint16
+	if err := binary.Read(buf, binary.BigEndian, &count); err != nil {
+		return nil, err
+	}
+	if count > 64 { // sanity cap
+		return nil, errors.New("too many monitor channels")
+	}
+	chs := make([]int, 0, count)
+	for i := 0; i < int(count); i++ {
+		var ch int32
+		if err := binary.Read(buf, binary.BigEndian, &ch); err != nil {
+			return nil, err
+		}
+		chs = append(chs, int(ch))
+	}
+	return &MonitorChannelsPacket{Channels: chs}, nil
 }
 
 // ParseAudioPacket parses an audio packet (matches Android AudioPacket.fromBytes)
@@ -388,6 +452,20 @@ func SerializeAudioPacket(packet *AudioPacket) []byte {
 }
 
 // SerializeTextPacket serializes a text packet for transmission
+// SerializeRosterPacket builds a roster packet: the authoritative list of
+// connected usernames for an agency. Wire body: u16 count | (u16 len | name)*.
+func SerializeRosterPacket(usernames []string) []byte {
+	buf := new(bytes.Buffer)
+	buf.WriteByte(PacketTypeRoster)
+	binary.Write(buf, binary.BigEndian, int16(len(usernames)))
+	for _, name := range usernames {
+		nb := []byte(name)
+		binary.Write(buf, binary.BigEndian, int16(len(nb)))
+		buf.Write(nb)
+	}
+	return buf.Bytes()
+}
+
 func SerializeTextPacket(packet *TextMessagePacket) []byte {
 	buf := new(bytes.Buffer)
 

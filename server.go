@@ -26,6 +26,9 @@ type Client struct {
 	Channel       int
 	LastHeartbeat time.Time
 	ConnectedAt   time.Time
+	// MonitoredChannels: extra channels this client always LISTENS to (mutual-aid
+	// / Zello monitor toggle), in addition to its active Channel.
+	MonitoredChannels []int
 }
 
 type Channel struct {
@@ -112,6 +115,8 @@ type GuestEvent struct {
 	CreatedBy    string    `json:"created_by"`
 	OwnsAgency   bool      `json:"owns_agency,omitempty"` // true if AgencyID was auto-created for this event and should be deleted with it
 	OwnerAgencyID string   `json:"owner_agency_id,omitempty"` // the real agency that created this event; "" = created by super_admin
+	IncludedAgencies []string `json:"included_agencies,omitempty"` // agencies bridged into this event's channel
+	MutualAidLinkID  string   `json:"mutual_aid_link_id,omitempty"` // the auto-created mutual-aid link (removed with the event)
 }
 
 type Server struct {
@@ -131,6 +136,7 @@ type Server struct {
 	dispatchConns      map[string]*DispatchConn  // "agencyID:username" -> active dispatch WebSocket
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
+	zelloBridges       map[string]*ZelloBridge   // bridgeID -> Zello Work channel bridge
 	mu                sync.RWMutex
 	shutdown          chan struct{}
 	stats             *Stats
@@ -440,6 +446,41 @@ func (s *Server) CheckHealth() *HealthReport {
 		services = append(services, ServiceHealth{Name: "Storage", Status: "warning", Details: sizeStr})
 	}
 
+	// 6. Zello Bridge — only shown when at least one bridge is enabled. Healthy
+	// if any bridge is connected; warning if enabled but none connected.
+	s.mu.RLock()
+	var enabledBridges, connectedBridges int
+	var firstDetail string
+	for _, b := range s.zelloBridges {
+		if !b.Enabled {
+			continue
+		}
+		enabledBridges++
+		st, _ := func() (string, string) { b.statusMu.Lock(); defer b.statusMu.Unlock(); return b.Status, b.LastError }()
+		if st == "connected" {
+			connectedBridges++
+			if firstDetail == "" {
+				firstDetail = fmt.Sprintf("%s ↔ %s", b.ZelloChannel, b.Name)
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if enabledBridges > 0 {
+		if connectedBridges > 0 {
+			d := fmt.Sprintf("%d connected", connectedBridges)
+			if firstDetail != "" {
+				d = firstDetail
+				if connectedBridges > 1 {
+					d = fmt.Sprintf("%s +%d", firstDetail, connectedBridges-1)
+				}
+			}
+			services = append(services, ServiceHealth{Name: "Zello Bridge", Status: "healthy", Details: d})
+			healthyCount++
+		} else {
+			services = append(services, ServiceHealth{Name: "Zello Bridge", Status: "warning", Details: "Enabled but not connected"})
+		}
+	}
+
 	totalCount := len(services)
 	pct := 0
 	if totalCount > 0 {
@@ -504,6 +545,7 @@ func NewServer(config *Config, configFile string) *Server {
 		dispatchConns:      make(map[string]*DispatchConn),
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
+		zelloBridges:       make(map[string]*ZelloBridge),
 		shutdown:          make(chan struct{}),
 		stats: &Stats{
 			StartTime: time.Now(),
@@ -520,6 +562,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadWebAdmins()
 	s.loadMutualAid()
 	s.loadGuestEvents()
+	s.loadZelloBridges()
 
 	// Migrate to agency model if needed (creates default agency, backfills users/admins)
 	s.migrateToAgencies()
@@ -553,6 +596,7 @@ func (s *Server) StartPTT() error {
 	go s.startNetworkRecorder()
 	go s.activityLog.startAutoSave(s.shutdown)
 	s.startTokenCleanup()
+	go s.StartEnabledZelloBridges()
 
 	// Start receiving packets
 	buffer := make([]byte, 65507) // Max UDP packet size
@@ -591,7 +635,7 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 	}
 
 	switch packetType {
-	case PacketTypeAudio:
+	case PacketTypeAudio, PacketTypeAudioOpus:
 		s.handleAudioPacket(payload.(*AudioPacket), addr)
 	case PacketTypeDirectAudio:
 		s.handleDirectAudioPacket(payload.(*DirectAudioPacket), addr)
@@ -603,6 +647,8 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handleJoin(payload.(*JoinPacket), addr)
 	case PacketTypeLeave:
 		s.handleLeave(addr)
+	case PacketTypeMonitorChannels:
+		s.handleMonitorChannels(payload.(*MonitorChannelsPacket), addr)
 	case PacketTypeGroupCreate:
 		s.handleGroupCreate(payload.(*GroupPacket), addr)
 	case PacketTypeGroupUpdate:
@@ -614,6 +660,23 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 	case PacketTypeKeyJoinRequest, PacketTypeKeyJoinResponse, PacketTypeKeyAnnounce:
 		s.relayRawPacket(data, addr)
 	}
+}
+
+// handleMonitorChannels updates which extra channels a client always listens to.
+func (s *Server) handleMonitorChannels(pkt *MonitorChannelsPacket, addr *net.UDPAddr) {
+	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+		return
+	}
+	s.mu.Lock()
+	for _, c := range s.clients {
+		if c.Addr.String() == addr.String() {
+			c.MonitoredChannels = pkt.Channels
+			s.mu.Unlock()
+			log.Printf("Client %s [%s] monitoring channels %v", c.Username, c.AgencyID, pkt.Channels)
+			return
+		}
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
@@ -641,19 +704,49 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		return
 	}
 
-	// Prepend packet type to the serialized data
-	audioData := append([]byte{PacketTypeAudio}, SerializeAudioPacket(packet)...)
+	// Prepend packet type to the serialized data, preserving the codec: an
+	// Opus frame is relayed as an Opus frame so receivers know how to decode it.
+	relayType := PacketTypeAudio
+	if packet.Codec == CodecOpus {
+		relayType = PacketTypeAudioOpus
+	}
+	audioData := append([]byte{relayType}, SerializeAudioPacket(packet)...)
 
-	// Broadcast audio to all clients in the same channel (except sender)
+	// Broadcast audio to all clients in the same channel (except sender).
+	// Track who already received it so monitors aren't double-sent.
+	sentTo := make(map[string]bool)
 	channel.mu.RLock()
 	relayCount := 0
 	for _, otherClient := range channel.Clients {
 		if otherClient.Username != client.Username {
 			s.sendPacket(audioData, otherClient.Addr)
+			sentTo[otherClient.Addr.String()] = true
 			relayCount++
 		}
 	}
 	channel.mu.RUnlock()
+
+	// Also relay to clients in this agency who are MONITORING this channel
+	// (always-listen) but aren't tuned to it — so mutual-aid/Zello channels are
+	// heard regardless of the client's active channel.
+	s.mu.RLock()
+	for _, mc := range s.clients {
+		if mc.AgencyID != client.AgencyID || mc.Username == client.Username {
+			continue
+		}
+		if sentTo[mc.Addr.String()] {
+			continue // already got it as an active-channel member
+		}
+		for _, ch := range mc.MonitoredChannels {
+			if ch == client.Channel {
+				s.sendPacket(audioData, mc.Addr)
+				sentTo[mc.Addr.String()] = true
+				relayCount++
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
 
 	// Check for mutual aid partners — also relay to partner agencies' same channel
 	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
@@ -680,10 +773,20 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	log.Printf("Relayed audio from %s [%s] to %d clients in channel %d (%d bytes)",
 		packet.Username, client.AgencyID, relayCount, client.Channel, len(packet.AudioData))
 
+	// Forward to a Zello bridge on this channel (Opus passthrough).
+	s.forwardMeshAudioToZello(client.AgencyID, client.Channel, packet.Username, packet.Codec, packet.AudioData)
+
 	// Fan out to dispatch browser connections listening on this channel.
 	// A dispatch user with an empty AgencyID (super_admin) monitors all
 	// agencies, so it matches on channel only; an agency-scoped dispatch
 	// user must also match the sender's agency.
+	//
+	// The dispatch console currently only decodes raw PCM. Until it learns to
+	// decode Opus, skip Opus frames rather than push undecodable bytes that
+	// would play as noise. (Opus dispatch support is a later phase.)
+	if packet.Codec == CodecOpus {
+		return
+	}
 	dispatchSent := 0
 	s.mu.RLock()
 	for connKey, dc := range s.dispatchConns {
@@ -973,6 +1076,24 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		}
 	}
 
+	// Announce all mapped channels of any active Zello bridge for this agency to
+	// the joining client, so bridged channels appear as selectable named channels.
+	for _, b := range s.zelloBridges {
+		if b.Enabled && b.AgencyID == agencyID && b.announced {
+			for _, m := range b.effectiveMappings() {
+				if m.ZelloChannel == "" {
+					continue
+				}
+				pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
+					Channel:     m.MeshChannel,
+					ChannelName: m.ZelloChannel,
+					Active:      true,
+				})
+				toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent Zello bridge channel %d (%s) to newly joined %s [%s]", m.MeshChannel, m.ZelloChannel, packet.Username, agencyID)})
+			}
+		}
+	}
+
 	s.mu.Unlock()
 
 	// Log activity events outside the lock
@@ -987,6 +1108,11 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		s.sendPacket(p.data, p.addr)
 		log.Printf("%s", p.desc)
 	}
+
+	// Push an updated roster so everyone in the agency sees the new client.
+	if !exists {
+		s.broadcastRoster(agencyID)
+	}
 }
 
 func (s *Server) handleLeave(addr *net.UDPAddr) {
@@ -995,7 +1121,6 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Find client by address
 	var clientToRemove *Client
@@ -1006,9 +1131,17 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 		}
 	}
 
+	leftAgency := ""
 	if clientToRemove != nil {
+		leftAgency = clientToRemove.AgencyID
 		log.Printf("LEAVE: removing client %s [%s] from channel %d (addr: %s)", clientToRemove.Username, clientToRemove.AgencyID, clientToRemove.Channel, addr)
 		s.removeClient(clientToRemove)
+	}
+	s.mu.Unlock()
+
+	// Push an updated roster so everyone in the agency sees the departure.
+	if leftAgency != "" {
+		s.broadcastRoster(leftAgency)
 	}
 }
 
@@ -1033,6 +1166,52 @@ func (s *Server) removeClient(client *Client) {
 	delete(s.clients, ck)
 	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
 	s.activityLog.Add("client_disconnect", client.Username, fmt.Sprintf("Left channel %d", client.Channel), client.AgencyID)
+}
+
+// broadcastRoster sends the authoritative list of connected usernames in an
+// agency to every client in that agency. Called on join/leave and periodically
+// so clients can show an accurate online-users list in server mode. Must be
+// called WITHOUT s.mu held (it takes an RLock internally, then sends after).
+func (s *Server) broadcastRoster(agencyID string) {
+	if agencyID == "" {
+		return
+	}
+
+	s.mu.RLock()
+	names := make([]string, 0, len(s.clients))
+	addrs := make([]*net.UDPAddr, 0, len(s.clients))
+	for _, c := range s.clients {
+		if c.AgencyID != agencyID {
+			continue
+		}
+		names = append(names, c.Username)
+		addrs = append(addrs, c.Addr)
+	}
+	s.mu.RUnlock()
+
+	if len(addrs) == 0 {
+		return
+	}
+	packet := SerializeRosterPacket(names)
+	for _, a := range addrs {
+		s.sendPacket(packet, a)
+	}
+}
+
+// broadcastAllRosters pushes a roster to every agency that has clients. Used by
+// the periodic ticker as a safety net for missed join/leave events.
+func (s *Server) broadcastAllRosters() {
+	s.mu.RLock()
+	agencies := make(map[string]bool)
+	for _, c := range s.clients {
+		if c.AgencyID != "" {
+			agencies[c.AgencyID] = true
+		}
+	}
+	s.mu.RUnlock()
+	for agencyID := range agencies {
+		s.broadcastRoster(agencyID)
+	}
 }
 
 func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
@@ -1090,13 +1269,15 @@ func (s *Server) heartbeatChecker() {
 			return
 		case <-ticker.C:
 			s.checkHeartbeats()
+			// Periodic roster refresh: pushes the authoritative online list to
+			// all agencies (safety net for any missed join/leave/timeout event).
+			s.broadcastAllRosters()
 		}
 	}
 }
 
 func (s *Server) checkHeartbeats() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := time.Now()
 	timeout := 30 * time.Second
@@ -1112,6 +1293,10 @@ func (s *Server) checkHeartbeats() {
 		log.Printf("Client %s timed out (no heartbeat for %v)", client.Username, timeout)
 		s.removeClient(client)
 	}
+	s.mu.Unlock()
+
+	// The periodic broadcastAllRosters() in heartbeatChecker will push the
+	// updated list; no per-agency broadcast needed here.
 }
 
 func (s *Server) isShuttingDown() bool {
@@ -1453,21 +1638,35 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		return
 	}
 
-	// Enrollment token used — update the PTT password hash so the client
-	// can reconnect with the stored token. Web admin password (bcrypt) is
-	// left unchanged so web portal login still uses the original password.
-	// Guest event tokens (IsGuest=true) are NOT deleted — they are multi-use.
+	// Enrollment token used — the token becomes the stable PTT password so the
+	// client can reconnect with the stored token indefinitely. This is made
+	// idempotent: the hash is set to the token once and never rewritten while
+	// it already matches, and the token is NOT deleted. That lets the SAME
+	// account be enrolled into multiple clients (e.g. plugin and standalone)
+	// by scanning the same QR — each stores the same token and all reconnect
+	// forever. Web admin password (bcrypt, web_admins.json) is left untouched,
+	// so the web dashboard login still uses the user's original password.
+	// Guest event tokens (IsGuest=true) behave the same way (multi-use).
 	if usedEnrollToken != "" {
 		et := s.enrollmentTokens[usedEnrollToken]
 		if et.IsGuest {
-			// Guest tokens: don't modify the user's password hash (the token IS the password)
-			// and don't delete the token so unlimited clients can scan the same QR
+			// Guest tokens: the token IS the password; never modify the hash
+			// and never delete the token (unlimited clients scan the same QR).
 			log.Printf("Auth (guest token) success: user %s from %s — guest event login", packet.Username, addr)
 		} else {
-			user.PasswordHash = hashPassword(et.Token)
-			s.saveUsers()
-			delete(s.enrollmentTokens, usedEnrollToken)
-			log.Printf("Auth (enrollment token) success: user %s from %s — PTT password updated to enrollment token", packet.Username, addr)
+			tokenHash := hashPassword(et.Token)
+			if user.PasswordHash != tokenHash {
+				// First use of this token — bind it as the stable PTT password.
+				user.PasswordHash = tokenHash
+				s.saveUsers()
+				log.Printf("Auth (enrollment token) success: user %s from %s — PTT password bound to enrollment token", packet.Username, addr)
+			} else {
+				// Token already bound — idempotent reconnect (e.g. other app,
+				// or after restart). Nothing to change; keep the token usable.
+				log.Printf("Auth (enrollment token) success: user %s from %s — reconnected with bound token", packet.Username, addr)
+			}
+			// NOTE: token is intentionally NOT deleted so the same QR can be
+			// enrolled into multiple clients and reused across restarts.
 		}
 	} else {
 		log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
@@ -1501,6 +1700,20 @@ func computeHmacSha256(key, data []byte) []byte {
 // The token maps to the user's real password hash and expires after 15 minutes.
 // Must be called while s.mu is held.
 func (s *Server) GenerateEnrollmentToken(username, agencyID, passwordHash string) string {
+	// Reuse an existing, non-expired token for this user so regenerating the QR
+	// returns the SAME token. Combined with idempotent token auth, this lets the
+	// same account be enrolled into multiple clients (plugin + standalone) with a
+	// stable credential — re-scanning never orphans a previously enrolled app.
+	now := time.Now()
+	for _, et := range s.enrollmentTokens {
+		if et.Username == username && et.AgencyID == agencyID && !et.IsGuest && now.Before(et.ExpiresAt) {
+			// Extend the window so an actively-used enrollment stays valid.
+			et.ExpiresAt = now.Add(15 * time.Minute)
+			log.Printf("Enrollment token reused for user %s (agency: %s), window refreshed", username, agencyID)
+			return et.Token
+		}
+	}
+
 	tokenBytes := make([]byte, 8)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		log.Printf("Failed to generate enrollment token: %v", err)
@@ -1513,7 +1726,7 @@ func (s *Server) GenerateEnrollmentToken(username, agencyID, passwordHash string
 		Username:     username,
 		AgencyID:     agencyID,
 		PasswordHash: passwordHash,
-		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		ExpiresAt:    now.Add(15 * time.Minute),
 	}
 
 	log.Printf("Enrollment token created for user %s (agency: %s), expires in 15 minutes", username, agencyID)
@@ -2361,7 +2574,7 @@ func (s *Server) saveGuestEvents() error {
 // (and all its users) is deleted when the event ends. The ownerAgencyID records
 // which real agency created the event, for agency-scoped visibility; "" means it
 // was created by a super_admin and is visible to super_admins only.
-func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expiresAt *time.Time, createdBy string) (*GuestEvent, error) {
+func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expiresAt *time.Time, createdBy string, includeAgencies []string) (*GuestEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2432,6 +2645,44 @@ func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expir
 		OwnsAgency:    true,
 		OwnerAgencyID: ownerAgencyID,
 	}
+
+	// Bridge any selected existing agencies into the event's channel via a
+	// mutual-aid link, so every member of those agencies is patched into the
+	// event automatically (no per-user enrollment needed). The event's own
+	// temporary agency is included so guests (enrolled via QR) and the selected
+	// agencies all share the channel.
+	if len(includeAgencies) > 0 {
+		linkAgencies := []string{eventAgencyID}
+		seen := map[string]bool{eventAgencyID: true}
+		for _, aid := range includeAgencies {
+			if aid == "" || seen[aid] { continue }
+			if _, ok := s.agencies[aid]; !ok { continue } // skip unknown agencies
+			linkAgencies = append(linkAgencies, aid)
+			seen[aid] = true
+		}
+		if len(linkAgencies) >= 2 {
+			linkIDBytes := make([]byte, 8)
+			rand.Read(linkIDBytes)
+			linkID := hex.EncodeToString(linkIDBytes)
+			s.mutualAidLinks[linkID] = &MutualAidLink{
+				ID:          linkID,
+				Agencies:    linkAgencies,
+				Channel:     channel,
+				ChannelName: name,
+				CreatedAt:   time.Now().Format(time.RFC3339),
+				CreatedBy:   createdBy,
+				Active:      true,
+			}
+			ev.MutualAidLinkID = linkID
+			ev.IncludedAgencies = linkAgencies[1:] // exclude the event's own temp agency
+			if err := s.saveMutualAid(); err != nil {
+				log.Printf("Warning: failed to save guest-event mutual aid link: %v", err)
+			}
+			// Notify connected clients of the bridged channel (background).
+			go s.notifyMutualAidChannel(linkAgencies, channel, name, true)
+		}
+	}
+
 	s.guestEvents[eventID] = ev
 
 	if err := s.saveGuestEvents(); err != nil {
@@ -2497,6 +2748,16 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 			}
 		}
 		delete(s.agencies, ev.AgencyID)
+	}
+
+	// Remove the auto-created mutual-aid link (agency bridge) for this event so
+	// the selected agencies are un-patched when the event ends.
+	if ev.MutualAidLinkID != "" {
+		if link, ok := s.mutualAidLinks[ev.MutualAidLinkID]; ok {
+			go s.notifyMutualAidChannel(link.Agencies, link.Channel, link.ChannelName, false)
+			delete(s.mutualAidLinks, ev.MutualAidLinkID)
+			s.saveMutualAid()
+		}
 	}
 
 	s.saveUsers()
