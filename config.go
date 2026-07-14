@@ -16,6 +16,7 @@ type Config struct {
 	WebAdminsFile string `json:"web_admins_file"`
 	AgenciesFile   string `json:"agencies_file"`
 	MutualAidFile  string `json:"mutual_aid_file"`
+	ZelloBridgesFile string `json:"zello_bridges_file"`
 	GitHubToken    string `json:"github_token,omitempty"`
 	DebugPprof     bool   `json:"debug_pprof,omitempty"`
 	TLSCertFile    string `json:"tls_cert_file,omitempty"`
@@ -34,6 +35,7 @@ func DefaultConfig() *Config {
 		WebAdminsFile: "web_admins.json",
 		AgenciesFile:   "agencies.json",
 		MutualAidFile:  "mutual_aid.json",
+		ZelloBridgesFile: "zello_bridges.json",
 	}
 }
 

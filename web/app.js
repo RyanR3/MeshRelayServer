@@ -49,6 +49,8 @@ function navigateTo(pageName) {
         fetchMutualAid();
     } else if (pageName === 'guest-events') {
         fetchGuestEvents();
+    } else if (pageName === 'zello-bridges') {
+        fetchZelloBridges();
     } else if (pageName === 'activity') {
         fetchActivityPage();
     } else if (pageName === 'settings') {
@@ -540,6 +542,33 @@ function updateUsersPageStats() {
     newEl.textContent = newUsers;
 }
 
+// Create or remove the Zello Bridge health row so it only appears when a bridge
+// is enabled (server includes the "Zello Bridge" service only in that case).
+function syncZelloHealthRow(present) {
+    const existing = document.getElementById('health-zello');
+    if (present && !existing) {
+        const services = document.querySelector('.health-services');
+        if (!services) return;
+        const row = document.createElement('div');
+        row.className = 'health-service-row';
+        row.innerHTML =
+            '<span class="health-svc-dot healthy"></span>' +
+            '<svg class="health-svc-icon" viewBox="0 0 24 24" style="stroke:#34D399;">' +
+            '<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/>' +
+            '<path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>' +
+            '<path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/></svg>' +
+            '<span class="health-svc-name">Zello Bridge</span>' +
+            '<span class="health-svc-status healthy" id="health-zello">Healthy</span>';
+        services.appendChild(row);
+    } else if (!present && existing) {
+        const row = existing.parentElement;
+        // Remove any open detail panel too.
+        const panel = row.nextElementSibling;
+        if (panel && panel.classList.contains('health-detail-panel')) panel.remove();
+        row.remove();
+    }
+}
+
 function updateHealthFromServer(health) {
     lastHealth = health;
 
@@ -554,8 +583,12 @@ function updateHealthFromServer(health) {
     if (versionEl && lastStats.version) versionEl.textContent = lastStats.version;
     if (sidebarVersion && lastStats.version) sidebarVersion.textContent = lastStats.version;
 
-    // Dashboard system health panel — data-driven from server
-    const serviceIds = ['health-web', 'health-db', 'health-relay', 'health-push', 'health-storage'];
+    // Dashboard system health panel — data-driven from server.
+    // The Zello Bridge row is CONDITIONAL: the server only includes a service
+    // named "Zello Bridge" when a bridge is enabled. Create/remove its row here.
+    syncZelloHealthRow(health.services.some(s => s.name === 'Zello Bridge'));
+
+    const serviceIds = ['health-web', 'health-db', 'health-relay', 'health-push', 'health-storage', 'health-zello'];
     health.services.forEach((svc, i) => {
         const el = document.getElementById(serviceIds[i]);
         if (!el) return;
@@ -563,9 +596,32 @@ function updateHealthFromServer(health) {
         el.textContent = svc.status === 'healthy' ? 'Healthy' : svc.status === 'warning' ? 'Warning' : 'Error';
         el.className = 'health-svc-status ' + svc.status;
 
-        const dot = el.parentElement.querySelector('.health-svc-dot');
+        const row = el.parentElement;
+        const dot = row.querySelector('.health-svc-dot');
         if (dot) {
             dot.className = 'health-svc-dot ' + svc.status;
+        }
+
+        // Make non-healthy rows clickable to reveal the server's detail message.
+        const clickable = svc.status !== 'healthy';
+        row.classList.toggle('health-clickable', clickable);
+        row.dataset.detail = svc.details || 'No additional information available.';
+        row.dataset.status = svc.status;
+        row.dataset.svcName = svc.name;
+
+        if (clickable && !row.dataset.bound) {
+            row.dataset.bound = '1';
+            row.addEventListener('click', () => toggleHealthDetail(row));
+        }
+
+        // If a detail panel is already open for this row, refresh its text.
+        const openPanel = row.nextElementSibling;
+        if (openPanel && openPanel.classList.contains('health-detail-panel')) {
+            if (clickable) {
+                openPanel.querySelector('.health-detail-msg').textContent = row.dataset.detail;
+            } else {
+                openPanel.remove(); // it recovered — close the panel
+            }
         }
     });
 
@@ -582,6 +638,33 @@ function updateHealthFromServer(health) {
         if (ringPct) ringPct.textContent = pct + '%';
         if (ringSublabel) ringSublabel.textContent = `${health.healthy_count} of ${health.total_count} services healthy`;
     }
+}
+
+// Toggle an inline detail panel below a health row, showing the server's
+// diagnostic message for a warning/error service.
+function toggleHealthDetail(row) {
+    const existing = row.nextElementSibling;
+    if (existing && existing.classList.contains('health-detail-panel')) {
+        existing.remove();
+        row.classList.remove('health-detail-open');
+        return;
+    }
+    // Close any other open panels first (accordion behavior).
+    document.querySelectorAll('.health-detail-panel').forEach(p => p.remove());
+    document.querySelectorAll('.health-service-row.health-detail-open')
+        .forEach(r => r.classList.remove('health-detail-open'));
+
+    const status = row.dataset.status || 'warning';
+    const panel = document.createElement('div');
+    panel.className = 'health-detail-panel ' + status;
+    panel.innerHTML =
+        '<div class="health-detail-title">' +
+            (status === 'error' ? '&#9888; Error' : '&#9888; Warning') +
+            ' &mdash; ' + escapeHtml(row.dataset.svcName || '') +
+        '</div>' +
+        '<div class="health-detail-msg">' + escapeHtml(row.dataset.detail || '') + '</div>';
+    row.after(panel);
+    row.classList.add('health-detail-open');
 }
 
 // --- Network Activity Chart ---
@@ -1208,100 +1291,189 @@ function showQRCodeWithData(username, password, agencyId) {
 
 // --- Mutual Aid ---
 
-function fetchMutualAid() {
-    // Ensure agencies are loaded for the modal dropdowns
-    if (agenciesList.length === 0) {
-        fetch('/api/agencies').then(r => r.json()).then(agencies => {
-            agenciesList = agencies;
-        }).catch(() => {});
-    }
+// ===== Mutual Aid — drag-and-drop patch builder =====
+//
+// Left column lists every agency as a draggable card. Right column holds one or
+// more "patch" builders: drag 2+ agencies into a builder, name it, click Create
+// → POST /api/mutual-aid. Existing patches render below as read-only cards.
 
-    fetch('/api/mutual-aid')
-    .then(r => r.json())
-    .then(links => {
-        renderMutualAidTable(links);
-    })
-    .catch(err => {
-        console.error('Failed to fetch mutual aid links:', err);
-    });
+let maBuilderSeq = 0;                 // unique id for each new-patch builder
+const maBuilders = {};                // builderId -> Set(agencyId)
+
+function fetchMutualAid() {
+    // Load agencies (left pool) and existing links in parallel.
+    Promise.all([
+        fetch('/api/agencies').then(r => r.json()).catch(() => []),
+        fetch('/api/mutual-aid').then(r => r.json()).catch(() => [])
+    ]).then(([agencies, links]) => {
+        agenciesList = agencies || [];
+        renderAgencyPool(agenciesList);
+        renderPatches(links || []);
+    }).catch(err => console.error('Failed to load mutual aid:', err));
 }
 
-function renderMutualAidTable(links) {
-    const tbody = document.getElementById('mutual-aid-table-body');
-    const table = document.getElementById('mutual-aid-table');
-    const empty = document.getElementById('mutual-aid-empty');
+function renderAgencyPool(agencies) {
+    const pool = document.getElementById('ma-agency-pool');
+    const countEl = document.getElementById('ma-agency-count');
+    if (!pool) return;
+    if (countEl) countEl.textContent = agencies.length;
 
-    if (!links || links.length === 0) {
-        table.style.display = 'none';
-        empty.style.display = 'block';
+    if (!agencies.length) {
+        pool.innerHTML = '<div class="ma-empty">No agencies yet. Create agencies first.</div>';
         return;
     }
-
-    table.style.display = '';
-    empty.style.display = 'none';
-
-    tbody.innerHTML = links.map(link => {
-        const created = new Date(link.created_at).toLocaleDateString();
-        const statusClass = link.active ? 'status-active' : 'status-inactive';
-        const statusText = link.active ? 'Active' : 'Inactive';
-        const safeId = link.id.replace(/'/g, "\\'");
-        // Build agencies display from arrays
-        const agencies = link.agencies || [];
-        const agencyNames = link.agency_names || [];
-        const agenciesHtml = agencies.map((aid, i) => {
-            const name = agencyNames[i] || aid;
-            return `${name} <span class="agency-badge">${aid}</span>`;
-        }).join(', ');
-        return `<tr>
-            <td>${agenciesHtml}</td>
-            <td>${link.channel_name || 'Channel ' + link.channel}</td>
-            <td><span class="link-status ${statusClass}">${statusText}</span></td>
-            <td>${created}</td>
-            <td class="actions-cell">
-                <button class="btn-action delete" onclick="deleteMutualAidLink('${safeId}')">Remove</button>
-            </td>
-        </tr>`;
-    }).join('');
+    pool.innerHTML = agencies.map(a => `
+        <div class="ma-agency-card" draggable="true" data-agency-id="${escapeAttr(a.id)}"
+             ondragstart="maDragStart(event)" ondragend="maDragEnd(event)">
+            <div class="ma-agency-name">${escapeHtml(a.name)}</div>
+            <div class="ma-agency-id">${escapeHtml(a.id)}</div>
+        </div>`).join('');
 }
 
-function showCreateMutualAidModal() {
-    const list = document.getElementById('mutualAidAgencyList');
-    list.innerHTML = '<div style="color:#888;padding:8px 0;">Loading agencies...</div>';
-    document.getElementById('mutualAidChannelName').value = '';
-    document.getElementById('mutualAidError').style.display = 'none';
-    showModal('createMutualAidModal');
+function renderPatches(links) {
+    const wrap = document.getElementById('ma-patches');
+    if (!wrap) return;
 
-    // Always fetch fresh agencies list
-    fetch('/api/agencies').then(r => r.json()).then(agencies => {
-        agenciesList = agencies;
-        list.innerHTML = '';
-        agencies.forEach(agency => {
-            list.innerHTML += `<label><input type="checkbox" value="${agency.id}"> ${agency.name} <span class="agency-badge">${agency.id}</span></label>`;
-        });
-    }).catch(() => {
-        list.innerHTML = '<div style="color:#FF6B6B;padding:8px 0;">Failed to load agencies</div>';
-    });
+    // Preserve any open new-patch builders, then render existing links after them.
+    const openBuilders = wrap.querySelectorAll('.ma-patch-builder');
+    let existingHtml = '';
+    if (links.length) {
+        existingHtml = '<div class="ma-existing-label">Active Patches</div>' + links.map(link => {
+            const safeId = escapeAttr(link.id);
+            const names = (link.agency_names || link.agencies || []);
+            const chips = (link.agencies || []).map((aid, i) =>
+                `<span class="ma-chip">${escapeHtml(names[i] || aid)}</span>`).join('');
+            const created = link.created_at ? new Date(link.created_at).toLocaleDateString() : '';
+            return `<div class="ma-patch-card ma-patch-existing">
+                <div class="ma-patch-card-head">
+                    <span class="ma-patch-title">${escapeHtml(link.channel_name || ('Channel ' + link.channel))}</span>
+                    <button class="ma-patch-remove" onclick="deleteMutualAidLink('${safeId}')" title="Remove patch">&times;</button>
+                </div>
+                <div class="ma-patch-chips">${chips}</div>
+                <div class="ma-patch-meta">Channel ${link.channel} &middot; ${(link.agencies||[]).length} agencies${created ? ' &middot; ' + created : ''}</div>
+            </div>`;
+        }).join('');
+    }
+
+    // If no open builders exist, start with one empty builder so the user can begin.
+    if (openBuilders.length === 0) {
+        wrap.innerHTML = '';
+        addPatchBuilder();
+        wrap.insertAdjacentHTML('beforeend', existingHtml);
+    } else {
+        // Keep builders, replace only the existing-patches section.
+        let old = wrap.querySelector('.ma-existing-section');
+        if (old) old.remove();
+        wrap.insertAdjacentHTML('beforeend',
+            `<div class="ma-existing-section">${existingHtml}</div>`);
+    }
 }
 
-function createMutualAidLink() {
-    const checkboxes = document.querySelectorAll('#mutualAidAgencyList input[type="checkbox"]:checked');
-    const agencies = Array.from(checkboxes).map(cb => cb.value);
-    const channelName = document.getElementById('mutualAidChannelName').value.trim();
-    const errorEl = document.getElementById('mutualAidError');
+function addPatchBuilder() {
+    const wrap = document.getElementById('ma-patches');
+    if (!wrap) return;
+    const id = 'mab-' + (++maBuilderSeq);
+    maBuilders[id] = new Set();
+    const html = `
+        <div class="ma-patch-card ma-patch-builder" id="${id}">
+            <input type="text" class="ma-patch-name" placeholder="Patch name (e.g. Fire Response)" />
+            <div class="ma-dropzone" ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
+                 ondrop="maDrop(event,'${id}')">
+                <div class="ma-dropzone-hint">Drag agencies here (2 or more)</div>
+                <div class="ma-dropzone-items"></div>
+            </div>
+            <div class="ma-patch-actions">
+                <button class="btn-primary ma-create-btn" onclick="createPatch('${id}')" disabled>Create Patch</button>
+                <button class="ma-patch-cancel" onclick="removeBuilder('${id}')">Clear</button>
+            </div>
+        </div>`;
+    // Insert builders at the TOP (before existing patches).
+    const existing = wrap.querySelector('.ma-existing-section, .ma-existing-label');
+    if (existing) existing.insertAdjacentHTML('beforebegin', html);
+    else wrap.insertAdjacentHTML('afterbegin', html);
+}
+
+function removeBuilder(id) {
+    delete maBuilders[id];
+    const el = document.getElementById(id);
+    if (el) el.remove();
+    // Always keep at least one builder available.
+    const wrap = document.getElementById('ma-patches');
+    if (wrap && !wrap.querySelector('.ma-patch-builder')) addPatchBuilder();
+}
+
+// --- drag handlers ---
+function maDragStart(e) {
+    e.dataTransfer.setData('text/plain', e.target.dataset.agencyId);
+    e.dataTransfer.setData('agency-name', e.target.querySelector('.ma-agency-name').textContent);
+    e.target.classList.add('ma-dragging');
+    e.dataTransfer.effectAllowed = 'copy';
+}
+function maDragEnd(e) { e.target.classList.remove('ma-dragging'); }
+function maDragOver(e) { e.preventDefault(); e.currentTarget.classList.add('ma-dropzone-over'); e.dataTransfer.dropEffect = 'copy'; }
+function maDragLeave(e) { e.currentTarget.classList.remove('ma-dropzone-over'); }
+
+function maDrop(e, builderId) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('ma-dropzone-over');
+    const agencyId = e.dataTransfer.getData('text/plain');
+    const agencyName = e.dataTransfer.getData('agency-name') || agencyId;
+    if (!agencyId) return;
+    const set = maBuilders[builderId];
+    if (!set || set.has(agencyId)) return; // no dupes
+    set.add(agencyId);
+
+    const items = document.querySelector(`#${builderId} .ma-dropzone-items`);
+    const chip = document.createElement('span');
+    chip.className = 'ma-chip ma-chip-removable';
+    chip.dataset.agencyId = agencyId;
+    chip.innerHTML = escapeHtml(agencyName) +
+        ` <span class="ma-chip-x" onclick="removeFromPatch('${builderId}','${escapeAttr(agencyId)}',this)">&times;</span>`;
+    items.appendChild(chip);
+    refreshBuilderState(builderId);
+}
+
+function removeFromPatch(builderId, agencyId, chipX) {
+    const set = maBuilders[builderId];
+    if (set) set.delete(agencyId);
+    const chip = chipX.closest('.ma-chip');
+    if (chip) chip.remove();
+    refreshBuilderState(builderId);
+}
+
+function refreshBuilderState(builderId) {
+    const el = document.getElementById(builderId);
+    if (!el) return;
+    const count = maBuilders[builderId] ? maBuilders[builderId].size : 0;
+    const hint = el.querySelector('.ma-dropzone-hint');
+    if (hint) hint.style.display = count > 0 ? 'none' : '';
+    const btn = el.querySelector('.ma-create-btn');
+    if (btn) {
+        btn.disabled = count < 2;
+        btn.textContent = count < 2 ? `Create Patch (${count}/2)` : `Create Patch (${count} agencies)`;
+    }
+}
+
+function createPatch(builderId) {
+    const el = document.getElementById(builderId);
+    if (!el) return;
+    const set = maBuilders[builderId];
+    const agencies = set ? Array.from(set) : [];
+    const nameInput = el.querySelector('.ma-patch-name');
+    const channelName = nameInput.value.trim();
 
     if (agencies.length < 2) {
-        errorEl.textContent = 'Select at least two agencies';
-        errorEl.style.display = 'block';
+        showStatus('mutual-aid-status', 'Drag at least two agencies into the patch', 'warning');
         return;
     }
-
     if (!channelName) {
-        errorEl.textContent = 'Channel name is required';
-        errorEl.style.display = 'block';
+        showStatus('mutual-aid-status', 'Give the patch a name first', 'warning');
+        nameInput.focus();
         return;
     }
 
-    errorEl.style.display = 'none';
+    const btn = el.querySelector('.ma-create-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
 
     fetch('/api/mutual-aid', {
         method: 'POST',
@@ -1311,25 +1483,24 @@ function createMutualAidLink() {
     .then(r => r.json())
     .then(data => {
         if (data.error) {
-            errorEl.textContent = data.error;
-            errorEl.style.display = 'block';
+            showStatus('mutual-aid-status', data.error, 'error');
+            if (btn) { btn.disabled = false; refreshBuilderState(builderId); }
             return;
         }
-        closeModal('createMutualAidModal');
-        showStatus('mutual-aid-status', 'Mutual aid link created — all clients notified', 'success');
-        fetchMutualAid();
+        showStatus('mutual-aid-status', `Patch "${channelName}" created — all clients notified`, 'success');
+        removeBuilder(builderId);   // clear this builder
+        fetchMutualAid();           // reload existing patches
     })
     .catch(err => {
-        errorEl.textContent = 'Failed to create link: ' + err.message;
-        errorEl.style.display = 'block';
+        showStatus('mutual-aid-status', 'Failed to create patch: ' + err.message, 'error');
+        if (btn) { btn.disabled = false; refreshBuilderState(builderId); }
     });
 }
 
 function deleteMutualAidLink(id) {
-    if (!confirm('Remove this mutual aid link? Agencies will no longer be able to communicate on this channel.')) {
+    if (!confirm('Remove this patch? Agencies will no longer be able to communicate on this channel.')) {
         return;
     }
-
     fetch('/api/mutual-aid/' + id, { method: 'DELETE' })
     .then(r => r.json())
     .then(data => {
@@ -1337,12 +1508,318 @@ function deleteMutualAidLink(id) {
             showStatus('mutual-aid-status', data.error, 'error');
             return;
         }
-        showStatus('mutual-aid-status', 'Mutual aid link removed', 'success');
+        showStatus('mutual-aid-status', 'Patch removed', 'success');
         fetchMutualAid();
     })
     .catch(err => {
-        showStatus('mutual-aid-status', 'Failed to remove link: ' + err.message, 'error');
+        showStatus('mutual-aid-status', 'Failed to remove patch: ' + err.message, 'error');
     });
+}
+
+// Small helper for safe attribute values (single-quote / HTML safe).
+function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ===== Zello Bridges =====
+
+let zelloBridgesPoll = null;
+
+let zelloRenderKey = ''; // signature of the last full render (to avoid clobbering)
+
+function fetchZelloBridges() {
+    fetch('/api/zello-bridges').then(r => r.json()).then(bridges => {
+        renderZelloBridges(bridges);
+    }).catch(err => console.error('Failed to fetch zello bridges:', err));
+
+    // Poll every 5s while on this page. IMPORTANT: only do a full re-render when
+    // the bridge SET/connection-state actually changes — otherwise a poll would
+    // rebuild the cards and reset an in-progress channel dropdown selection back
+    // to the server value before the user hits Apply. When nothing structural
+    // changed, just refresh the status dots in place.
+    if (zelloBridgesPoll) clearInterval(zelloBridgesPoll);
+    zelloBridgesPoll = setInterval(() => {
+        const page = document.getElementById('page-zello-bridges');
+        if (!page || !page.classList.contains('active')) {
+            clearInterval(zelloBridgesPoll); zelloBridgesPoll = null; return;
+        }
+        fetch('/api/zello-bridges')
+            .then(r => r.json())
+            .then(b => {
+                if (!Array.isArray(b)) return;
+                const key = b.map(x => `${x.id}:${x.status}:${x.enabled}`).join('|');
+                if (key === zelloRenderKey) {
+                    updateZelloStatusInPlace(b);   // no structural change → don't rebuild
+                } else {
+                    renderZelloBridges(b);         // connection state changed → full render
+                }
+            })
+            .catch(() => {});
+    }, 5000);
+}
+
+// Update only the status dot/label + error text on existing cards, leaving the
+// channel dropdowns (and any unsaved selection) untouched.
+function updateZelloStatusInPlace(bridges) {
+    bridges.forEach(b => {
+        const card = document.querySelector(`[data-zbid="${b.id}"]`);
+        if (!card) return;
+        const dot = zelloStatusColor(b.status);
+        const dotEl = card.querySelector('.zb-dot');
+        const statusEl = card.querySelector('.zb-status');
+        if (dotEl) { dotEl.style.background = dot; dotEl.style.boxShadow = `0 0 6px ${dot}66`; }
+        if (statusEl) { statusEl.style.color = dot; statusEl.textContent = b.enabled ? (b.status || 'disconnected') : 'disabled'; }
+    });
+}
+
+function zelloStatusColor(status) {
+    return status === 'connected' ? '#34D399'
+         : status === 'connecting' ? '#FBBF24'
+         : status === 'error' ? '#F87171' : '#6E7681';
+}
+
+function renderZelloBridges(bridges) {
+    const list = document.getElementById('zello-bridges-list');
+    const empty = document.getElementById('zello-bridges-empty');
+    if (!list) return;
+    if (!Array.isArray(bridges)) bridges = []; // guard against error objects / non-arrays
+    if (!bridges.length) {
+        list.innerHTML = '';
+        if (empty) empty.style.display = 'block';
+        return;
+    }
+    if (empty) empty.style.display = 'none';
+    list.innerHTML = bridges.map(b => {
+        const dot = zelloStatusColor(b.status);
+        const statusLabel = b.enabled ? (b.status || 'disconnected') : 'disabled';
+        const err = b.last_error ? `<div class="zb-error">${escapeHtml(b.last_error)}</div>` : '';
+        const safeId = escapeAttr(b.id);
+        // Channel-mapping list (one row per Zello↔Mesh pair) shown once connected.
+        const connected = b.status === 'connected';
+        const mappings = Array.isArray(b.mappings) ? b.mappings : [];
+        const rowsHtml = mappings.map((m, idx) => mappingRowHtml(safeId, idx, m.zello_channel, m.mesh_channel)).join('');
+        const mapRow = connected ? `
+            <div class="zb-maps" id="zbmaps-${safeId}">
+                ${rowsHtml || '<div class="zb-map-empty">No channels mapped yet. Add one below.</div>'}
+                <div class="zb-map-controls">
+                    <button class="btn-secondary zb-addmap" onclick="addMappingRow('${safeId}')">+ Add channel</button>
+                    <button class="btn-primary zb-apply" onclick="applyZelloMapping('${safeId}')">Apply</button>
+                </div>
+            </div>` : '';
+
+        return `<div class="zb-card" data-zbid="${safeId}">
+            <div class="zb-card-main">
+                <div class="zb-card-head">
+                    <span class="zb-dot" style="background:${dot};box-shadow:0 0 6px ${dot}66;"></span>
+                    <span class="zb-name">${escapeHtml(b.name)}</span>
+                    <span class="zb-status" style="color:${dot};">${escapeHtml(statusLabel)}</span>
+                    <span class="zb-net">${escapeHtml(b.network)} &middot; ${escapeHtml(b.agency_id)}</span>
+                </div>
+                ${mapRow}
+                ${err}
+            </div>
+            <div class="zb-actions">
+                <button class="btn-secondary zb-toggle" onclick="toggleZelloBridge('${safeId}')">${b.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn-action" onclick='editZelloBridge(${JSON.stringify(b).replace(/'/g,"&#39;")})'>Edit</button>
+                <button class="btn-action delete" onclick="deleteZelloBridge('${safeId}')">Delete</button>
+            </div>
+        </div>`;
+    }).join('');
+
+    // Remember what we rendered so the poll can tell if a rebuild is needed.
+    zelloRenderKey = bridges.map(x => `${x.id}:${x.status}:${x.enabled}`).join('|');
+
+    // After rendering, load the live Zello channel list into each connected card's
+    // mapping dropdowns.
+    bridges.filter(b => b.status === 'connected').forEach(b => loadCardZelloChannels(b.id));
+}
+
+// One mapping row: Zello channel dropdown → Mesh channel dropdown + remove (×).
+function mappingRowHtml(safeId, idx, zello, mesh) {
+    const z = zello || '';
+    return `<div class="zb-map" data-mapidx="${idx}">
+        <div class="zb-map-field">
+            <label>Zello channel</label>
+            <select class="zbmap-zello">
+                <option value="${escapeAttr(z)}" selected>${escapeHtml(z || '— select —')}</option>
+            </select>
+        </div>
+        <span class="zb-arrow">&#8646;</span>
+        <div class="zb-map-field">
+            <label>MeshRelay channel</label>
+            <select class="zbmap-mesh">${meshChannelOptions(mesh)}</select>
+        </div>
+        <button class="zb-map-remove" title="Remove" onclick="this.closest('.zb-map').remove()">&times;</button>
+    </div>`;
+}
+
+// Add a blank mapping row to a card, then populate its Zello dropdown.
+function addMappingRow(id) {
+    const wrap = document.getElementById(`zbmaps-${id}`);
+    if (!wrap) return;
+    const controls = wrap.querySelector('.zb-map-controls');
+    const emptyMsg = wrap.querySelector('.zb-map-empty');
+    if (emptyMsg) emptyMsg.remove();
+    const tmp = document.createElement('div');
+    tmp.innerHTML = mappingRowHtml(id, Date.now(), '', 10);
+    const row = tmp.firstElementChild;
+    controls.before(row);
+    if (zelloCardChannels[id]) fillZelloSelect(row.querySelector('.zbmap-zello'), zelloCardChannels[id], '');
+}
+
+// MeshRelay channel <option>s. High slots (10-19) so a bridged channel is a NEW
+// named channel on clients (like mutual aid) and doesn't collide with 0-9.
+function meshChannelOptions(sel) {
+    let o = '';
+    for (let i = 10; i < 20; i++) {
+        o += `<option value="${i}" ${i === sel ? 'selected' : ''}>Bridge channel ${i}</option>`;
+    }
+    return o;
+}
+
+let zelloCardChannels = {}; // id -> cached channel names
+
+function fillZelloSelect(sel, channels, keep) {
+    if (!sel) return;
+    const cur = keep !== undefined ? keep : sel.value;
+    sel.innerHTML = channels.map(c =>
+        `<option value="${escapeAttr(c)}" ${c === cur ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('');
+}
+
+// Populate ALL mapping-row Zello dropdowns on a card from the live account list.
+function loadCardZelloChannels(id) {
+    const wrap = document.getElementById(`zbmaps-${id}`);
+    if (!wrap) return;
+    fetch(`/api/zello-bridges/${id}/channels`)
+        .then(r => r.json())
+        .then(data => {
+            if (!data.channels) return;
+            zelloCardChannels[id] = data.channels;
+            document.querySelectorAll(`#zbmaps-${id} .zbmap-zello`).forEach(sel => {
+                fillZelloSelect(sel, data.channels, sel.value);
+            });
+        })
+        .catch(() => {});
+}
+
+// legacy no-op kept for the old single-select signature callers (none now)
+// Apply ALL channel mappings from a connected card (sends the full list).
+function applyZelloMapping(id) {
+    const rows = document.querySelectorAll(`#zbmaps-${id} .zb-map`);
+    const mappings = [];
+    rows.forEach(row => {
+        const z = row.querySelector('.zbmap-zello');
+        const m = row.querySelector('.zbmap-mesh');
+        if (z && z.value) mappings.push({ zello_channel: z.value, mesh_channel: parseInt(m.value, 10) || 0 });
+    });
+    fetch(`/api/zello-bridges/${id}/map`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mappings }) })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status', `Applied ${mappings.length} channel mapping(s)`, 'success');
+        setTimeout(fetchZelloBridges, 800);
+    })
+    .catch(err => showStatus('zello-bridges-status', 'Failed: ' + err.message, 'error'));
+}
+
+function showCreateZelloBridgeModal() {
+    document.getElementById('zelloBridgeModalTitle').textContent = 'Add Zello Connection';
+    document.getElementById('zbEditId').value = '';
+    ['zbName','zbNetwork','zbUsername','zbPassword','zbAuthToken'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('zbZelloChannel').innerHTML = '';   // hidden; mapped on the card
+    document.getElementById('zbMeshChannel').value = '0';
+    document.getElementById('zbEnabled').checked = true;
+    document.getElementById('zbEnabled').parentElement.style.display = '';
+    document.getElementById('zelloBridgeError').style.display = 'none';
+    populateZbAgencies('');
+    showModal('zelloBridgeModal');
+}
+
+// Fetch the account's Zello channels via the server (classic ZelloWork REST) and
+// populate the dropdown, so the user picks a real channel instead of typing it.
+function editZelloBridge(b) {
+    document.getElementById('zelloBridgeModalTitle').textContent = 'Edit Zello Bridge';
+    document.getElementById('zbEditId').value = b.id;
+    document.getElementById('zbName').value = b.name || '';
+    document.getElementById('zbNetwork').value = b.network || '';
+    // Preserve the current channel mapping in the hidden fields (edited on the card).
+    document.getElementById('zbZelloChannel').innerHTML =
+        `<option value="${escapeAttr(b.zello_channel || '')}" selected></option>`;
+    document.getElementById('zbMeshChannel').value = b.mesh_channel || 0;
+    document.getElementById('zbUsername').value = b.username || '';
+    document.getElementById('zbPassword').value = ''; // blank = keep existing
+    document.getElementById('zbAuthToken').value = ''; // blank = keep existing
+    document.getElementById('zbMeshChannel').value = b.mesh_channel || 0;
+    document.getElementById('zbEnabled').checked = !!b.enabled;
+    document.getElementById('zbEnabled').parentElement.style.display = 'none'; // enable via toggle instead
+    document.getElementById('zelloBridgeError').style.display = 'none';
+    populateZbAgencies(b.agency_id || '');
+    showModal('zelloBridgeModal');
+}
+
+function populateZbAgencies(selected) {
+    const sel = document.getElementById('zbAgency');
+    fetch('/api/agencies').then(r => r.json()).then(agencies => {
+        agenciesList = agencies || [];
+        sel.innerHTML = agenciesList
+            .filter(a => !String(a.id).startsWith('event-'))
+            .map(a => `<option value="${escapeAttr(a.id)}" ${a.id===selected?'selected':''}>${escapeHtml(a.name)} (${escapeHtml(a.id)})</option>`)
+            .join('');
+    }).catch(()=>{ sel.innerHTML = '<option value="">Failed to load</option>'; });
+}
+
+function saveZelloBridge() {
+    const id = document.getElementById('zbEditId').value;
+    const errorEl = document.getElementById('zelloBridgeError');
+    const body = {
+        name: document.getElementById('zbName').value.trim(),
+        network: document.getElementById('zbNetwork').value.trim(),
+        zello_channel: (document.getElementById('zbZelloChannel').value || '').trim(),
+        username: document.getElementById('zbUsername').value.trim(),
+        password: document.getElementById('zbPassword').value,
+        auth_token: document.getElementById('zbAuthToken').value.trim(),
+        agency_id: document.getElementById('zbAgency').value,
+        mesh_channel: parseInt(document.getElementById('zbMeshChannel').value, 10) || 0,
+        enabled: document.getElementById('zbEnabled').checked
+    };
+    // Channel is assigned on the card after connecting, so it's not required here.
+    if (!body.name || !body.network || !body.agency_id) {
+        errorEl.textContent = 'Name, network, and agency are required';
+        errorEl.style.display = 'block';
+        return;
+    }
+    errorEl.style.display = 'none';
+    const method = id ? 'PUT' : 'POST';
+    const path = id ? '/api/zello-bridges/' + id : '/api/zello-bridges';
+    fetch(path, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { errorEl.textContent = data.error; errorEl.style.display = 'block'; return; }
+        closeModal('zelloBridgeModal');
+        showStatus('zello-bridges-status', id ? 'Bridge updated' : 'Bridge created', 'success');
+        fetchZelloBridges();
+    })
+    .catch(err => { errorEl.textContent = 'Failed to save: ' + err.message; errorEl.style.display = 'block'; });
+}
+
+function toggleZelloBridge(id) {
+    fetch('/api/zello-bridges/' + id + '/toggle', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        fetchZelloBridges();
+    }).catch(err => showStatus('zello-bridges-status', 'Failed: ' + err.message, 'error'));
+}
+
+function deleteZelloBridge(id) {
+    if (!confirm('Delete this Zello bridge? It will disconnect from Zello.')) return;
+    fetch('/api/zello-bridges/' + id, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status', 'Bridge deleted', 'success');
+        fetchZelloBridges();
+    }).catch(err => showStatus('zello-bridges-status', 'Failed: ' + err.message, 'error'));
 }
 
 // --- Guest Events ---
@@ -1398,6 +1875,29 @@ function showCreateGuestEventModal() {
     document.getElementById('guestEventExpiry').value = '';
     document.getElementById('guestEventError').style.display = 'none';
     showModal('createGuestEventModal');
+
+    // Load agencies for the "Include Agencies" multi-select.
+    const list = document.getElementById('guestEventAgencyList');
+    if (list) {
+        list.innerHTML = '<div style="color:#6E7681;padding:8px 0;font-size:13px;">Loading agencies…</div>';
+        fetch('/api/agencies').then(r => r.json()).then(agencies => {
+            agenciesList = agencies || [];
+            // Exclude auto-created event agencies from the list.
+            const selectable = agenciesList.filter(a => !String(a.id).startsWith('event-'));
+            if (!selectable.length) {
+                list.innerHTML = '<div style="color:#6E7681;padding:8px 0;font-size:13px;">No agencies to include.</div>';
+                return;
+            }
+            list.innerHTML = selectable.map(a => `
+                <label class="ge-agency-item">
+                    <input type="checkbox" value="${escapeAttr(a.id)}">
+                    <span class="ge-agency-name">${escapeHtml(a.name)}</span>
+                    <span class="agency-badge">${escapeHtml(a.id)}</span>
+                </label>`).join('');
+        }).catch(() => {
+            list.innerHTML = '<div style="color:#F87171;padding:8px 0;font-size:13px;">Failed to load agencies</div>';
+        });
+    }
 }
 
 function createGuestEvent() {
@@ -1412,12 +1912,17 @@ function createGuestEvent() {
         return;
     }
 
+    // Collect selected agencies to bridge into the event channel.
+    const agencies = Array.from(
+        document.querySelectorAll('#guestEventAgencyList input[type="checkbox"]:checked')
+    ).map(cb => cb.value);
+
     errorEl.style.display = 'none';
 
     fetch('/api/guest-events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, channel, expires_in: expiresIn })
+        body: JSON.stringify({ name, channel, expires_in: expiresIn, agencies })
     })
     .then(r => r.json())
     .then(data => {

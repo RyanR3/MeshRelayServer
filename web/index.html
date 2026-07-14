@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=5">
+    <link rel="stylesheet" href="style.css?v=9">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -45,6 +45,10 @@
                 <li class="nav-item admin-only" data-page="guest-events">
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><line x1="19" y1="9" x2="23" y2="9"/></svg></span>
                     <span class="nav-label">Guest Events</span>
+                </li>
+                <li class="nav-item super-admin-only" data-page="zello-bridges">
+                    <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/></svg></span>
+                    <span class="nav-label">Zello Bridges</span>
                 </li>
                 <li class="nav-section-label">System</li>
                 <li class="nav-item" data-page="settings">
@@ -425,28 +429,33 @@
             <div class="page" id="page-mutual-aid">
                 <div class="page-header">
                     <h2>Mutual Aid</h2>
-                    <button class="btn-create" onclick="showCreateMutualAidModal()">+ Create Link</button>
+                    <span class="ma-hint">Drag agencies into a patch, name it, then Create.</span>
                 </div>
 
                 <div id="mutual-aid-status" class="status-message" style="display: none;"></div>
 
-                <table class="data-table" id="mutual-aid-table">
-                    <thead>
-                        <tr>
-                            <th>Agencies</th>
-                            <th>Channel Name</th>
-                            <th>Status</th>
-                            <th>Created</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="mutual-aid-table-body">
-                        <!-- Populated by JavaScript -->
-                    </tbody>
-                </table>
-                <div id="mutual-aid-empty" class="empty-state" style="display: none;">
-                    <div class="empty-state-icon">&#x1F91D;</div>
-                    <div>No mutual aid links</div>
+                <div class="ma-builder">
+                    <!-- Left: agency pool -->
+                    <div class="ma-col ma-agencies-col">
+                        <div class="ma-col-header">
+                            <span>Agencies</span>
+                            <span class="ma-count" id="ma-agency-count">0</span>
+                        </div>
+                        <div class="ma-agency-pool" id="ma-agency-pool">
+                            <!-- draggable agency cards populated by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Right: patch channels -->
+                    <div class="ma-col ma-patches-col">
+                        <div class="ma-col-header">
+                            <span>Patch Channels</span>
+                            <button class="btn-secondary ma-add-patch" onclick="addPatchBuilder()">+ New Patch</button>
+                        </div>
+                        <div class="ma-patches" id="ma-patches">
+                            <!-- new-patch builders + existing patches populated by JS -->
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -479,6 +488,22 @@
                     <div class="empty-state-icon">&#x1F465;</div>
                     <div>No active guest events</div>
                     <div style="font-size:13px;color:#888;margin-top:8px;">Create a guest event to generate a shareable QR code for temporary participants</div>
+                </div>
+            </div>
+
+            <!-- Zello Bridges Page (super_admin) -->
+            <div class="page" id="page-zello-bridges">
+                <div class="page-header">
+                    <h2>Zello Bridges</h2>
+                    <button class="btn-create" onclick="showCreateZelloBridgeModal()">+ Add Bridge</button>
+                </div>
+                <p class="modal-subtitle" style="margin:0 0 12px;">Bridge a MeshRelay channel to a Zello Work channel. Audio relays both ways when enabled.</p>
+                <div id="zello-bridges-status" class="status-message" style="display: none;"></div>
+                <div id="zello-bridges-list" class="zb-list"></div>
+                <div id="zello-bridges-empty" class="empty-state" style="display:none;">
+                    <div class="empty-state-icon">&#128225;</div>
+                    <div>No Zello bridges configured</div>
+                    <div style="font-size:13px;color:#888;margin-top:8px;">Add a bridge to connect a MeshRelay channel to Zello Work.</div>
                 </div>
             </div>
 
@@ -653,22 +678,6 @@
         </div>
     </div>
 
-    <!-- Create Mutual Aid Modal -->
-    <div id="createMutualAidModal" class="modal">
-        <div class="modal-content">
-            <h2>Create Mutual Aid Link</h2>
-            <p class="modal-subtitle">Select agencies to bridge on a shared channel</p>
-            <div id="mutualAidError" class="status-message error" style="display: none;"></div>
-            <label class="modal-field-label">Agencies (select 2 or more)</label>
-            <div id="mutualAidAgencyList" class="checkbox-list"></div>
-            <label class="modal-field-label">Channel Name</label>
-            <input type="text" id="mutualAidChannelName" placeholder="e.g. Fire Response">
-            <div class="modal-actions">
-                <button class="btn-primary" onclick="createMutualAidLink()">Create Link</button>
-                <button class="btn-secondary" onclick="closeModal('createMutualAidModal')">Cancel</button>
-            </div>
-        </div>
-    </div>
 
     <!-- Create Guest Event Modal -->
     <div id="createGuestEventModal" class="modal">
@@ -681,6 +690,13 @@
             <p class="modal-subtitle">A temporary agency is created for this event and removed automatically when the event ends.</p>
             <label class="modal-field-label">Channel</label>
             <input type="number" id="guestEventChannel" placeholder="0" min="0" max="19" value="0">
+
+            <label class="modal-field-label">Include Agencies (optional)</label>
+            <p class="modal-subtitle" style="margin-top:0;">Every member of a selected agency is automatically patched into this event's channel.</p>
+            <div id="guestEventAgencyList" class="ge-agency-list">
+                <div style="color:#6E7681;padding:8px 0;font-size:13px;">Loading agencies…</div>
+            </div>
+
             <label class="modal-field-label">Auto-expire (optional)</label>
             <select id="guestEventExpiry">
                 <option value="">Never (manual delete only)</option>
@@ -719,6 +735,47 @@
     </div>
 
     <!-- Update Modal -->
+    <!-- Create/Edit Zello Bridge Modal -->
+    <div id="zelloBridgeModal" class="modal">
+        <div class="modal-content">
+            <h2 id="zelloBridgeModalTitle">Add Zello Bridge</h2>
+            <p class="modal-subtitle">Connect to a Zello Work network. Assign channels on the card after it connects.</p>
+            <div id="zelloBridgeError" class="status-message error" style="display:none;"></div>
+            <input type="hidden" id="zbEditId" value="">
+            <!-- kept for compatibility; not shown in connection modal -->
+            <select id="zbZelloChannel" style="display:none;"></select>
+            <input type="number" id="zbMeshChannel" style="display:none;" value="0">
+
+            <label class="modal-field-label">Bridge Name</label>
+            <input type="text" id="zbName" placeholder="e.g. County Fire Zello">
+
+            <label class="modal-field-label">Zello Network</label>
+            <input type="text" id="zbNetwork" placeholder="yourorg (from yourorg.zellowork.com)">
+
+            <label class="modal-field-label">MeshRelay Agency</label>
+            <select id="zbAgency"></select>
+
+            <label class="modal-field-label">Bot Username</label>
+            <input type="text" id="zbUsername" placeholder="Zello Work user the bridge logs in as">
+
+            <label class="modal-field-label">Bot Password</label>
+            <input type="password" id="zbPassword" placeholder="(leave blank to keep existing when editing)">
+
+            <label class="modal-field-label">API Key</label>
+            <input type="text" id="zbAuthToken" placeholder="from Zello Work Admin → Settings → API">
+
+            <label class="ge-agency-item" style="margin-top:12px;">
+                <input type="checkbox" id="zbEnabled" checked>
+                <span class="ge-agency-name">Connect immediately</span>
+            </label>
+
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="saveZelloBridge()">Save &amp; Connect</button>
+                <button class="btn-secondary" onclick="closeModal('zelloBridgeModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <div id="updateModal" class="modal">
         <div class="modal-content modal-wide">
             <h2>Server Update</h2>
@@ -766,6 +823,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=8"></script>
+    <script src="app.js?v=16"></script>
 </body>
 </html>

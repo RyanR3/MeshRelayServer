@@ -95,6 +95,16 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
+	// Zello Work channel bridges (super_admin)
+	api.HandleFunc("/zello-bridges", s.requireSuperAdmin(s.handleGetZelloBridges)).Methods("GET")
+	api.HandleFunc("/zello-bridges", s.requireSuperAdmin(s.handleCreateZelloBridge)).Methods("POST")
+	api.HandleFunc("/zello-bridges/{id}", s.requireSuperAdmin(s.handleUpdateZelloBridge)).Methods("PUT")
+	api.HandleFunc("/zello-bridges/{id}", s.requireSuperAdmin(s.handleDeleteZelloBridge)).Methods("DELETE")
+	api.HandleFunc("/zello-bridges/{id}/toggle", s.requireSuperAdmin(s.handleToggleZelloBridge)).Methods("POST")
+	api.HandleFunc("/zello-bridges/{id}/map", s.requireSuperAdmin(s.handleMapZelloBridge)).Methods("POST")
+	api.HandleFunc("/zello-bridges/{id}/channels", s.requireSuperAdmin(s.handleZelloBridgeChannels)).Methods("GET")
+	api.HandleFunc("/zello-channels", s.requireSuperAdmin(s.handleZelloChannels)).Methods("POST")
+
 	// Guest Event management (super_admin sees all; agency_admin scoped to own agency)
 	api.HandleFunc("/guest-events", s.requireAdmin(s.handleGetGuestEvents)).Methods("GET")
 	api.HandleFunc("/guest-events", s.requireAdmin(s.handleCreateGuestEvent)).Methods("POST")
@@ -1571,9 +1581,10 @@ func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 
 	var req struct {
-		Name      string `json:"name"`
-		Channel   int    `json:"channel"`
-		ExpiresIn string `json:"expires_in"` // e.g. "2h", "24h", "72h", "" = never
+		Name      string   `json:"name"`
+		Channel   int      `json:"channel"`
+		ExpiresIn string   `json:"expires_in"` // e.g. "2h", "24h", "72h", "" = never
+		Agencies  []string `json:"agencies"`   // existing agencies to bridge into the event channel
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -1610,7 +1621,7 @@ func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	ev, err := s.CreateGuestEvent(req.Name, ownerAgencyID, req.Channel, expiresAt, createdBy)
+	ev, err := s.CreateGuestEvent(req.Name, ownerAgencyID, req.Channel, expiresAt, createdBy, req.Agencies)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
