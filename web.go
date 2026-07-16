@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,8 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/config", s.handleUpdateConfig).Methods("POST")
 	api.HandleFunc("/users", s.handleGetUsers).Methods("GET")
 	api.HandleFunc("/users", s.handleCreateUser).Methods("POST")
+	api.HandleFunc("/users/template", s.handleUserCsvTemplate).Methods("GET")
+	api.HandleFunc("/users/bulk", s.handleBulkCreateUsers).Methods("POST")
 	api.HandleFunc("/users/{username}", s.handleUpdateUser).Methods("PUT")
 	api.HandleFunc("/users/{username}", s.handleDeleteUser).Methods("DELETE")
 	api.HandleFunc("/users/{username}/password", s.handleUpdatePassword).Methods("PUT")
@@ -695,6 +698,174 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		"agency_id":        req.AgencyID,
 		"role":             req.Role,
 		"enrollment_token": enrollToken,
+	})
+}
+
+// handleUserCsvTemplate returns a CSV the admin can fill in and upload via the
+// bulk-upload endpoint. Columns match the fields handleCreateUser accepts.
+func (s *Server) handleUserCsvTemplate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", `attachment; filename="meshrelay-users-template.csv"`)
+	// Header row + two example rows (examples are comments the parser ignores? No —
+	// keep them as real sample rows the admin can edit or delete).
+	tmpl := "username,name,password,agency_id,role\n" +
+		"jdoe,John Doe,ChangeMe123,default,user\n" +
+		"asmith,Amy Smith,ChangeMe123,default,admin\n"
+	w.Write([]byte(tmpl))
+}
+
+// handleBulkCreateUsers accepts a CSV (raw body or multipart "file") with the
+// columns username,name,password,agency_id,role and creates each user via the
+// same AddUser path as single creation. Returns a per-row result so the admin
+// sees exactly which rows succeeded, were skipped (already exist), or errored.
+func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
+	session := s.getSession(r)
+
+	// Accept either a multipart file upload ("file") or a raw CSV body.
+	var reader io.Reader
+	if file, _, err := r.FormFile("file"); err == nil {
+		defer file.Close()
+		reader = file
+	} else {
+		reader = r.Body
+	}
+
+	cr := csv.NewReader(reader)
+	cr.FieldsPerRecord = -1 // tolerate ragged rows; we validate per row
+	cr.TrimLeadingSpace = true
+
+	rows, err := cr.ReadAll()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf(`{"error":"could not parse CSV: %s"}`, err.Error())))
+		return
+	}
+	if len(rows) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"CSV is empty"}`))
+		return
+	}
+
+	// Map header columns → indices (order-independent, case-insensitive). If the
+	// first row doesn't look like a header, assume the fixed column order.
+	col := map[string]int{}
+	dataStart := 0
+	head := rows[0]
+	looksLikeHeader := false
+	for _, h := range head {
+		switch strings.ToLower(strings.TrimSpace(h)) {
+		case "username", "name", "password", "agency_id", "role":
+			looksLikeHeader = true
+		}
+	}
+	if looksLikeHeader {
+		for i, h := range head {
+			col[strings.ToLower(strings.TrimSpace(h))] = i
+		}
+		dataStart = 1
+	} else {
+		col = map[string]int{"username": 0, "name": 1, "password": 2, "agency_id": 3, "role": 4}
+	}
+
+	get := func(row []string, key string) string {
+		if idx, ok := col[key]; ok && idx < len(row) {
+			return strings.TrimSpace(row[idx])
+		}
+		return ""
+	}
+
+	type rowResult struct {
+		Line     int    `json:"line"`
+		Username string `json:"username"`
+		Status   string `json:"status"` // "created" | "skipped" | "error"
+		Detail   string `json:"detail,omitempty"`
+		Token    string `json:"enrollment_token,omitempty"`
+	}
+	results := []rowResult{}
+	created, skipped, failed := 0, 0, 0
+
+	for i := dataStart; i < len(rows); i++ {
+		row := rows[i]
+		line := i + 1 // 1-indexed for the admin
+		username := get(row, "username")
+		name := get(row, "name")
+		password := get(row, "password")
+		agencyID := get(row, "agency_id")
+		role := get(row, "role")
+
+		// Skip fully blank lines silently.
+		if username == "" && name == "" && password == "" {
+			continue
+		}
+		if username == "" || password == "" {
+			failed++
+			results = append(results, rowResult{line, username, "error", "username and password required", ""})
+			continue
+		}
+		if role == "" {
+			role = "user"
+		}
+
+		// Enforce the same agency/role scoping as single create.
+		if session != nil && session.Role == "agency_admin" {
+			agencyID = session.AgencyID
+			if role == "super_admin" {
+				failed++
+				results = append(results, rowResult{line, username, "error", "agency admins cannot create super_admin", ""})
+				continue
+			}
+		}
+		if role == "super_admin" && (session == nil || session.Role != "super_admin") {
+			failed++
+			results = append(results, rowResult{line, username, "error", "only super admins can create super_admin", ""})
+			continue
+		}
+		if agencyID == "" {
+			agencyID = "default"
+		}
+
+		if role == "dispatch" {
+			if err := s.AddDispatchUser(username, name, password, agencyID); err != nil {
+				if strings.Contains(err.Error(), "exists") {
+					skipped++
+					results = append(results, rowResult{line, username, "skipped", err.Error(), ""})
+				} else {
+					failed++
+					results = append(results, rowResult{line, username, "error", err.Error(), ""})
+				}
+				continue
+			}
+			created++
+			results = append(results, rowResult{line, username, "created", "", ""})
+			continue
+		}
+
+		token, err := s.AddUser(username, name, password, agencyID, role)
+		if err != nil {
+			if strings.Contains(err.Error(), "exists") {
+				skipped++
+				results = append(results, rowResult{line, username, "skipped", err.Error(), ""})
+			} else {
+				failed++
+				results = append(results, rowResult{line, username, "error", err.Error(), ""})
+			}
+			continue
+		}
+		created++
+		results = append(results, rowResult{line, username, "created", "", token})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"created": created,
+		"skipped": skipped,
+		"failed":  failed,
+		"total":   created + skipped + failed,
+		"results": results,
 	})
 }
 

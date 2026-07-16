@@ -318,6 +318,9 @@
                         <select id="users-agency-filter" class="agency-filter super-admin-only" onchange="fetchUsers()">
                             <option value="">All Agencies</option>
                         </select>
+                        <button class="btn-secondary" onclick="downloadUserTemplate()" title="Download a CSV template you can fill in and upload">Download Template</button>
+                        <button class="btn-secondary" onclick="document.getElementById('bulk-users-file').click()" title="Upload a CSV to create many users at once">Bulk Upload</button>
+                        <input type="file" id="bulk-users-file" accept=".csv,text/csv" style="display:none" onchange="handleBulkUsersFile(this)">
                         <button class="btn-create" onclick="showCreateUserModal()">+ Create User</button>
                     </div>
                 </div>
@@ -823,6 +826,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=16"></script>
+    <script src="app.js?v=17"></script>
 </body>
 </html>
