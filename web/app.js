@@ -1019,6 +1019,48 @@ function createUser() {
     });
 }
 
+// --- Bulk user upload (CSV) ---
+
+// Download the CSV template the server accepts.
+function downloadUserTemplate() {
+    window.location.href = '/api/users/template';
+}
+
+// Called when a CSV file is chosen for bulk upload.
+function handleBulkUsersFile(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    showStatus('user-status', `Uploading "${file.name}"…`, 'info');
+    fetch('/api/users/bulk', { method: 'POST', body: form })
+        .then(r => r.text().then(text => ({ ok: r.ok, status: r.status, body: text })))
+        .then(({ ok, status, body }) => {
+            let data;
+            try { data = JSON.parse(body); }
+            catch (e) { throw new Error(`Server returned invalid JSON (${status}): ${body.substring(0, 120)}`); }
+            if (!ok) throw new Error(data.error || `Server error (${status})`);
+
+            const { created = 0, skipped = 0, failed = 0, results = [] } = data;
+            const kind = failed > 0 ? 'warning' : 'success';
+            showStatus('user-status',
+                `Bulk upload: ${created} created, ${skipped} skipped, ${failed} failed`, kind);
+            addLog(`Bulk user upload: ${created} created, ${skipped} skipped, ${failed} failed`, kind);
+
+            // Surface the specific problem rows so the admin can fix them.
+            results.filter(r => r.status !== 'created').forEach(r => {
+                addLog(`  row ${r.line} (${r.username || '—'}): ${r.status}${r.detail ? ' — ' + r.detail : ''}`,
+                    r.status === 'error' ? 'error' : 'warning');
+            });
+            fetchUsers();
+        })
+        .catch(err => {
+            showStatus('user-status', `Bulk upload failed: ${err.message}`, 'error');
+            addLog(`Bulk upload failed: ${err.message}`, 'error');
+        })
+        .finally(() => { input.value = ''; }); // allow re-selecting the same file
+}
+
 // --- Edit User ---
 
 var editingAgency = '';
