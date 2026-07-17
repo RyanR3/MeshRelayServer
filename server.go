@@ -137,6 +137,8 @@ type Server struct {
 	webSessions        map[string]*WebSession    // session token -> session
 	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
 	zelloBridges       map[string]*ZelloBridge   // bridgeID -> Zello Work channel bridge
+	ssrcToUser         map[uint32]string         // RTP SSRC -> username (MCX Step 1)
+	ssrcMu            sync.RWMutex               // guards ssrcToUser
 	mu                sync.RWMutex
 	shutdown          chan struct{}
 	stats             *Stats
@@ -546,6 +548,7 @@ func NewServer(config *Config, configFile string) *Server {
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
 		zelloBridges:       make(map[string]*ZelloBridge),
+		ssrcToUser:         make(map[uint32]string),
 		shutdown:          make(chan struct{}),
 		stats: &Stats{
 			StartTime: time.Now(),
@@ -635,7 +638,7 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 	}
 
 	switch packetType {
-	case PacketTypeAudio, PacketTypeAudioOpus:
+	case PacketTypeAudio, PacketTypeAudioOpus, PacketTypeAudioRtp:
 		s.handleAudioPacket(payload.(*AudioPacket), addr)
 	case PacketTypeDirectAudio:
 		s.handleDirectAudioPacket(payload.(*DirectAudioPacket), addr)
@@ -697,6 +700,15 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
 
+	// MCX Step 1: remember which user an RTP SSRC belongs to, so a future gateway
+	// (and diagnostics) can map RTP streams back to a MeshRelay identity without
+	// re-parsing the audio body.
+	if packet.RTP != nil {
+		s.ssrcMu.Lock()
+		s.ssrcToUser[packet.RTP.SSRC] = packet.Username
+		s.ssrcMu.Unlock()
+	}
+
 	// Get client's agency-scoped channel
 	key := channelKey(client.AgencyID, client.Channel)
 	channel := s.channels[key]
@@ -704,13 +716,21 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		return
 	}
 
-	// Prepend packet type to the serialized data, preserving the codec: an
-	// Opus frame is relayed as an Opus frame so receivers know how to decode it.
-	relayType := PacketTypeAudio
-	if packet.Codec == CodecOpus {
-		relayType = PacketTypeAudioOpus
+	// Prepend packet type to the serialized data, preserving both the codec and
+	// the RTP framing. An RTP-aligned packet (0x13) is relayed as RTP with the
+	// sender's original RTP header intact, so receivers and any MCX gateway see
+	// the true transmitter SSRC / sequence / timestamp / marker. Otherwise an
+	// Opus frame relays as 0x10 and PCM as 0x00.
+	var audioData []byte
+	if packet.RTP != nil {
+		audioData = append([]byte{PacketTypeAudioRtp}, SerializeAudioRtpPacket(packet)...)
+	} else {
+		relayType := PacketTypeAudio
+		if packet.Codec == CodecOpus {
+			relayType = PacketTypeAudioOpus
+		}
+		audioData = append([]byte{relayType}, SerializeAudioPacket(packet)...)
 	}
-	audioData := append([]byte{relayType}, SerializeAudioPacket(packet)...)
 
 	// Broadcast audio to all clients in the same channel (except sender).
 	// Track who already received it so monitors aren't double-sent.
