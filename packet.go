@@ -46,7 +46,63 @@ const (
 	// mutual-aid/Zello channels regardless of which channel it's tuned to talk on.
 	// Body: u16 count | (i32 channel)*
 	PacketTypeMonitorChannels byte = 0x12
+
+	// PacketTypeAudioRtp: RTP-aligned audio (MCX Step 1). A standard 12-byte RTP
+	// header (RFC 3550) is prepended to the normal Opus audio body, so a future
+	// MCX gateway can strip the RTP header and forward Opus to an MCX media plane,
+	// and the packets decode as valid RTP in Wireshark. Body layout:
+	//   [12-byte RTP header][u16 usernameLen][username][i32 audioLen][Opus payload]
+	// The type byte itself is the legacy-vs-RTP discriminator: peers that only
+	// understand 0x00/0x10 ignore 0x13, and RTP-aware peers accept all three.
+	// The payload is always Opus (RTP alignment is only defined for Opus audio).
+	PacketTypeAudioRtp byte = 0x13
 )
+
+// RTPHeader is the fixed 12-byte RTP header (RFC 3550), no CSRC/extensions.
+type RTPHeader struct {
+	Marker         bool   // set on the first packet of a talk burst
+	PayloadType    uint8  // dynamic PT; 111 by convention for Opus
+	SequenceNumber uint16 // increments per packet, wraps at 65535
+	Timestamp      uint32 // +320 per 20ms frame at 16 kHz
+	SSRC           uint32 // unique per transmitter session
+}
+
+// rtpVersion is always 2 for RFC 3550.
+const rtpVersion = 2
+
+// parseRTPHeader reads the fixed 12-byte RTP header from the front of data.
+// Returns the header, the remaining bytes (the MeshRelay audio body), or error.
+func parseRTPHeader(data []byte) (RTPHeader, []byte, error) {
+	if len(data) < 12 {
+		return RTPHeader{}, nil, errors.New("short RTP header")
+	}
+	b0 := data[0]
+	if (b0 >> 6) != rtpVersion {
+		return RTPHeader{}, nil, errors.New("bad RTP version")
+	}
+	h := RTPHeader{
+		Marker:         (data[1] & 0x80) != 0,
+		PayloadType:    data[1] & 0x7F,
+		SequenceNumber: binary.BigEndian.Uint16(data[2:4]),
+		Timestamp:      binary.BigEndian.Uint32(data[4:8]),
+		SSRC:           binary.BigEndian.Uint32(data[8:12]),
+	}
+	return h, data[12:], nil
+}
+
+// serializeRTPHeader writes the 12-byte RTP header. CC=0, no padding/extension.
+func serializeRTPHeader(h RTPHeader) []byte {
+	out := make([]byte, 12)
+	out[0] = byte(rtpVersion << 6) // V=2, P=0, X=0, CC=0
+	out[1] = h.PayloadType & 0x7F
+	if h.Marker {
+		out[1] |= 0x80
+	}
+	binary.BigEndian.PutUint16(out[2:4], h.SequenceNumber)
+	binary.BigEndian.PutUint32(out[4:8], h.Timestamp)
+	binary.BigEndian.PutUint32(out[8:12], h.SSRC)
+	return out
+}
 
 // Audio codec identifiers for AudioPacket.Codec.
 const (
@@ -61,6 +117,11 @@ type AudioPacket struct {
 	Username  string
 	AudioData []byte
 	Codec     int
+	// RTP carries the sender's RTP header when the packet arrived as
+	// PacketTypeAudioRtp (0x13). It is preserved through the relay so receivers
+	// see the original transmitter's SSRC / sequence / timestamp / marker. Nil
+	// for legacy 0x00/0x10 packets.
+	RTP *RTPHeader
 }
 
 // DirectAudioPacket represents a direct audio packet for group voice
@@ -148,6 +209,10 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 		if pkt != nil {
 			pkt.Codec = CodecOpus
 		}
+		return packetType, pkt, err
+	case PacketTypeAudioRtp:
+		// RTP-aligned Opus audio (MCX Step 1): 12-byte RTP header + audio body.
+		pkt, err := ParseAudioRtpPacket(payload)
 		return packetType, pkt, err
 	case PacketTypeDirectAudio:
 		pkt, err := ParseDirectAudioPacket(payload)
@@ -449,6 +514,33 @@ func SerializeAudioPacket(packet *AudioPacket) []byte {
 	buf.Write(packet.AudioData)
 
 	return buf.Bytes()
+}
+
+// ParseAudioRtpPacket parses a PacketTypeAudioRtp (0x13) body: a 12-byte RTP
+// header followed by the standard [u16 userLen|user|i32 audioLen|audio] body.
+// Returns an AudioPacket with RTP set and Codec=Opus.
+func ParseAudioRtpPacket(data []byte) (*AudioPacket, error) {
+	hdr, rest, err := parseRTPHeader(data)
+	if err != nil {
+		return nil, err
+	}
+	pkt, err := ParseAudioPacket(rest)
+	if err != nil {
+		return nil, err
+	}
+	pkt.Codec = CodecOpus // RTP-aligned audio is always Opus
+	pkt.RTP = &hdr
+	return pkt, nil
+}
+
+// SerializeAudioRtpPacket writes [12-byte RTP header][audio body]. If the packet
+// has no RTP header (shouldn't happen on this path) a zero header is written.
+func SerializeAudioRtpPacket(packet *AudioPacket) []byte {
+	var hdr RTPHeader
+	if packet.RTP != nil {
+		hdr = *packet.RTP
+	}
+	return append(serializeRTPHeader(hdr), SerializeAudioPacket(packet)...)
 }
 
 // SerializeTextPacket serializes a text packet for transmission
