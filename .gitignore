@@ -20,3 +20,6 @@ SHA256SUMS
 backups/
 .DS_Store
 pttserver
+
+ptt-server-arm64
+ptt-server-linux-arm64
