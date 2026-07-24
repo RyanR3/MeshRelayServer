@@ -56,6 +56,64 @@ const (
 	// understand 0x00/0x10 ignore 0x13, and RTP-aware peers accept all three.
 	// The payload is always Opus (RTP alignment is only defined for Opus audio).
 	PacketTypeAudioRtp byte = 0x13
+
+	// PacketTypeAudioRtpChan: channel-tagged RTP audio. Layout is a big-endian
+	// int32 channel id prepended to the exact 0x13 body:
+	//   [i32 channel][12-byte RTP header][u16 usernameLen][username][i32 audioLen][Opus]
+	// Server -> client only, and sent ONLY to clients receiving the audio via
+	// channel MONITORING (0x12 always-listen) — active-channel members keep the
+	// plain 0x13 framing. Untagged monitor audio was attributed to the
+	// receiver's active channel ("talking on Channel N" showed the wrong N).
+	// Backward-safe: only monitoring clients ever see 0x14, and monitoring is
+	// only implemented by the Android standalone app (which parses it).
+	PacketTypeAudioRtpChan byte = 0x14
+
+	// Floor control (MCX Step 3, mirrors 3GPP TS 24.380). Only used on channels
+	// with floor control enabled; otherwise PTT is open as before.
+	PacketTypeFloorRequest   byte = 0x20 // client -> server: I want the floor
+	PacketTypeFloorGranted   byte = 0x21 // server -> client: you have the floor (or queued)
+	PacketTypeFloorDenied    byte = 0x22 // server -> client: denied (busy/no perm), + queue pos
+	PacketTypeFloorPreempted byte = 0x23 // server -> old holder: you were preempted
+	PacketTypeFloorIdle      byte = 0x24 // server -> channel: floor is now free
+	PacketTypeFloorTaken     byte = 0x25 // server -> joining client: floor status
+	PacketTypeEmergencyAlert byte = 0x26 // client -> server / server -> channel: emergency
+
+	// MCX Step 4: group info for a channel. Server -> client on join / on change so
+	// the UI can show broadcast lock / emergency indicator.
+	// Body: i32 channel | str groupType | str broadcastUser
+	PacketTypeGroupInfo byte = 0x27
+
+	// MCX Step 4 ad-hoc groups (invite/accept flow).
+	// GroupInvite (server -> invited client): i32 channel | str groupName |
+	//   str groupType | str createdBy
+	PacketTypeGroupInvite byte = 0x28
+	// GroupInviteResponse (client -> server): i32 channel | str user | u8 accept
+	PacketTypeGroupInviteResponse byte = 0x29
+	// GroupCreateAdhoc (client -> server): creates an ad-hoc group and invites
+	// members. Body: str creator | str groupName | str groupType |
+	//   u16 memberCount | (str member)*
+	PacketTypeGroupCreateAdhoc byte = 0x2A
+
+	// PacketTypeGroupDisband: client -> server, the creator explicitly deletes
+	// an ad-hoc group. Body: [i32 channel][u16 userLen][user]. Only honored
+	// when the sender is the group's creator; the server then dissolves the
+	// channel for all members (ChannelSwitch active=false), same as expiry.
+	PacketTypeGroupDisband byte = 0x2B
+)
+
+// Floor priority levels (higher-priority number preempts LOWER; EMERGENCY=1 wins).
+const (
+	PriorityEmergency = 1 // always preempts
+	PriorityCommand   = 2 // supervisor / IC
+	PriorityResponder = 3 // default standard user
+	PriorityMonitor   = 4 // listen-only, cannot request floor
+)
+
+// FloorDenied reason codes.
+const (
+	FloorDenyBusy         = 0 // someone equal/higher holds the floor
+	FloorDenyNoPermission = 1 // e.g. MONITOR priority, or broadcast group non-transmitter
+	FloorDenyChannelFull  = 2 // queue full
 )
 
 // RTPHeader is the fixed 12-byte RTP header (RFC 3550), no CSRC/extensions.
@@ -213,6 +271,21 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 	case PacketTypeAudioRtp:
 		// RTP-aligned Opus audio (MCX Step 1): 12-byte RTP header + audio body.
 		pkt, err := ParseAudioRtpPacket(payload)
+		return packetType, pkt, err
+	case PacketTypeFloorRequest:
+		pkt, err := ParseFloorRequest(payload)
+		return packetType, pkt, err
+	case PacketTypeEmergencyAlert:
+		pkt, err := ParseEmergencyAlert(payload)
+		return packetType, pkt, err
+	case PacketTypeGroupCreateAdhoc:
+		pkt, err := ParseGroupCreateAdhoc(payload)
+		return packetType, pkt, err
+	case PacketTypeGroupInviteResponse:
+		pkt, err := ParseGroupInviteResponse(payload)
+		return packetType, pkt, err
+	case PacketTypeGroupDisband:
+		pkt, err := ParseGroupDisband(payload)
 		return packetType, pkt, err
 	case PacketTypeDirectAudio:
 		pkt, err := ParseDirectAudioPacket(payload)

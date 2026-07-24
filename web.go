@@ -65,6 +65,9 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/clients", s.handleClients).Methods("GET")
 	api.HandleFunc("/channels", s.handleChannels).Methods("GET")
 	api.HandleFunc("/groups", s.handleGroups).Methods("GET")
+	// MCX Step 4: get/set a channel's MCX group type.
+	api.HandleFunc("/channel-group-types", s.handleGetChannelGroupTypes).Methods("GET")
+	api.HandleFunc("/channel-group-types", s.handleSetChannelGroupType).Methods("POST")
 	api.HandleFunc("/config", s.handleGetConfig).Methods("GET")
 	api.HandleFunc("/config", s.handleUpdateConfig).Methods("POST")
 	api.HandleFunc("/users", s.handleGetUsers).Methods("GET")
@@ -448,6 +451,85 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleGetChannelGroupTypes returns the configured MCX group types and broadcast
+// users, so the dashboard can display/edit them.
+func (s *Server) handleGetChannelGroupTypes(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s.mu.RLock()
+	types := s.config.ChannelGroupTypes
+	bcast := s.config.BroadcastUsers
+	s.mu.RUnlock()
+	if types == nil {
+		types = map[string]string{}
+	}
+	if bcast == nil {
+		bcast = map[string]string{}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"channel_group_types": types,
+		"broadcast_users":     bcast,
+	})
+}
+
+// handleSetChannelGroupType sets one channel's MCX group type (and broadcast user
+// for broadcast type). Body: {agency_id, channel, group_type, broadcast_user}.
+func (s *Server) handleSetChannelGroupType(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AgencyID      string `json:"agency_id"`
+		Channel       int    `json:"channel"`
+		GroupType     string `json:"group_type"`
+		BroadcastUser string `json:"broadcast_user"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+	// Agency admins can only edit their own agency.
+	if session := s.getSession(r); session != nil && session.Role == "agency_admin" {
+		req.AgencyID = session.AgencyID
+	}
+	if req.AgencyID == "" {
+		req.AgencyID = "default"
+	}
+	switch req.GroupType {
+	case GroupTypePreconfigured, GroupTypeBroadcast, GroupTypeEmergency, "":
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid group_type"}`))
+		return
+	}
+	key := channelKey(req.AgencyID, req.Channel)
+	s.mu.Lock()
+	if s.config.ChannelGroupTypes == nil {
+		s.config.ChannelGroupTypes = map[string]string{}
+	}
+	if s.config.BroadcastUsers == nil {
+		s.config.BroadcastUsers = map[string]string{}
+	}
+	if req.GroupType == "" || req.GroupType == GroupTypePreconfigured {
+		delete(s.config.ChannelGroupTypes, key)
+		delete(s.config.BroadcastUsers, key)
+	} else {
+		s.config.ChannelGroupTypes[key] = req.GroupType
+		if req.GroupType == GroupTypeBroadcast {
+			s.config.BroadcastUsers[key] = req.BroadcastUser
+		} else {
+			delete(s.config.BroadcastUsers, key)
+		}
+	}
+	s.mu.Unlock()
+	_ = s.config.Save("config.json")
+
+	// Push updated group info to everyone currently on that channel.
+	s.broadcastGroupInfo(req.AgencyID, req.Channel)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	s.mu.RLock()
@@ -614,6 +696,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		AgencyID string `json:"agency_id"`
 		Role     string `json:"role"`
+		Priority int    `json:"priority"` // MCX Step 3 floor priority (1-4)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -689,6 +772,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
 	}
+	// MCX Step 3: apply provisioned floor priority if given.
+	if req.Priority != 0 {
+		s.SetUserPriority(req.AgencyID, req.Username, req.Priority)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -698,6 +785,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		"agency_id":        req.AgencyID,
 		"role":             req.Role,
 		"enrollment_token": enrollToken,
+		"mcx_id":           userMCXID(req.Username, req.AgencyID, s.config.McpttDomain),
 	})
 }
 
@@ -708,9 +796,10 @@ func (s *Server) handleUserCsvTemplate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="meshrelay-users-template.csv"`)
 	// Header row + two example rows (examples are comments the parser ignores? No —
 	// keep them as real sample rows the admin can edit or delete).
-	tmpl := "username,name,password,agency_id,role\n" +
-		"jdoe,John Doe,ChangeMe123,default,user\n" +
-		"asmith,Amy Smith,ChangeMe123,default,admin\n"
+	// priority: 1=EMERGENCY 2=COMMAND 3=RESPONDER 4=MONITOR (blank = RESPONDER).
+	tmpl := "username,name,password,agency_id,role,priority\n" +
+		"jdoe,John Doe,ChangeMe123,default,user,3\n" +
+		"asmith,Amy Smith,ChangeMe123,default,admin,2\n"
 	w.Write([]byte(tmpl))
 }
 
@@ -756,7 +845,7 @@ func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
 	looksLikeHeader := false
 	for _, h := range head {
 		switch strings.ToLower(strings.TrimSpace(h)) {
-		case "username", "name", "password", "agency_id", "role":
+		case "username", "name", "password", "agency_id", "role", "priority":
 			looksLikeHeader = true
 		}
 	}
@@ -766,7 +855,7 @@ func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		dataStart = 1
 	} else {
-		col = map[string]int{"username": 0, "name": 1, "password": 2, "agency_id": 3, "role": 4}
+		col = map[string]int{"username": 0, "name": 1, "password": 2, "agency_id": 3, "role": 4, "priority": 5}
 	}
 
 	get := func(row []string, key string) string {
@@ -852,6 +941,12 @@ func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
 				results = append(results, rowResult{line, username, "error", err.Error(), ""})
 			}
 			continue
+		}
+		// MCX Step 3: apply provisioned floor priority from the CSV if present.
+		if p := get(row, "priority"); p != "" {
+			if pv, e := strconv.Atoi(p); e == nil {
+				s.SetUserPriority(agencyID, username, pv)
+			}
 		}
 		created++
 		results = append(results, rowResult{line, username, "created", "", token})

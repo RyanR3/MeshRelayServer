@@ -74,6 +74,43 @@ Edit `config.json`:
 }
 ```
 
+## MCX SIP Gateway (optional, off by default)
+
+The server can bridge to an external MCX / MCPTT platform (e.g. FirstNet PTT) via
+a SIP gateway. It is **disabled by default and has zero impact when off** — enable
+it only when you have a concrete interop requirement. When enabled it:
+
+- listens for SIP (RFC 3261) on the configured port and REGISTERs toward the MCX platform,
+- translates SIP call setup / floor control to/from MeshRelay floor packets, and
+- passes RTP audio through (Step 1 already aligns MeshRelay audio to RTP, so only the 1-byte type prefix is stripped/added).
+
+Add a `sip_gateway` block to `config.json`:
+
+```json
+{
+  "sip_gateway": {
+    "enabled": false,
+    "sip_port": 5060,
+    "mcx_platform_host": "mcx.example.com:5060",
+    "mcx_domain": "example.com",
+    "gateway_mcx_id": "gateway@example.com",
+    "rtp_port_range": "20000-20100",
+    "tls_enabled": true,
+    "bridge_agency": "default",
+    "bridge_channel": 10
+  }
+}
+```
+
+`bridge_agency` + `bridge_channel` select which MeshRelay channel is bridged to
+the external MCX group. To test with a SIP softphone (Linphone/Zoiper), point it
+at the gateway's `sip_port` and send an INVITE — it is accepted and translated to
+a floor grant on the bridged channel.
+
+> This is a **stub** (Step 5 of the MCX roadmap): it proves the translation layer
+> and establishes the architecture. Full SIP dialog state, re-INVITE, RTCP, IMS
+> registration, SIPS, and full 3GPP TS 24.380 compliance are deferred.
+
 ## Service Management
 
 The install script sets up a systemd service automatically. Useful commands:

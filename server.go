@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -53,6 +54,21 @@ type UserAccount struct {
 	AgencyID     string `json:"agency_id"`
 	Role         string `json:"role"` // "user", "admin", or "super_admin"
 	CreatedAt    string `json:"created_at"`
+	// MCX Step 3: floor-control priority (1=EMERGENCY,2=COMMAND,3=RESPONDER,
+	// 4=MONITOR). 0/absent = default RESPONDER. Assigned at provisioning; clients
+	// cannot self-elevate (except Emergency alert).
+	Priority     int    `json:"priority,omitempty"`
+	// MCX Step 2 note: the derived MCX identity (<callsign>@<agency>.<mcptt_domain>)
+	// is NOT stored — it's computed on demand (see userMCXID / GetUsers) and added
+	// to API responses. The plain Username remains the display name + routing key.
+}
+
+// effectivePriority returns the user's floor priority, defaulting to RESPONDER.
+func (u *UserAccount) effectivePriority() uint8 {
+	if u == nil || u.Priority < PriorityEmergency || u.Priority > PriorityMonitor {
+		return PriorityResponder
+	}
+	return uint8(u.Priority)
 }
 
 type MutualAidLink struct {
@@ -139,6 +155,10 @@ type Server struct {
 	zelloBridges       map[string]*ZelloBridge   // bridgeID -> Zello Work channel bridge
 	ssrcToUser         map[uint32]string         // RTP SSRC -> username (MCX Step 1)
 	ssrcMu            sync.RWMutex               // guards ssrcToUser
+	floor              *FloorController          // MCX Step 3 floor control (per channel)
+	groupMgr           *GroupManager             // MCX Step 4 group types / ad-hoc
+	sipGateway         *SipGateway               // MCX Step 5 SIP gateway (nil = disabled)
+	testFloorSink      func(*net.UDPAddr, []byte) // test-only: capture floor packets
 	mu                sync.RWMutex
 	shutdown          chan struct{}
 	stats             *Stats
@@ -575,7 +595,93 @@ func NewServer(config *Config, configFile string) *Server {
 		s.ensureAgencyChannels(agencyID)
 	}
 
+	// MCX Step 3 floor controller + Step 4 group manager, sharing one periodic
+	// tick (floor dead-man/emergency expiry + ad-hoc group expiry).
+	s.floor = NewFloorController(s)
+	s.groupMgr = NewGroupManager(s)
+	go func() {
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.shutdown:
+				return
+			case <-t.C:
+				s.floor.Tick()
+				s.groupMgr.Tick()
+			}
+		}
+	}()
+
+	// MCX Step 5: SIP gateway (disabled unless config.SipGateway.Enabled). The
+	// server implements MeshRelayCallback so the gateway can inject MCX-side
+	// events. Zero impact when off.
+	if config.SipGateway != nil && config.SipGateway.Enabled {
+		s.sipGateway = NewSipGateway(config.SipGateway, s)
+		if err := s.sipGateway.Start(); err != nil {
+			log.Printf("[SIP-GW] failed to start: %v", err)
+			s.sipGateway = nil
+		}
+	}
+
 	return s
+}
+
+// ---- MCX Step 5: MeshRelayCallback (gateway -> MeshRelay) ----
+
+// GrantFloor lets the gateway grant the floor to an external MCX user on a
+// bridged channel (so their audio relays to MeshRelay members).
+func (s *Server) GrantFloor(channelKey, userMCXID string) error {
+	if s.floor == nil {
+		return nil
+	}
+	ch := channelNumFromKey(channelKey)
+	// Treat the external user as a Command-priority floor holder on the bridge.
+	s.floor.Request(channelKey, &FloorRequest{Channel: ch, User: userMCXID, Priority: PriorityCommand}, PriorityCommand)
+	return nil
+}
+
+// DenyFloor / release from the gateway side.
+func (s *Server) DenyFloor(channelKey, userMCXID string, reason uint8) error {
+	if s.floor == nil {
+		return nil
+	}
+	s.floor.Release(channelKey, channelNumFromKey(channelKey), userMCXID)
+	return nil
+}
+
+// DeliverAudio injects an RTP audio packet from the MCX side into a MeshRelay
+// channel (relays to all members).
+func (s *Server) DeliverAudio(channelKey string, rtpPacket []byte) error {
+	agencyID := channelKey
+	if i := indexByteLast(channelKey, ':'); i >= 0 {
+		agencyID = channelKey[:i]
+	}
+	pkt := rtpPacket
+	// Ensure it carries our type byte for clients.
+	if len(pkt) == 0 || pkt[0] != PacketTypeAudioRtp {
+		pkt = append([]byte{PacketTypeAudioRtp}, rtpPacket...)
+	}
+	s.broadcastFloorToChannel(channelKey, pkt)
+	_ = agencyID
+	return nil
+}
+
+// BroadcastEmergency injects an emergency alert from the MCX side.
+func (s *Server) BroadcastEmergency(channelKey, userMCXID string) error {
+	ch := channelNumFromKey(channelKey)
+	s.broadcastFloorToChannel(channelKey, buildEmergencyAlert(ch, userMCXID, true))
+	return nil
+}
+
+// floorEnabledForAgency reports whether floor control is on for an agency.
+func (s *Server) floorEnabledForAgency(agencyID string) bool {
+	for _, a := range s.config.FloorControlAgencies {
+		if a == agencyID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) StartPTT() error {
@@ -640,6 +746,16 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 	switch packetType {
 	case PacketTypeAudio, PacketTypeAudioOpus, PacketTypeAudioRtp:
 		s.handleAudioPacket(payload.(*AudioPacket), addr)
+	case PacketTypeFloorRequest:
+		s.handleFloorRequest(payload.(*FloorRequest), addr)
+	case PacketTypeEmergencyAlert:
+		s.handleEmergencyAlert(payload.(*EmergencyAlert), addr)
+	case PacketTypeGroupCreateAdhoc:
+		s.handleGroupCreateAdhoc(payload.(*GroupCreateAdhoc), addr)
+	case PacketTypeGroupInviteResponse:
+		s.handleGroupInviteResponse(payload.(*GroupInviteResponse), addr)
+	case PacketTypeGroupDisband:
+		s.handleGroupDisband(payload.(*GroupDisband), addr)
 	case PacketTypeDirectAudio:
 		s.handleDirectAudioPacket(payload.(*DirectAudioPacket), addr)
 	case PacketTypeText:
@@ -700,6 +816,18 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
 
+	// MCX Step 3: when floor control is enabled for this agency, only the current
+	// floor holder's audio is relayed. Non-holders are dropped (they must acquire
+	// the floor first). The holder's audio resets the dead-man timer. Floor
+	// control is skipped when disabled — open PTT as before.
+	if s.floorEnabledForAgency(client.AgencyID) {
+		fkey := channelKey(client.AgencyID, client.Channel)
+		if !s.floor.HasFloor(fkey, packet.Username) {
+			return // not the floor holder — drop
+		}
+		s.floor.NoteAudio(fkey, packet.Username)
+	}
+
 	// MCX Step 1: remember which user an RTP SSRC belongs to, so a future gateway
 	// (and diagnostics) can map RTP streams back to a MeshRelay identity without
 	// re-parsing the audio body.
@@ -732,6 +860,18 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		audioData = append([]byte{relayType}, SerializeAudioPacket(packet)...)
 	}
 
+	// Channel-tagged variant (0x14) for MONITOR recipients only: without the
+	// tag, always-listen audio is attributed to the receiver's active channel.
+	// Non-RTP (legacy PCM/Opus) audio has no tagged form — those monitors keep
+	// the old mislabeled behavior rather than a new wire format.
+	monitorAudioData := audioData
+	if packet.RTP != nil {
+		tagged := make([]byte, 5, 5+len(audioData)-1)
+		tagged[0] = PacketTypeAudioRtpChan
+		binary.BigEndian.PutUint32(tagged[1:5], uint32(client.Channel))
+		monitorAudioData = append(tagged, audioData[1:]...)
+	}
+
 	// Broadcast audio to all clients in the same channel (except sender).
 	// Track who already received it so monitors aren't double-sent.
 	sentTo := make(map[string]bool)
@@ -759,7 +899,7 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		}
 		for _, ch := range mc.MonitoredChannels {
 			if ch == client.Channel {
-				s.sendPacket(audioData, mc.Addr)
+				s.sendPacket(monitorAudioData, mc.Addr)
 				sentTo[mc.Addr.String()] = true
 				relayCount++
 				break
@@ -795,6 +935,12 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 
 	// Forward to a Zello bridge on this channel (Opus passthrough).
 	s.forwardMeshAudioToZello(client.AgencyID, client.Channel, packet.Username, packet.Codec, packet.AudioData)
+
+	// MCX Step 5: forward to the SIP gateway if this is the bridged channel
+	// (RTP passthrough to the external MCX media plane).
+	if s.sipGateway != nil {
+		s.sipGateway.OnAudioPacket(channelKey(client.AgencyID, client.Channel), audioData)
+	}
 
 	// Fan out to dispatch browser connections listening on this channel.
 	// A dispatch user with an empty AgencyID (super_admin) monitors all
@@ -1129,6 +1275,17 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		log.Printf("%s", p.desc)
 	}
 
+	// MCX Step 3: if floor control is on and the floor is taken on the joined
+	// channel, tell the joining client so its UI reflects the current holder.
+	if s.floor != nil && s.floorEnabledForAgency(agencyID) {
+		if taken := s.floor.FloorStatusFor(channelKey(agencyID, packet.Channel), packet.Channel); taken != nil {
+			s.sendPacket(taken, addr)
+		}
+	}
+	// MCX Step 4: tell the joining client the channel's MCX group type (broadcast/
+	// emergency) so its UI shows the right indicator. No-op for normal channels.
+	s.sendGroupInfo(addr, agencyID, packet.Channel)
+
 	// Push an updated roster so everyone in the agency sees the new client.
 	if !exists {
 		s.broadcastRoster(agencyID)
@@ -1184,6 +1341,14 @@ func (s *Server) removeClient(client *Client) {
 
 	// Remove from clients map
 	delete(s.clients, ck)
+	// MCX Step 3: release any floor/queue this user held (prevents a stuck floor).
+	if s.floor != nil {
+		s.floor.DropUser(client.Username)
+	}
+	// MCX Step 4: leaving an ad-hoc group channel dissolves it when empty.
+	if s.groupMgr != nil {
+		s.adhocMemberLeft(client.AgencyID, client.Channel, client.Username)
+	}
 	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
 	s.activityLog.Add("client_disconnect", client.Username, fmt.Sprintf("Left channel %d", client.Channel), client.AgencyID)
 }
@@ -1235,6 +1400,14 @@ func (s *Server) broadcastAllRosters() {
 }
 
 func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
+	// Test hook / no-conn guard: capture instead of writing to the socket.
+	if s.testFloorSink != nil {
+		s.testFloorSink(addr, data)
+		return
+	}
+	if s.conn == nil {
+		return
+	}
 	_, err := s.conn.WriteToUDP(data, addr)
 	if err != nil {
 		log.Printf("Error sending packet to %s: %v", addr, err)
@@ -1330,6 +1503,9 @@ func (s *Server) isShuttingDown() bool {
 
 func (s *Server) Shutdown() {
 	close(s.shutdown)
+	if s.sipGateway != nil {
+		s.sipGateway.Stop()
+	}
 	if s.activityLog != nil {
 		s.activityLog.Save()
 	}
@@ -1703,7 +1879,14 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	s.authenticatedAddrs[addr.String()] = user.AgencyID
-	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: "Authenticated"})
+	// MCX Step 2: hand the client its MCX domain so it can derive its own MCX id
+	// (<callsign>@<domain>). Appended in a backward-compatible way — old clients
+	// read the "Authenticated" prefix and ignore the "|domain=" suffix.
+	msg := "Authenticated"
+	if dom := agencyDomain(user.AgencyID, s.config.McpttDomain); dom != "" {
+		msg = "Authenticated|domain=" + dom
+	}
+	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: msg})
 	s.sendPacket(resp, addr)
 }
 
@@ -2001,12 +2184,21 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 			}
 		}
 
+		pri := user.Priority
+		if pri == 0 {
+			pri = PriorityResponder
+		}
 		users = append(users, map[string]interface{}{
 			"username":   user.Username,
 			"name":       user.Name,
 			"agency_id":  user.AgencyID,
 			"role":       role,
 			"created_at": user.CreatedAt,
+			// MCX Step 2: derived MCX identity (additive; username stays the
+			// display name and routing key).
+			"mcx_id": userMCXID(user.Username, user.AgencyID, s.config.McpttDomain),
+			// MCX Step 3: provisioned floor priority.
+			"priority": pri,
 		})
 	}
 
@@ -2027,6 +2219,7 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 			"agency_id":  admin.AgencyID,
 			"role":       "dispatch",
 			"created_at": "",
+			"mcx_id":     userMCXID(admin.Username, admin.AgencyID, s.config.McpttDomain),
 		})
 	}
 
