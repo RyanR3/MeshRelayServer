@@ -1110,6 +1110,13 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		return
 	}
 
+	// Ack the sender's own heartbeat. Without this a LONE client (the only one
+	// connected) receives nothing back on a quiet server, so its "no packets
+	// received in 3.5 intervals" liveness check false-trips → disconnect →
+	// reconnect loop (and a repeating disconnect tone). Echoing the heartbeat
+	// keeps lastServerPacketTime fresh for every client, alone or not.
+	s.sendPacket(heartbeatData, addr)
+
 	// Relay heartbeat to all other clients in the same channel (not to sender)
 	relayCount := 0
 	for _, otherClient := range channel.Clients {
