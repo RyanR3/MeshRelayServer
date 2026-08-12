@@ -424,7 +424,12 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 			case <-reannounceDone:
 				return
 			case <-reannounceTicker.C:
-				if b.announced && b.ZelloChannel != "" {
+				// Re-announce so clients that joined after connect still get the
+				// bridged channels. Gate on having ANY effective mapping — NOT on
+				// the legacy ZelloChannel field, which is cleared once per-channel
+				// mappings are configured (that gate silently stopped re-announce
+				// for every mapping-based bridge).
+				if b.announced && len(b.effectiveMappings()) > 0 {
 					s.notifyZelloBridgeChannels(b, true)
 				}
 			}
