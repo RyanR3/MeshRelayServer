@@ -50,6 +50,8 @@ function navigateTo(pageName) {
     } else if (pageName === 'guest-events') {
         fetchGuestEvents();
     } else if (pageName === 'zello-bridges') {
+        // Load agencies for the per-mapping agency dropdowns, then bridges.
+        fetch('/api/agencies').then(r => r.json()).then(a => { agenciesList = a || []; }).catch(() => {});
         fetchZelloBridges();
     } else if (pageName === 'activity') {
         fetchActivityPage();
@@ -1639,9 +1641,10 @@ function renderZelloBridges(bridges) {
         // Channel-mapping list (one row per Zello↔Mesh pair) shown once connected.
         const connected = b.status === 'connected';
         const mappings = Array.isArray(b.mappings) ? b.mappings : [];
-        const rowsHtml = mappings.map((m, idx) => mappingRowHtml(safeId, idx, m.zello_channel, m.mesh_channel)).join('');
+        const rowsHtml = mappings.map((m, idx) =>
+            mappingRowHtml(safeId, idx, m.zello_channel, m.mesh_channel, m.agency_id || b.agency_id)).join('');
         const mapRow = connected ? `
-            <div class="zb-maps" id="zbmaps-${safeId}">
+            <div class="zb-maps" id="zbmaps-${safeId}" data-agency="${escapeAttr(b.agency_id || '')}">
                 ${rowsHtml || '<div class="zb-map-empty">No channels mapped yet. Add one below.</div>'}
                 <div class="zb-map-controls">
                     <button class="btn-secondary zb-addmap" onclick="addMappingRow('${safeId}')">+ Add channel</button>
@@ -1676,8 +1679,20 @@ function renderZelloBridges(bridges) {
     bridges.filter(b => b.status === 'connected').forEach(b => loadCardZelloChannels(b.id));
 }
 
-// One mapping row: Zello channel dropdown → Mesh channel dropdown + remove (×).
-function mappingRowHtml(safeId, idx, zello, mesh) {
+// Agency <option>s for a mapping row (from the cached agenciesList).
+function mappingAgencyOptions(sel) {
+    const list = Array.isArray(agenciesList) ? agenciesList : [];
+    if (list.length === 0 && sel) {
+        // Fallback: at least show the currently-set agency if the list isn't loaded.
+        return `<option value="${escapeAttr(sel)}" selected>${escapeHtml(sel)}</option>`;
+    }
+    return list.map(a =>
+        `<option value="${escapeAttr(a.id)}" ${a.id === sel ? 'selected' : ''}>${escapeHtml(a.name || a.id)}</option>`
+    ).join('');
+}
+
+// One mapping row: Zello channel → Agency → Mesh channel + remove (×).
+function mappingRowHtml(safeId, idx, zello, mesh, agency) {
     const z = zello || '';
     return `<div class="zb-map" data-mapidx="${idx}">
         <div class="zb-map-field">
@@ -1688,6 +1703,10 @@ function mappingRowHtml(safeId, idx, zello, mesh) {
         </div>
         <span class="zb-arrow">&#8646;</span>
         <div class="zb-map-field">
+            <label>Agency</label>
+            <select class="zbmap-agency">${mappingAgencyOptions(agency || '')}</select>
+        </div>
+        <div class="zb-map-field">
             <label>MeshRelay channel</label>
             <select class="zbmap-mesh">${meshChannelOptions(mesh)}</select>
         </div>
@@ -1696,14 +1715,16 @@ function mappingRowHtml(safeId, idx, zello, mesh) {
 }
 
 // Add a blank mapping row to a card, then populate its Zello dropdown.
+// Defaults the agency to the bridge's default agency (stashed on the card).
 function addMappingRow(id) {
     const wrap = document.getElementById(`zbmaps-${id}`);
     if (!wrap) return;
     const controls = wrap.querySelector('.zb-map-controls');
     const emptyMsg = wrap.querySelector('.zb-map-empty');
     if (emptyMsg) emptyMsg.remove();
+    const defAgency = wrap.getAttribute('data-agency') || '';
     const tmp = document.createElement('div');
-    tmp.innerHTML = mappingRowHtml(id, Date.now(), '', 10);
+    tmp.innerHTML = mappingRowHtml(id, Date.now(), '', 10, defAgency);
     const row = tmp.firstElementChild;
     controls.before(row);
     if (zelloCardChannels[id]) fillZelloSelect(row.querySelector('.zbmap-zello'), zelloCardChannels[id], '');
@@ -1740,6 +1761,10 @@ function loadCardZelloChannels(id) {
             document.querySelectorAll(`#zbmaps-${id} .zbmap-zello`).forEach(sel => {
                 fillZelloSelect(sel, data.channels, sel.value);
             });
+            // Re-fill agency dropdowns too (agenciesList may have loaded after render).
+            document.querySelectorAll(`#zbmaps-${id} .zbmap-agency`).forEach(sel => {
+                sel.innerHTML = mappingAgencyOptions(sel.value);
+            });
         })
         .catch(() => {});
 }
@@ -1752,7 +1777,12 @@ function applyZelloMapping(id) {
     rows.forEach(row => {
         const z = row.querySelector('.zbmap-zello');
         const m = row.querySelector('.zbmap-mesh');
-        if (z && z.value) mappings.push({ zello_channel: z.value, mesh_channel: parseInt(m.value, 10) || 0 });
+        const a = row.querySelector('.zbmap-agency');
+        if (z && z.value) mappings.push({
+            zello_channel: z.value,
+            mesh_channel: parseInt(m.value, 10) || 0,
+            agency_id: (a && a.value) || ''
+        });
     });
     fetch(`/api/zello-bridges/${id}/map`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mappings }) })
     .then(r => r.json())

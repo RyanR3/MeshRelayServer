@@ -38,10 +38,15 @@ type ZelloBridge struct {
 	AuthToken   string `json:"auth_token"`   // API key from Zello Work admin console
 
 	// --- Channel mappings: one login can bridge SEVERAL Zello channels, each to
-	// its own MeshRelay channel. Legacy single ZelloChannel/MeshChannel fields
-	// are kept for migration and mirror Mappings[0].
-	AgencyID     string         `json:"agency_id"` // target agency (shared by all mappings)
-	Mappings     []ZelloMapping `json:"mappings"`  // zello_channel <-> mesh_channel pairs
+	// its own MeshRelay channel IN ITS OWN AGENCY. Legacy single
+	// ZelloChannel/MeshChannel fields are kept for migration and mirror
+	// Mappings[0].
+	//
+	// AgencyID is the bridge-level DEFAULT agency: it's used for mappings that
+	// don't set their own AgencyID (backward compatibility — every existing
+	// bridge's mappings inherit it). New mappings may each target any agency.
+	AgencyID     string         `json:"agency_id"` // default agency for mappings that omit one
+	Mappings     []ZelloMapping `json:"mappings"`  // zello_channel <-> mesh_channel pairs (each with its own agency)
 	ZelloChannel string         `json:"zello_channel,omitempty"` // legacy single mapping
 	MeshChannel  int            `json:"mesh_channel,omitempty"`  // legacy single mapping
 
@@ -71,10 +76,13 @@ type ZelloBridge struct {
 	pendingOutIdx int              `json:"-"` // mapping index whose start_stream is awaiting a stream_id
 }
 
-// ZelloMapping is one Zello-channel <-> MeshRelay-channel pair within a bridge.
+// ZelloMapping is one Zello-channel <-> MeshRelay-channel pair within a bridge,
+// targeting a specific MeshRelay agency (so one bridge can fan out to several
+// agencies — one per mapping).
 type ZelloMapping struct {
 	ZelloChannel string `json:"zello_channel"`
 	MeshChannel  int    `json:"mesh_channel"`
+	AgencyID     string `json:"agency_id,omitempty"` // target agency; empty = bridge default
 
 	// per-mapping outbound stream state (Mesh -> Zello for THIS zello channel)
 	outStreamID int64 `json:"-"`
@@ -83,10 +91,17 @@ type ZelloMapping struct {
 }
 
 // mappings returns the effective mapping list, migrating a legacy single
-// ZelloChannel/MeshChannel into Mappings on first use.
+// ZelloChannel/MeshChannel into Mappings on first use and backfilling each
+// mapping's AgencyID from the bridge default when unset (so old bridges keep
+// working and every mapping always has a concrete agency).
 func (b *ZelloBridge) effectiveMappings() []ZelloMapping {
 	if len(b.Mappings) == 0 && b.ZelloChannel != "" {
-		b.Mappings = []ZelloMapping{{ZelloChannel: b.ZelloChannel, MeshChannel: b.MeshChannel}}
+		b.Mappings = []ZelloMapping{{ZelloChannel: b.ZelloChannel, MeshChannel: b.MeshChannel, AgencyID: b.AgencyID}}
+	}
+	for i := range b.Mappings {
+		if b.Mappings[i].AgencyID == "" {
+			b.Mappings[i].AgencyID = b.AgencyID
+		}
 	}
 	return b.Mappings
 }
@@ -561,13 +576,15 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 		return // unknown stream (missed on_stream_start)
 	}
 	meshCh := -1
+	meshAgency := ""
 	for _, m := range b.effectiveMappings() {
 		if m.ZelloChannel == zch {
 			meshCh = m.MeshChannel
+			meshAgency = m.AgencyID // this mapping's own agency
 			break
 		}
 	}
-	if meshCh < 0 {
+	if meshCh < 0 || meshAgency == "" {
 		return
 	}
 	opus := frame[9:]
@@ -581,7 +598,7 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 
 	sentTo := make(map[string]bool)
 	s.mu.RLock()
-	ch := s.channels[channelKey(b.AgencyID, meshCh)]
+	ch := s.channels[channelKey(meshAgency, meshCh)]
 	s.mu.RUnlock()
 	if ch != nil {
 		ch.mu.RLock()
@@ -596,7 +613,7 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 	// elsewhere — this is what makes the monitor toggle hear Zello audio.
 	s.mu.RLock()
 	for _, mc := range s.clients {
-		if mc.AgencyID != b.AgencyID || sentTo[mc.Addr.String()] {
+		if mc.AgencyID != meshAgency || sentTo[mc.Addr.String()] {
 			continue
 		}
 		for _, mch := range mc.MonitoredChannels {
@@ -609,7 +626,7 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 	}
 	s.mu.RUnlock()
 
-	for _, partner := range s.getMutualAidPartners(b.AgencyID, meshCh) {
+	for _, partner := range s.getMutualAidPartners(meshAgency, meshCh) {
 		s.mu.RLock()
 		pc := s.channels[channelKey(partner, meshCh)]
 		s.mu.RUnlock()
@@ -641,8 +658,16 @@ func (s *Server) forwardMeshAudioToZello(agencyID string, channel int, sender st
 		s.mu.RLock()
 		hasBridge := false
 		for _, b := range s.zelloBridges {
-			if b.Enabled && b.AgencyID == agencyID && b.MeshChannel == channel {
-				hasBridge = true
+			if !b.Enabled {
+				continue
+			}
+			for _, m := range b.effectiveMappings() {
+				if m.AgencyID == agencyID && m.MeshChannel == channel {
+					hasBridge = true
+					break
+				}
+			}
+			if hasBridge {
 				break
 			}
 		}
@@ -653,14 +678,15 @@ func (s *Server) forwardMeshAudioToZello(agencyID string, channel int, sender st
 		}
 		return
 	}
-	// Find an enabled, connected bridge whose mapping covers this mesh channel.
+	// Find an enabled, connected bridge with a mapping to THIS agency+mesh
+	// channel (a mapping's own agency, not the bridge default).
 	s.mu.RLock()
 	var target *ZelloBridge
 	mapIdx := -1
 	for _, b := range s.zelloBridges {
-		if b.Enabled && b.AgencyID == agencyID && atomic.LoadInt32(&b.running) == 1 {
+		if b.Enabled && atomic.LoadInt32(&b.running) == 1 {
 			for i, m := range b.effectiveMappings() {
-				if m.MeshChannel == channel {
+				if m.AgencyID == agencyID && m.MeshChannel == channel {
 					target, mapIdx = b, i
 					break
 				}
@@ -831,22 +857,27 @@ func (s *Server) announceChannelRemoval(agencyID string, meshChannel int, name s
 // notifyZelloBridgeChannels announces every mapped channel of a bridge to all
 // clients in its agency (each as a selectable named channel, like mutual aid).
 func (s *Server) notifyZelloBridgeChannels(b *ZelloBridge, active bool) {
-	// Snapshot mappings + client addrs under lock.
+	// Snapshot mappings under lock; each mapping announces to ITS OWN agency's
+	// clients (a bridge can span multiple agencies).
 	s.mu.RLock()
-	var addrs []*net.UDPAddr
-	for _, c := range s.clients {
-		if c.AgencyID == b.AgencyID {
-			addrs = append(addrs, c.Addr)
-		}
-	}
 	maps := b.effectiveMappings()
 	s.mu.RUnlock()
 
 	for _, m := range maps {
 		name := m.ZelloChannel
-		if name == "" {
+		if name == "" || m.AgencyID == "" {
 			continue
 		}
+		// Clients in this mapping's agency.
+		s.mu.RLock()
+		var addrs []*net.UDPAddr
+		for _, c := range s.clients {
+			if c.AgencyID == m.AgencyID {
+				addrs = append(addrs, c.Addr)
+			}
+		}
+		s.mu.RUnlock()
+
 		pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
 			Channel:     m.MeshChannel,
 			ChannelName: name,
@@ -855,8 +886,8 @@ func (s *Server) notifyZelloBridgeChannels(b *ZelloBridge, active bool) {
 		for _, a := range addrs {
 			s.sendPacket(pkt, a)
 		}
-		log.Printf("Zello bridge %s: announced channel %d as %q to %d clients (active=%v)",
-			b.Name, m.MeshChannel, name, len(addrs), active)
+		log.Printf("Zello bridge %s: announced channel %d as %q to %d clients in %s (active=%v)",
+			b.Name, m.MeshChannel, name, len(addrs), m.AgencyID, active)
 	}
 }
 
@@ -1020,26 +1051,39 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 	oldMappings := append([]ZelloMapping(nil), b.effectiveMappings()...)
 
 	// Build a clean mapping list: dedupe Zello channels, assign high mesh slots.
+	// Mesh channel numbers are namespaced PER AGENCY (agency A ch10 and agency B
+	// ch10 are distinct), so track used numbers per agency.
 	seenZ := map[string]bool{}
-	usedMesh := map[int]bool{}
-	// mesh numbers already used by OTHER bridges / mutual aid.
+	usedMesh := map[string]map[int]bool{}
+	markUsed := func(agency string, ch int) {
+		if usedMesh[agency] == nil {
+			usedMesh[agency] = map[int]bool{}
+		}
+		usedMesh[agency][ch] = true
+	}
+	isUsed := func(agency string, ch int) bool {
+		return usedMesh[agency] != nil && usedMesh[agency][ch]
+	}
+	// mesh numbers already used by OTHER bridges (per their mapping agencies).
 	for _, ob := range s.zelloBridges {
 		if ob.ID == id {
 			continue
 		}
 		for _, m := range ob.effectiveMappings() {
-			usedMesh[m.MeshChannel] = true
+			markUsed(m.AgencyID, m.MeshChannel)
 		}
 	}
+	// mutual-aid links occupy a channel number within their agency.
 	for _, l := range s.mutualAidLinks {
 		if l.Active {
-			usedMesh[l.Channel] = true
+			markUsed(l.AgencyA, l.Channel)
+			markUsed(l.AgencyB, l.Channel)
 		}
 	}
-	pickHigh := func() int {
+	pickHigh := func(agency string) int {
 		for ch := 10; ch <= 19; ch++ {
-			if !usedMesh[ch] {
-				usedMesh[ch] = true
+			if !isUsed(agency, ch) {
+				markUsed(agency, ch)
 				return ch
 			}
 		}
@@ -1050,30 +1094,43 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 		if m.ZelloChannel == "" || seenZ[m.ZelloChannel] {
 			continue
 		}
+		// Per-mapping agency: default to the bridge agency, and only accept a
+		// valid existing agency (fall back to the default otherwise).
+		agency := m.AgencyID
+		if agency == "" {
+			agency = b.AgencyID
+		}
+		if _, ok := s.agencies[agency]; !ok {
+			agency = b.AgencyID
+		}
 		seenZ[m.ZelloChannel] = true
 		mesh := m.MeshChannel
-		if mesh < 10 || usedMesh[mesh] {
-			mesh = pickHigh()
+		if mesh < 10 || isUsed(agency, mesh) {
+			mesh = pickHigh(agency)
 		} else {
-			usedMesh[mesh] = true
+			markUsed(agency, mesh)
 		}
-		clean = append(clean, ZelloMapping{ZelloChannel: m.ZelloChannel, MeshChannel: mesh})
+		clean = append(clean, ZelloMapping{ZelloChannel: m.ZelloChannel, MeshChannel: mesh, AgencyID: agency})
 	}
 	b.Mappings = clean
 	b.ZelloChannel = "" // clear legacy single fields; mappings are authoritative now
 	b.MeshChannel = 0
-	agencyID := b.AgencyID
 	enabled := b.Enabled
 	s.mu.Unlock()
 
 	// Tell clients to REMOVE any channel that was dropped from the mapping list.
-	newByMesh := map[int]bool{}
+	// Match on (agency, mesh channel) since mappings can now span agencies.
+	type amKey struct {
+		agency string
+		mesh   int
+	}
+	newSet := map[amKey]bool{}
 	for _, m := range clean {
-		newByMesh[m.MeshChannel] = true
+		newSet[amKey{m.AgencyID, m.MeshChannel}] = true
 	}
 	for _, om := range oldMappings {
-		if om.ZelloChannel != "" && !newByMesh[om.MeshChannel] {
-			s.announceChannelRemoval(agencyID, om.MeshChannel, om.ZelloChannel)
+		if om.ZelloChannel != "" && !newSet[amKey{om.AgencyID, om.MeshChannel}] {
+			s.announceChannelRemoval(om.AgencyID, om.MeshChannel, om.ZelloChannel)
 		}
 	}
 
