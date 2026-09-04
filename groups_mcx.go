@@ -128,6 +128,57 @@ func (gm *GroupManager) adhocInfo(key string) *adhocChannel {
 	return gm.adhoc[key]
 }
 
+// findAdhocForSpeaker locates the ad-hoc group on `channel` that `user` belongs
+// to, searching the speaker's own agency first and then any mutual-aid-linked
+// agency. A group created in agency A and joined from agency B lives ONLY under
+// A's key, so a lookup keyed on the speaker's agency finds nothing when B talks
+// — which made cross-agency group audio work one way only.
+// Returns the group's key, or "" if the user isn't in an ad-hoc group here.
+func (s *Server) findAdhocForSpeaker(user, agencyID string, channel int) string {
+	if s.groupMgr == nil {
+		return ""
+	}
+	isMember := func(key string) bool {
+		for _, m := range s.groupMgr.adhocMembersOf(key) {
+			if m == user {
+				return true
+			}
+		}
+		return false
+	}
+	own := channelKey(agencyID, channel)
+	if a := s.groupMgr.adhocInfo(own); a != nil && (a.createdBy == user || isMember(own)) {
+		return own
+	}
+	for agency := range s.mutualAidAgencies(agencyID) {
+		if agency == agencyID {
+			continue
+		}
+		k := channelKey(agency, channel)
+		if a := s.groupMgr.adhocInfo(k); a != nil && (a.createdBy == user || isMember(k)) {
+			return k
+		}
+	}
+	return ""
+}
+
+// adhocMembersOf returns the callsigns in an ad-hoc group (empty if unknown).
+// Used to deliver group audio to members whose agency differs from the group's
+// (invited across a mutual-aid link).
+func (gm *GroupManager) adhocMembersOf(key string) []string {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+	a := gm.adhoc[key]
+	if a == nil {
+		return nil
+	}
+	out := make([]string, 0, len(a.members))
+	for u := range a.members {
+		out = append(out, u)
+	}
+	return out
+}
+
 // addMember records an accepted member. Returns false if the group is gone.
 func (gm *GroupManager) addMember(key, user string) bool {
 	gm.mu.Lock()
@@ -342,8 +393,12 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 	// Push the channel to the creator immediately (they're auto-joined).
 	s.sendPacket(SerializeChannelSwitch(&ChannelSwitchPacket{Channel: channel, ChannelName: pkt.GroupName, Active: true}), creator.Addr)
 
-	// Invite each requested member (skip the creator).
+	// Invite each requested member (skip the creator). Members may come from a
+	// mutual-aid partner agency: linked agencies work the same incident, and the
+	// roster now shows their users, so a group must be able to include them.
+	invitable := s.mutualAidAgencies(agencyID)
 	invite := buildGroupInvite(channel, pkt.GroupName, gtype, pkt.Creator)
+	invited := 0
 	for _, m := range pkt.Members {
 		if m == pkt.Creator {
 			continue
@@ -351,11 +406,12 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 		s.mu.RLock()
 		mc, _ := s.findClientByUsername(m)
 		s.mu.RUnlock()
-		if mc != nil && mc.AgencyID == agencyID {
+		if mc != nil && invitable[mc.AgencyID] {
 			s.sendPacket(invite, mc.Addr)
+			invited++
 		}
 	}
-	log.Printf("Ad-hoc group %q (ch %d, %s) created by %s [%s], invited %d", pkt.GroupName, channel, gtype, pkt.Creator, agencyID, len(pkt.Members))
+	log.Printf("Ad-hoc group %q (ch %d, %s) created by %s [%s], invited %d of %d requested", pkt.GroupName, channel, gtype, pkt.Creator, agencyID, invited, len(pkt.Members))
 }
 
 // handleGroupInviteResponse processes accept/decline of an ad-hoc invite.
@@ -369,8 +425,23 @@ func (s *Server) handleGroupInviteResponse(resp *GroupInviteResponse, addr *net.
 	if client == nil {
 		return
 	}
+	// The group lives under the CREATOR's agency key. A member invited from a
+	// mutual-aid partner agency would find nothing under their own key, so fall
+	// back to searching the linked agencies.
 	key := channelKey(client.AgencyID, resp.Channel)
 	a := s.groupMgr.adhocInfo(key)
+	if a == nil {
+		for agency := range s.mutualAidAgencies(client.AgencyID) {
+			if agency == client.AgencyID {
+				continue
+			}
+			k := channelKey(agency, resp.Channel)
+			if info := s.groupMgr.adhocInfo(k); info != nil {
+				key, a = k, info
+				break
+			}
+		}
+	}
 	if a == nil {
 		return // group gone/expired
 	}
@@ -454,9 +525,13 @@ func (s *Server) dissolveAdhocChannel(key string, channel int, name string) {
 	log.Printf("Ad-hoc group ch %d (%s) dissolved", channel, name)
 }
 
-// pickAdhocChannel finds a free high channel (10-19) not used by another ad-hoc,
-// Zello bridge, or mutual-aid link. Caller holds s.mu.
-func (s *Server) pickAdhocChannel(agencyID string) int {
+// usedHighChannels returns every channel in the high range (10-19) already
+// claimed by ANY feature: ad-hoc groups, Zello bridge mappings, and active
+// mutual-aid links. All three share the same range, so each allocator must see
+// all three or it will hand out a channel another feature already occupies
+// (an ad-hoc group landing on a live Zello channel, for example).
+// Caller must hold s.mu.
+func (s *Server) usedHighChannels() map[int]bool {
 	used := map[int]bool{}
 	if s.groupMgr != nil {
 		s.groupMgr.mu.Lock()
@@ -465,11 +540,25 @@ func (s *Server) pickAdhocChannel(agencyID string) int {
 		}
 		s.groupMgr.mu.Unlock()
 	}
+	for _, b := range s.zelloBridges {
+		for _, m := range b.effectiveMappings() {
+			// A shared mapping occupies its channel number in every agency it
+			// reaches, so the number is off-limits regardless of agency.
+			used[m.MeshChannel] = true
+		}
+	}
 	for _, l := range s.mutualAidLinks {
 		if l.Active {
 			used[l.Channel] = true
 		}
 	}
+	return used
+}
+
+// pickAdhocChannel finds a free high channel (10-19) not used by another ad-hoc
+// group, Zello bridge mapping, or mutual-aid link. Caller holds s.mu.
+func (s *Server) pickAdhocChannel(agencyID string) int {
+	used := s.usedHighChannels()
 	for ch := 10; ch <= 19; ch++ {
 		if !used[ch] {
 			return ch

@@ -28,14 +28,14 @@ import (
 // PHASE 1: connect + logon + join channel, report live status. No audio yet.
 // PHASE 2 (later): bidirectional Opus transcoded audio (requires libopus/cgo).
 type ZelloBridge struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"` // friendly label for the dashboard
+	ID   string `json:"id"`
+	Name string `json:"name"` // friendly label for the dashboard
 
 	// --- Zello Work side (connection) ---
-	Network     string `json:"network"`      // Zello Work subdomain, e.g. "myorg" (=> wss://myorg.zellowork.com/ws)
-	Username    string `json:"username"`     // bot account username
-	Password    string `json:"password"`     // bot account password
-	AuthToken   string `json:"auth_token"`   // API key from Zello Work admin console
+	Network   string `json:"network"`    // Zello Work subdomain, e.g. "myorg" (=> wss://myorg.zellowork.com/ws)
+	Username  string `json:"username"`   // bot account username
+	Password  string `json:"password"`   // bot account password
+	AuthToken string `json:"auth_token"` // API key from Zello Work admin console
 
 	// --- Channel mappings: one login can bridge SEVERAL Zello channels, each to
 	// its own MeshRelay channel IN ITS OWN AGENCY. Legacy single
@@ -45,8 +45,8 @@ type ZelloBridge struct {
 	// AgencyID is the bridge-level DEFAULT agency: it's used for mappings that
 	// don't set their own AgencyID (backward compatibility — every existing
 	// bridge's mappings inherit it). New mappings may each target any agency.
-	AgencyID     string         `json:"agency_id"` // default agency for mappings that omit one
-	Mappings     []ZelloMapping `json:"mappings"`  // zello_channel <-> mesh_channel pairs (each with its own agency)
+	AgencyID     string         `json:"agency_id"`               // default agency for mappings that omit one
+	Mappings     []ZelloMapping `json:"mappings"`                // zello_channel <-> mesh_channel pairs (each with its own agency)
 	ZelloChannel string         `json:"zello_channel,omitempty"` // legacy single mapping
 	MeshChannel  int            `json:"mesh_channel,omitempty"`  // legacy single mapping
 
@@ -59,21 +59,28 @@ type ZelloBridge struct {
 	LastError string `json:"last_error,omitempty"` // last connection error, if any
 
 	// runtime internals
-	conn     *websocket.Conn `json:"-"`
-	stopCh   chan struct{}   `json:"-"`
-	running  int32           `json:"-"`
-	seqID    uint32          `json:"-"`
+	conn    *websocket.Conn `json:"-"`
+	stopCh  chan struct{}   `json:"-"`
+	running int32           `json:"-"`
+	seqID   uint32          `json:"-"`
 
 	// --- audio bridge runtime (Phase 2) ---
-	announced   bool       `json:"-"` // whether channels have been announced to clients
-	writeMu     sync.Mutex `json:"-"` // serialize WS writes (JSON + binary audio)
-	statusMu    sync.Mutex `json:"-"`
+	announced bool       `json:"-"` // whether channels have been announced to clients
+	writeMu   sync.Mutex `json:"-"` // serialize WS writes (JSON + binary audio)
+	statusMu  sync.Mutex `json:"-"`
 	// inStreams maps a Zello stream_id -> the Zello channel name it belongs to,
 	// so inbound binary frames route to the right mapping (populated on
 	// on_stream_start).
-	inStreams     map[int64]string `json:"-"`
-	inStreamsMu   sync.Mutex       `json:"-"`
-	pendingOutIdx int              `json:"-"` // mapping index whose start_stream is awaiting a stream_id
+	inStreams   map[int64]string `json:"-"`
+	inStreamsMu sync.Mutex       `json:"-"`
+
+	// Rate-limiting state for the inbound-audio diagnostics (logDrop/logRelay).
+	logMu          sync.Mutex `json:"-"`
+	lastDropLog    time.Time  `json:"-"`
+	dropsSinceLog  int        `json:"-"`
+	lastRelayLog   time.Time  `json:"-"`
+	framesSinceLog int        `json:"-"`
+	pendingOutIdx  int        `json:"-"` // mapping index whose start_stream is awaiting a stream_id
 }
 
 // ZelloMapping is one Zello-channel <-> MeshRelay-channel pair within a bridge,
@@ -82,7 +89,13 @@ type ZelloBridge struct {
 type ZelloMapping struct {
 	ZelloChannel string `json:"zello_channel"`
 	MeshChannel  int    `json:"mesh_channel"`
-	AgencyID     string `json:"agency_id,omitempty"` // target agency; empty = bridge default
+	AgencyID     string `json:"agency_id,omitempty"` // primary target agency; empty = bridge default
+
+	// ExtraAgencies lets ONE Zello channel be shared with several MeshRelay
+	// agencies at once. The primary AgencyID above still owns the mapping (and
+	// its mesh channel number); these are additional agencies that receive the
+	// same audio and get the same channel announced to them.
+	ExtraAgencies []string `json:"extra_agencies,omitempty"`
 
 	// per-mapping outbound stream state (Mesh -> Zello for THIS zello channel)
 	outStreamID int64 `json:"-"`
@@ -104,6 +117,41 @@ func (b *ZelloBridge) effectiveMappings() []ZelloMapping {
 		}
 	}
 	return b.Mappings
+}
+
+// targetAgencies returns every agency this mapping feeds: the primary first,
+// then any extras, deduped and with empties dropped. Audio fan-out, channel
+// announcement, and removal all iterate this so a shared channel behaves
+// identically in every agency it reaches.
+func (m ZelloMapping) targetAgencies() []string {
+	out := make([]string, 0, 1+len(m.ExtraAgencies))
+	seen := map[string]bool{}
+	if m.AgencyID != "" {
+		out = append(out, m.AgencyID)
+		seen[m.AgencyID] = true
+	}
+	for _, a := range m.ExtraAgencies {
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+// servesAgency reports whether this mapping feeds the given agency, whether as
+// its primary or as one of the shared extras.
+func (m ZelloMapping) servesAgency(agencyID string) bool {
+	if m.AgencyID == agencyID {
+		return true
+	}
+	for _, a := range m.ExtraAgencies {
+		if a == agencyID {
+			return true
+		}
+	}
+	return false
 }
 
 // zelloBridgePublic is the JSON shape returned to the dashboard — never leaks
@@ -223,7 +271,21 @@ func (s *Server) startZelloBridge(b *ZelloBridge) {
 	go s.runZelloBridge(b)
 }
 
+// stopZelloBridge stops the bridge and tells clients its channels are gone.
 func (s *Server) stopZelloBridge(b *ZelloBridge) {
+	s.stopZelloBridgeInternal(b, true)
+}
+
+// stopZelloBridgeForRestart stops the runtime WITHOUT un-announcing its
+// channels. Used when a restart follows immediately (an edit or a remap): the
+// blanket un-announce made every bridged channel vanish from clients and come
+// back a moment later, which looks like a glitch on the phone. Channels that
+// genuinely went away are removed separately by announceChannelRemoval.
+func (s *Server) stopZelloBridgeForRestart(b *ZelloBridge) {
+	s.stopZelloBridgeInternal(b, false)
+}
+
+func (s *Server) stopZelloBridgeInternal(b *ZelloBridge, unannounce bool) {
 	if atomic.LoadInt32(&b.running) == 0 {
 		// Even if not "running" (e.g. stopped after a kick), make sure any lingering
 		// socket is closed so a subsequent start doesn't self-kick.
@@ -244,10 +306,13 @@ func (s *Server) stopZelloBridge(b *ZelloBridge) {
 		b.conn.Close()
 		b.conn = nil
 	}
-	// Tell clients the bridged channel is no longer active.
+	// Tell clients the bridged channel is no longer active — unless a restart
+	// is about to re-announce the very same channels.
 	if b.announced {
 		b.announced = false
-		s.notifyZelloBridgeChannels(b, false)
+		if unannounce {
+			s.notifyZelloBridgeChannels(b, false)
+		}
 	}
 	b.setStatus("disconnected", "")
 	// Give Zello a moment to fully tear down the old session before any restart.
@@ -569,7 +634,11 @@ func strconvParseInt(s string) (int64, error) {
 // Both sides are Opus 16kHz, so we pass the Opus bytes straight through, wrapped
 // in a MeshRelay Opus AudioPacket (sender = "Zello:<channel>").
 func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
+	// Every early return below is a reason inbound Zello audio silently stops.
+	// They are logged (rate-limited) because a bridge that "just doesn't work"
+	// is otherwise indistinguishable from one receiving nothing at all.
 	if len(frame) < 9 {
+		b.logDrop("short frame (%d bytes)", len(frame))
 		return
 	}
 	streamID := int64(binary.BigEndian.Uint32(frame[1:5]))
@@ -578,22 +647,25 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 	zch := b.inStreams[streamID]
 	b.inStreamsMu.Unlock()
 	if zch == "" {
-		return // unknown stream (missed on_stream_start)
+		b.logDrop("unknown stream %d (missed on_stream_start)", streamID)
+		return
 	}
 	meshCh := -1
-	meshAgency := ""
+	var meshAgencies []string
 	for _, m := range b.effectiveMappings() {
 		if m.ZelloChannel == zch {
 			meshCh = m.MeshChannel
-			meshAgency = m.AgencyID // this mapping's own agency
+			meshAgencies = m.targetAgencies() // primary + any shared agencies
 			break
 		}
 	}
-	if meshCh < 0 || meshAgency == "" {
+	if meshCh < 0 || len(meshAgencies) == 0 {
+		b.logDrop("no mapping for Zello channel %q (mapped=%d)", zch, len(b.effectiveMappings()))
 		return
 	}
 	opus := frame[9:]
 	if len(opus) == 0 {
+		b.logDrop("empty opus payload on %q", zch)
 		return
 	}
 
@@ -601,51 +673,102 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 	pkt := &AudioPacket{Username: sender, AudioData: opus, Codec: CodecOpus}
 	audioData := append([]byte{PacketTypeAudioOpus}, SerializeAudioPacket(pkt)...)
 
+	// Deliver into EVERY agency this Zello channel is shared with. sentTo is
+	// shared across all of them so a client reachable two ways (e.g. via its own
+	// agency and a mutual-aid partner) still receives exactly one copy.
 	sentTo := make(map[string]bool)
-	s.mu.RLock()
-	ch := s.channels[channelKey(meshAgency, meshCh)]
-	s.mu.RUnlock()
-	if ch != nil {
-		ch.mu.RLock()
-		for _, c := range ch.Clients {
-			s.sendPacket(audioData, c.Addr)
-			sentTo[c.Addr.String()] = true
-		}
-		ch.mu.RUnlock()
-	}
-
-	// Also send to clients MONITORING this channel (always-listen) but tuned
-	// elsewhere — this is what makes the monitor toggle hear Zello audio.
-	s.mu.RLock()
-	for _, mc := range s.clients {
-		if mc.AgencyID != meshAgency || sentTo[mc.Addr.String()] {
-			continue
-		}
-		for _, mch := range mc.MonitoredChannels {
-			if mch == meshCh {
-				s.sendPacket(audioData, mc.Addr)
-				sentTo[mc.Addr.String()] = true
-				break
-			}
-		}
-	}
-	s.mu.RUnlock()
-
-	for _, partner := range s.getMutualAidPartners(meshAgency, meshCh) {
+	for _, meshAgency := range meshAgencies {
 		s.mu.RLock()
-		pc := s.channels[channelKey(partner, meshCh)]
+		ch := s.channels[channelKey(meshAgency, meshCh)]
 		s.mu.RUnlock()
-		if pc != nil {
-			pc.mu.RLock()
-			for _, c := range pc.Clients {
+		if ch != nil {
+			ch.mu.RLock()
+			for _, c := range ch.Clients {
 				if !sentTo[c.Addr.String()] {
 					s.sendPacket(audioData, c.Addr)
 					sentTo[c.Addr.String()] = true
 				}
 			}
-			pc.mu.RUnlock()
+			ch.mu.RUnlock()
+		}
+
+		// Also send to clients MONITORING this channel (always-listen) but tuned
+		// elsewhere — this is what makes the monitor toggle hear Zello audio.
+		s.mu.RLock()
+		for _, mc := range s.clients {
+			if mc.AgencyID != meshAgency || sentTo[mc.Addr.String()] {
+				continue
+			}
+			for _, mch := range mc.MonitoredChannels {
+				if mch == meshCh {
+					s.sendPacket(audioData, mc.Addr)
+					sentTo[mc.Addr.String()] = true
+					break
+				}
+			}
+		}
+		s.mu.RUnlock()
+
+		for _, partner := range s.getMutualAidPartners(meshAgency, meshCh) {
+			s.mu.RLock()
+			pc := s.channels[channelKey(partner, meshCh)]
+			s.mu.RUnlock()
+			if pc != nil {
+				pc.mu.RLock()
+				for _, c := range pc.Clients {
+					if !sentTo[c.Addr.String()] {
+						s.sendPacket(audioData, c.Addr)
+						sentTo[c.Addr.String()] = true
+					}
+				}
+				pc.mu.RUnlock()
+			}
 		}
 	}
+
+	// Zero recipients means the audio arrived and was mapped, but no client is
+	// on (or monitoring) the channel — a different problem from not receiving.
+	agencyLabel := strings.Join(meshAgencies, "+")
+	if len(sentTo) == 0 {
+		b.logDrop("%q -> ch %d [%s]: no listeners", zch, meshCh, agencyLabel)
+	} else {
+		b.logRelay(zch, meshCh, agencyLabel, len(sentTo))
+	}
+}
+
+// logDrop reports why inbound Zello audio was discarded, at most once every 5s
+// per bridge so a stuck stream can't flood the log at 50 frames/second.
+func (b *ZelloBridge) logDrop(format string, args ...interface{}) {
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	now := time.Now()
+	if now.Sub(b.lastDropLog) < 5*time.Second {
+		b.dropsSinceLog++
+		return
+	}
+	suffix := ""
+	if b.dropsSinceLog > 0 {
+		suffix = fmt.Sprintf(" (+%d more since last)", b.dropsSinceLog)
+	}
+	log.Printf("Zello bridge %q: dropped audio — "+format+"%s",
+		append(append([]interface{}{b.Name}, args...), suffix)...)
+	b.lastDropLog = now
+	b.dropsSinceLog = 0
+}
+
+// logRelay confirms inbound audio is flowing, once every 5s per bridge.
+func (b *ZelloBridge) logRelay(zch string, meshCh int, agency string, listeners int) {
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	now := time.Now()
+	if now.Sub(b.lastRelayLog) < 5*time.Second {
+		b.framesSinceLog++
+		return
+	}
+	log.Printf("Zello bridge %q: %q -> ch %d [%s], %d listener(s), %d frames in last window",
+		b.Name, zch, meshCh, agency, listeners, b.framesSinceLog+1)
+	b.lastRelayLog = now
+	b.framesSinceLog = 0
 }
 
 // ===== Outbound: MeshRelay -> Zello =====
@@ -667,7 +790,7 @@ func (s *Server) forwardMeshAudioToZello(agencyID string, channel int, sender st
 				continue
 			}
 			for _, m := range b.effectiveMappings() {
-				if m.AgencyID == agencyID && m.MeshChannel == channel {
+				if m.servesAgency(agencyID) && m.MeshChannel == channel {
 					hasBridge = true
 					break
 				}
@@ -691,7 +814,9 @@ func (s *Server) forwardMeshAudioToZello(agencyID string, channel int, sender st
 	for _, b := range s.zelloBridges {
 		if b.Enabled && atomic.LoadInt32(&b.running) == 1 {
 			for i, m := range b.effectiveMappings() {
-				if m.AgencyID == agencyID && m.MeshChannel == channel {
+				// A shared mapping forwards from ANY of its agencies, so a
+				// client in an extra agency can talk to Zello too.
+				if m.servesAgency(agencyID) && m.MeshChannel == channel {
 					target, mapIdx = b, i
 					break
 				}
@@ -815,20 +940,12 @@ func (b *ZelloBridge) stopOutboundStreamIfIdle() {
 func timeNowNano() int64 { return time.Now().UnixNano() }
 
 // pickZelloBridgeChannel returns a free high channel slot (10-19), avoiding
-// numbers already used by other bridges/mappings or active mutual-aid links.
+// numbers already used by other bridges/mappings, ad-hoc groups, or active
+// mutual-aid links.
 // Caller must hold s.mu.
 func (s *Server) pickZelloBridgeChannel() int {
-	used := map[int]bool{}
-	for _, b := range s.zelloBridges {
-		for _, m := range b.effectiveMappings() {
-			used[m.MeshChannel] = true
-		}
-	}
-	for _, l := range s.mutualAidLinks {
-		if l.Active {
-			used[l.Channel] = true
-		}
-	}
+	// Shared with ad-hoc groups and mutual aid — see usedHighChannels.
+	used := s.usedHighChannels()
 	for ch := 10; ch <= 19; ch++ {
 		if !used[ch] {
 			return ch
@@ -870,29 +987,32 @@ func (s *Server) notifyZelloBridgeChannels(b *ZelloBridge, active bool) {
 
 	for _, m := range maps {
 		name := m.ZelloChannel
-		if name == "" || m.AgencyID == "" {
+		if name == "" {
 			continue
 		}
-		// Clients in this mapping's agency.
-		s.mu.RLock()
-		var addrs []*net.UDPAddr
-		for _, c := range s.clients {
-			if c.AgencyID == m.AgencyID {
-				addrs = append(addrs, c.Addr)
+		// Announce into every agency this mapping is shared with, so the bridged
+		// channel appears for all of them, not just the primary.
+		for _, agency := range m.targetAgencies() {
+			s.mu.RLock()
+			var addrs []*net.UDPAddr
+			for _, c := range s.clients {
+				if c.AgencyID == agency {
+					addrs = append(addrs, c.Addr)
+				}
 			}
-		}
-		s.mu.RUnlock()
+			s.mu.RUnlock()
 
-		pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
-			Channel:     m.MeshChannel,
-			ChannelName: name,
-			Active:      active,
-		})
-		for _, a := range addrs {
-			s.sendPacket(pkt, a)
+			pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
+				Channel:     m.MeshChannel,
+				ChannelName: name,
+				Active:      active,
+			})
+			for _, a := range addrs {
+				s.sendPacket(pkt, a)
+			}
+			log.Printf("Zello bridge %s: announced channel %d as %q to %d clients in %s (active=%v)",
+				b.Name, m.MeshChannel, name, len(addrs), agency, active)
 		}
-		log.Printf("Zello bridge %s: announced channel %d as %q to %d clients in %s (active=%v)",
-			b.Name, m.MeshChannel, name, len(addrs), m.AgencyID, active)
 	}
 }
 
@@ -1017,9 +1137,11 @@ func (s *Server) handleUpdateZelloBridge(w http.ResponseWriter, r *http.Request)
 	b.MeshChannel = req.MeshChannel
 	s.mu.Unlock()
 
-	// Restart the runtime if it was live, to pick up new settings.
+	// Restart the runtime if it was live, to pick up new settings. Same as the
+	// remap path: don't un-announce, or the channel blinks out on every client
+	// and comes straight back.
 	if wasEnabled {
-		s.stopZelloBridge(b)
+		s.stopZelloBridgeForRestart(b)
 		s.startZelloBridge(b)
 	}
 	if err := s.saveZelloBridges(); err != nil {
@@ -1108,14 +1230,60 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.agencies[agency]; !ok {
 			agency = b.AgencyID
 		}
-		seenZ[m.ZelloChannel] = true
-		mesh := m.MeshChannel
-		if mesh < 10 || isUsed(agency, mesh) {
-			mesh = pickHigh(agency)
-		} else {
-			markUsed(agency, mesh)
+		// Extra agencies this Zello channel is shared with. Keep only agencies
+		// that exist and aren't the primary (which is already covered).
+		var extras []string
+		seenA := map[string]bool{agency: true}
+		for _, ea := range m.ExtraAgencies {
+			if ea == "" || seenA[ea] {
+				continue
+			}
+			if _, ok := s.agencies[ea]; !ok {
+				continue // unknown agency — drop rather than invent one
+			}
+			seenA[ea] = true
+			extras = append(extras, ea)
 		}
-		clean = append(clean, ZelloMapping{ZelloChannel: m.ZelloChannel, MeshChannel: mesh, AgencyID: agency})
+		seenZ[m.ZelloChannel] = true
+		// The mesh channel number must be free in EVERY agency it will appear
+		// in, since a shared mapping claims the same number in all of them.
+		mesh := m.MeshChannel
+		freeEverywhere := func(ch int) bool {
+			if ch < 10 || ch > 19 {
+				return false
+			}
+			if isUsed(agency, ch) {
+				return false
+			}
+			for _, ea := range extras {
+				if isUsed(ea, ch) {
+					return false
+				}
+			}
+			return true
+		}
+		if !freeEverywhere(mesh) {
+			mesh = -1
+			for ch := 10; ch <= 19; ch++ {
+				if freeEverywhere(ch) {
+					mesh = ch
+					break
+				}
+			}
+			if mesh < 0 {
+				mesh = pickHigh(agency) // no slot free in all — fall back
+			}
+		}
+		markUsed(agency, mesh)
+		for _, ea := range extras {
+			markUsed(ea, mesh)
+		}
+		clean = append(clean, ZelloMapping{
+			ZelloChannel:  m.ZelloChannel,
+			MeshChannel:   mesh,
+			AgencyID:      agency,
+			ExtraAgencies: extras,
+		})
 	}
 	b.Mappings = clean
 	b.ZelloChannel = "" // clear legacy single fields; mappings are authoritative now
@@ -1131,16 +1299,25 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 	}
 	newSet := map[amKey]bool{}
 	for _, m := range clean {
-		newSet[amKey{m.AgencyID, m.MeshChannel}] = true
+		for _, a := range m.targetAgencies() {
+			newSet[amKey{a, m.MeshChannel}] = true
+		}
 	}
+	// Remove from every agency the old mapping reached — including shared ones
+	// that were just un-shared, which would otherwise keep a dead channel.
 	for _, om := range oldMappings {
-		if om.ZelloChannel != "" && !newSet[amKey{om.AgencyID, om.MeshChannel}] {
-			s.announceChannelRemoval(om.AgencyID, om.MeshChannel, om.ZelloChannel)
+		if om.ZelloChannel == "" {
+			continue
+		}
+		for _, a := range om.targetAgencies() {
+			if !newSet[amKey{a, om.MeshChannel}] {
+				s.announceChannelRemoval(a, om.MeshChannel, om.ZelloChannel)
+			}
 		}
 	}
 
 	if enabled {
-		s.stopZelloBridge(b) // closes conn, waits
+		s.stopZelloBridgeForRestart(b) // closes conn, waits; keeps channels announced
 		s.startZelloBridge(b)
 	}
 	if err := s.saveZelloBridges(); err != nil {
@@ -1228,9 +1405,10 @@ func zelloErr(w http.ResponseWriter, code int, msg string) {
 // ===== Zello Work REST API: list channels =====
 //
 // Mirrors the working ZelloATAKPlugin flow:
-//   1. GET  /user/gettoken            -> token, sid
-//   2. POST /user/login?sid=<sid>     with md5(md5(pw)+token+apiKey)
-//   3. GET  /channel/get?sid=<sid>    -> channel list
+//  1. GET  /user/gettoken            -> token, sid
+//  2. POST /user/login?sid=<sid>     with md5(md5(pw)+token+apiKey)
+//  3. GET  /channel/get?sid=<sid>    -> channel list
+//
 // Returns the channel names the account can use.
 func zelloFetchChannels(network, apiKey, username, password string) ([]string, error) {
 	network = strings.TrimSpace(network)
@@ -1353,10 +1531,18 @@ func (s *Server) handleZelloChannels(w http.ResponseWriter, r *http.Request) {
 	if req.BridgeID != "" {
 		s.mu.RLock()
 		if b, ok := s.zelloBridges[req.BridgeID]; ok {
-			if req.Network == "" { req.Network = b.Network }
-			if req.APIKey == "" { req.APIKey = b.AuthToken }
-			if req.Username == "" { req.Username = b.Username }
-			if req.Password == "" { req.Password = b.Password }
+			if req.Network == "" {
+				req.Network = b.Network
+			}
+			if req.APIKey == "" {
+				req.APIKey = b.AuthToken
+			}
+			if req.Username == "" {
+				req.Username = b.Username
+			}
+			if req.Password == "" {
+				req.Password = b.Password
+			}
 		}
 		s.mu.RUnlock()
 	}

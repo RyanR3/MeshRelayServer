@@ -1642,7 +1642,8 @@ function renderZelloBridges(bridges) {
         const connected = b.status === 'connected';
         const mappings = Array.isArray(b.mappings) ? b.mappings : [];
         const rowsHtml = mappings.map((m, idx) =>
-            mappingRowHtml(safeId, idx, m.zello_channel, m.mesh_channel, m.agency_id || b.agency_id)).join('');
+            mappingRowHtml(safeId, idx, m.zello_channel, m.mesh_channel,
+                           m.agency_id || b.agency_id, m.extra_agencies || [])).join('');
         const mapRow = connected ? `
             <div class="zb-maps" id="zbmaps-${safeId}" data-agency="${escapeAttr(b.agency_id || '')}">
                 ${rowsHtml || '<div class="zb-map-empty">No channels mapped yet. Add one below.</div>'}
@@ -1691,9 +1692,10 @@ function mappingAgencyOptions(sel) {
     ).join('');
 }
 
-// One mapping row: Zello channel → Agency → Mesh channel + remove (×).
-function mappingRowHtml(safeId, idx, zello, mesh, agency) {
+// One mapping row: Zello channel → Agency → Also shared with → Mesh channel + ×.
+function mappingRowHtml(safeId, idx, zello, mesh, agency, extras) {
     const z = zello || '';
+    const ex = Array.isArray(extras) ? extras : [];
     return `<div class="zb-map" data-mapidx="${idx}">
         <div class="zb-map-field">
             <label>Zello channel</label>
@@ -1704,7 +1706,13 @@ function mappingRowHtml(safeId, idx, zello, mesh, agency) {
         <span class="zb-arrow">&#8646;</span>
         <div class="zb-map-field">
             <label>Agency</label>
-            <select class="zbmap-agency">${mappingAgencyOptions(agency || '')}</select>
+            <select class="zbmap-agency" onchange="onMappingAgencyChange(this)">${mappingAgencyOptions(agency || '')}</select>
+        </div>
+        <div class="zb-map-field zb-share">
+            <label>Also shared with</label>
+            <button type="button" class="zb-share-btn" onclick="toggleSharePanel(this)"
+                    data-extras="${escapeAttr(ex.join(','))}">${escapeHtml(shareLabel(ex))}</button>
+            <div class="zb-share-panel hidden">${sharePanelOptions(agency || '', ex)}</div>
         </div>
         <div class="zb-map-field">
             <label>MeshRelay channel</label>
@@ -1713,6 +1721,76 @@ function mappingRowHtml(safeId, idx, zello, mesh, agency) {
         <button class="zb-map-remove" title="Remove" onclick="this.closest('.zb-map').remove()">&times;</button>
     </div>`;
 }
+
+// Summary text on the picker button.
+function shareLabel(extras) {
+    const n = (extras || []).length;
+    if (n === 0) return 'None';
+    if (n === 1) {
+        const a = (agenciesList || []).find(x => x.id === extras[0]);
+        return a ? (a.name || a.id) : extras[0];
+    }
+    return `${n} agencies`;
+}
+
+// Checkbox list of every agency EXCEPT the primary (already implied).
+function sharePanelOptions(primary, extras) {
+    const list = Array.isArray(agenciesList) ? agenciesList : [];
+    if (list.length === 0) return `<div class="zb-share-empty">No agencies loaded</div>`;
+    const sel = new Set(extras || []);
+    const rows = list.map(a => {
+        const isPrimary = a.id === primary;
+        const label = escapeHtml(a.name || a.id);
+        if (isPrimary) {
+            return `<label class="zb-share-opt is-primary" title="Primary agency for this mapping">
+                <input type="checkbox" checked disabled> ${label} <span>(primary)</span></label>`;
+        }
+        return `<label class="zb-share-opt">
+            <input type="checkbox" value="${escapeAttr(a.id)}" ${sel.has(a.id) ? 'checked' : ''}
+                   onchange="onShareToggle(this)"> ${label}</label>`;
+    }).join('');
+    return rows;
+}
+
+// Open/close one picker (closing any other that's open).
+function toggleSharePanel(btn) {
+    const panel = btn.parentElement.querySelector('.zb-share-panel');
+    const wasHidden = panel.classList.contains('hidden');
+    document.querySelectorAll('.zb-share-panel').forEach(p => p.classList.add('hidden'));
+    if (wasHidden) panel.classList.remove('hidden');
+}
+
+// A checkbox changed: refresh the button's summary + stored value.
+function onShareToggle(cb) {
+    const field = cb.closest('.zb-share');
+    const btn = field.querySelector('.zb-share-btn');
+    const chosen = Array.from(field.querySelectorAll('.zb-share-panel input[type=checkbox]'))
+        .filter(x => x.checked && !x.disabled).map(x => x.value);
+    btn.setAttribute('data-extras', chosen.join(','));
+    btn.textContent = shareLabel(chosen);
+    btn.classList.toggle('has-sel', chosen.length > 0);
+}
+
+// Changing the PRIMARY agency rebuilds the panel so the new primary is shown as
+// implied, and drops it from the extras if it was checked there.
+function onMappingAgencyChange(sel) {
+    const row = sel.closest('.zb-map');
+    const field = row.querySelector('.zb-share');
+    const btn = field.querySelector('.zb-share-btn');
+    const panel = field.querySelector('.zb-share-panel');
+    const extras = (btn.getAttribute('data-extras') || '').split(',')
+        .filter(v => v && v !== sel.value);
+    panel.innerHTML = sharePanelOptions(sel.value, extras);
+    btn.setAttribute('data-extras', extras.join(','));
+    btn.textContent = shareLabel(extras);
+    btn.classList.toggle('has-sel', extras.length > 0);
+}
+
+// Clicking outside closes any open picker.
+document.addEventListener('click', function (e) {
+    if (e.target.closest('.zb-share')) return;
+    document.querySelectorAll('.zb-share-panel').forEach(p => p.classList.add('hidden'));
+});
 
 // Add a blank mapping row to a card, then populate its Zello dropdown.
 // Defaults the agency to the bridge's default agency (stashed on the card).
@@ -1724,7 +1802,7 @@ function addMappingRow(id) {
     if (emptyMsg) emptyMsg.remove();
     const defAgency = wrap.getAttribute('data-agency') || '';
     const tmp = document.createElement('div');
-    tmp.innerHTML = mappingRowHtml(id, Date.now(), '', 10, defAgency);
+    tmp.innerHTML = mappingRowHtml(id, Date.now(), '', 10, defAgency, []);
     const row = tmp.firstElementChild;
     controls.before(row);
     if (zelloCardChannels[id]) fillZelloSelect(row.querySelector('.zbmap-zello'), zelloCardChannels[id], '');
@@ -1765,6 +1843,17 @@ function loadCardZelloChannels(id) {
             document.querySelectorAll(`#zbmaps-${id} .zbmap-agency`).forEach(sel => {
                 sel.innerHTML = mappingAgencyOptions(sel.value);
             });
+            // Agencies may have loaded after the first render — rebuild each
+            // share panel from its stored selection so it isn't left empty.
+            document.querySelectorAll(`#zbmaps-${id} .zb-share`).forEach(field => {
+                const btn = field.querySelector('.zb-share-btn');
+                const panel = field.querySelector('.zb-share-panel');
+                const primary = field.closest('.zb-map').querySelector('.zbmap-agency').value;
+                const extras = (btn.getAttribute('data-extras') || '').split(',').filter(v => v);
+                panel.innerHTML = sharePanelOptions(primary, extras);
+                btn.textContent = shareLabel(extras);
+                btn.classList.toggle('has-sel', extras.length > 0);
+            });
         })
         .catch(() => {});
 }
@@ -1778,10 +1867,14 @@ function applyZelloMapping(id) {
         const z = row.querySelector('.zbmap-zello');
         const m = row.querySelector('.zbmap-mesh');
         const a = row.querySelector('.zbmap-agency');
+        const shareBtn = row.querySelector('.zb-share-btn');
+        const extras = ((shareBtn && shareBtn.getAttribute('data-extras')) || '')
+            .split(',').filter(v => v);
         if (z && z.value) mappings.push({
             zello_channel: z.value,
             mesh_channel: parseInt(m.value, 10) || 0,
-            agency_id: (a && a.value) || ''
+            agency_id: (a && a.value) || '',
+            extra_agencies: extras
         });
     });
     fetch(`/api/zello-bridges/${id}/map`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mappings }) })

@@ -1750,6 +1750,13 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	// Notify in background so the HTTP response returns immediately
 	go s.notifyMutualAidChannel(req.Agencies, channel, req.ChannelName, true)
+	// Linked agencies can now see each other, so push a fresh roster to each —
+	// otherwise their merged user list stays stale until the next join/leave.
+	go func(agencies []string) {
+		for _, a := range agencies {
+			s.broadcastRoster(a)
+		}
+	}(append([]string(nil), req.Agencies...))
 
 	if err := s.saveMutualAid(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1784,6 +1791,12 @@ func (s *Server) handleDeleteMutualAid(w http.ResponseWriter, r *http.Request) {
 
 	// Notify clients in background so HTTP response returns immediately
 	go s.notifyMutualAidChannel(agencies, oldChannel, channelName, false)
+	// The link is gone: re-push each agency's roster so partner users drop off.
+	go func(ags []string) {
+		for _, a := range ags {
+			s.broadcastRoster(a)
+		}
+	}(append([]string(nil), agencies...))
 
 	s.saveMutualAid()
 

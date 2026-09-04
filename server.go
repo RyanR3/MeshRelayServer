@@ -908,6 +908,35 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	}
 	s.mu.RUnlock()
 
+	// Ad-hoc group members invited from a mutual-aid partner agency sit on this
+	// channel under the CREATOR's agency key, so the agency-scoped fan-out above
+	// misses them. Deliver by group membership instead.
+	// Find the group by MEMBERSHIP, not by the speaker's agency key: the group
+	// lives under the creator's key, so an invited partner talking would
+	// otherwise match nothing and their audio would never leave their agency.
+	if gkey := s.findAdhocForSpeaker(packet.Username, client.AgencyID, client.Channel); gkey != "" {
+		members := s.groupMgr.adhocMembersOf(gkey)
+		creator := ""
+		if a := s.groupMgr.adhocInfo(gkey); a != nil {
+			creator = a.createdBy
+		}
+		s.mu.RLock()
+		for _, u := range append(members, creator) {
+			if u == "" || u == packet.Username {
+				continue
+			}
+			mc, _ := s.findClientByUsername(u)
+			if mc == nil || sentTo[mc.Addr.String()] {
+				continue
+			}
+			s.sendPacket(audioData, mc.Addr)
+			sentTo[mc.Addr.String()] = true
+			relayCount++
+		}
+		s.mu.RUnlock()
+	}
+
+
 	// Check for mutual aid partners — also relay to partner agencies' same channel
 	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
 	if len(partners) > 0 {
@@ -918,15 +947,45 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		partnerChannel := s.channels[partnerKey]
 		if partnerChannel != nil {
 			partnerChannel.mu.RLock()
-			partnerCount := len(partnerChannel.Clients)
+			partnerCount := 0
 			for _, otherClient := range partnerChannel.Clients {
+				if sentTo[otherClient.Addr.String()] {
+					continue // already received it
+				}
 				s.sendPacket(audioData, otherClient.Addr)
+				sentTo[otherClient.Addr.String()] = true
+				partnerCount++
 				relayCount++
 			}
 			partnerChannel.mu.RUnlock()
 			log.Printf("Audio mutual aid: relayed to %d clients in %s", partnerCount, partnerKey)
 		} else {
 			log.Printf("Audio mutual aid: channel %s NOT FOUND", partnerKey)
+		}
+
+		// Mutual aid is inherently CROSS-agency, so the same-agency monitor
+		// fan-out above never reaches the partner side. Deliver to partner-agency
+		// clients who MONITOR this channel but aren't tuned to it — otherwise
+		// always-listen on a mutual-aid channel hears nothing from the partner.
+		monitorCount := 0
+		s.mu.RLock()
+		for _, mc := range s.clients {
+			if mc.AgencyID != partnerAgency || sentTo[mc.Addr.String()] {
+				continue
+			}
+			for _, ch := range mc.MonitoredChannels {
+				if ch == client.Channel {
+					s.sendPacket(monitorAudioData, mc.Addr)
+					sentTo[mc.Addr.String()] = true
+					monitorCount++
+					relayCount++
+					break
+				}
+			}
+		}
+		s.mu.RUnlock()
+		if monitorCount > 0 {
+			log.Printf("Audio mutual aid: relayed to %d monitor(s) in %s", monitorCount, partnerAgency)
 		}
 	}
 
@@ -1364,20 +1423,82 @@ func (s *Server) removeClient(client *Client) {
 // agency to every client in that agency. Called on join/leave and periodically
 // so clients can show an accurate online-users list in server mode. Must be
 // called WITHOUT s.mu held (it takes an RLock internally, then sends after).
+// mutualAidAgencies returns every agency reachable from agencyID over an ACTIVE
+// mutual-aid link (on any channel), including agencyID itself. Two agencies
+// sharing a link are working the same incident, so their users need to see each
+// other — for the roster, and for building an ad-hoc group across both.
+// Caller must NOT hold s.mu (it takes RLock itself).
+func (s *Server) mutualAidAgencies(agencyID string) map[string]bool {
+	out := map[string]bool{agencyID: true}
+	if agencyID == "" {
+		return out
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mutualAidAgenciesLocked(agencyID)
+}
+
+// mutualAidAgenciesLocked is mutualAidAgencies for callers already holding s.mu.
+func (s *Server) mutualAidAgenciesLocked(agencyID string) map[string]bool {
+	out := map[string]bool{agencyID: true}
+	if agencyID == "" {
+		return out
+	}
+	for _, link := range s.mutualAidLinks {
+		if !link.Active {
+			continue
+		}
+		member := false
+		for _, a := range link.Agencies {
+			if a == agencyID {
+				member = true
+				break
+			}
+		}
+		if !member {
+			continue
+		}
+		for _, a := range link.Agencies {
+			if a != "" {
+				out[a] = true
+			}
+		}
+	}
+	return out
+}
+
 func (s *Server) broadcastRoster(agencyID string) {
 	if agencyID == "" {
 		return
 	}
 
 	s.mu.RLock()
+	// Include mutual-aid partners: linked agencies are working together, so
+	// their users belong in each other's roster (otherwise they're invisible
+	// for direct calls and ad-hoc group building).
+	visible := s.mutualAidAgenciesLocked(agencyID)
 	names := make([]string, 0, len(s.clients))
 	addrs := make([]*net.UDPAddr, 0, len(s.clients))
 	for _, c := range s.clients {
-		if c.AgencyID != agencyID {
+		if !visible[c.AgencyID] {
 			continue
 		}
-		names = append(names, c.Username)
-		addrs = append(addrs, c.Addr)
+		// Tag users from a PARTNER agency with that agency's name, so a group
+		// builder can tell whose people are whose. Own-agency users stay bare.
+		name := c.Username
+		if c.AgencyID != agencyID {
+			label := c.AgencyID
+			if ag, ok := s.agencies[c.AgencyID]; ok && ag.Name != "" {
+				label = ag.Name
+			}
+			name = c.Username + rosterAgencySuffix + label + ")"
+		}
+		names = append(names, name)
+		// The roster packet only goes to OUR agency's clients; partners get
+		// their own roster built from their side of the link.
+		if c.AgencyID == agencyID {
+			addrs = append(addrs, c.Addr)
+		}
 	}
 	s.mu.RUnlock()
 
@@ -1741,10 +1862,34 @@ func (s *Server) findClientByAddr(addr *net.UDPAddr) (*Client, string) {
 }
 
 // findClientByUsername searches connected clients by username.
+// rosterAgencySuffix separates a username from the agency label the server adds
+// for mutual-aid partners in the roster (e.g. "medic1 (Fire Dept)"). Clients
+// echo the displayed string back when inviting or calling, so lookups must
+// tolerate it. The username itself is unchanged on the wire.
+const rosterAgencySuffix = " ("
+
+// stripRosterLabel removes a trailing " (Agency)" decoration, if present.
+func stripRosterLabel(name string) string {
+	i := strings.LastIndex(name, rosterAgencySuffix)
+	if i > 0 && strings.HasSuffix(name, ")") {
+		return name[:i]
+	}
+	return name
+}
+
 func (s *Server) findClientByUsername(username string) (*Client, string) {
 	for key, client := range s.clients {
 		if client.Username == username {
 			return client, key
+		}
+	}
+	// Retry without a roster agency label, so a client echoing the displayed
+	// name ("medic1 (Fire Dept)") still resolves to the real user.
+	if bare := stripRosterLabel(username); bare != username {
+		for key, client := range s.clients {
+			if client.Username == bare {
+				return client, key
+			}
 		}
 	}
 	return nil, ""
