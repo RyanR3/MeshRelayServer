@@ -101,6 +101,13 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
+	// LMR (VHF/UHF/P25) radio bridges (super_admin)
+	api.HandleFunc("/lmr-bridges", s.requireSuperAdmin(s.handleGetLMRBridges)).Methods("GET")
+	api.HandleFunc("/lmr-bridges", s.requireSuperAdmin(s.handleCreateLMRBridge)).Methods("POST")
+	api.HandleFunc("/lmr-bridges/{id}", s.requireSuperAdmin(s.handleUpdateLMRBridge)).Methods("PUT")
+	api.HandleFunc("/lmr-bridges/{id}", s.requireSuperAdmin(s.handleDeleteLMRBridge)).Methods("DELETE")
+	api.HandleFunc("/lmr-bridges/{id}/toggle", s.requireSuperAdmin(s.handleToggleLMRBridge)).Methods("POST")
+
 	// Zello Work channel bridges (super_admin)
 	api.HandleFunc("/zello-bridges", s.requireSuperAdmin(s.handleGetZelloBridges)).Methods("GET")
 	api.HandleFunc("/zello-bridges", s.requireSuperAdmin(s.handleCreateZelloBridge)).Methods("POST")

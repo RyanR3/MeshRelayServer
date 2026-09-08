@@ -53,6 +53,8 @@ function navigateTo(pageName) {
         // Load agencies for the per-mapping agency dropdowns, then bridges.
         fetch('/api/agencies').then(r => r.json()).then(a => { agenciesList = a || []; }).catch(() => {});
         fetchZelloBridges();
+    } else if (pageName === 'lmr-bridges') {
+        fetchLmrBridges();
     } else if (pageName === 'activity') {
         fetchActivityPage();
     } else if (pageName === 'settings') {
@@ -2879,3 +2881,320 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 });
+
+
+// ===== LMR Bridges — drag-and-drop radio bridge builder =====
+//
+// Same interaction as Mutual Aid: drag agencies from the left pool onto a
+// bridge. The difference is what a bridge IS — a radio gateway with its own
+// login, on a channel from the dedicated LMR block (100-119), shared by every
+// agency dropped onto it. Agencies see it as a named channel ("LMR Bridge")
+// pushed the same way a mutual-aid patch is.
+//
+// The agency cards reuse the ma-* drag handlers, so a card dragged here behaves
+// exactly as it does on the Mutual Aid page.
+
+let lmrBuilderSeq = 0;                 // unique id per new-bridge builder
+const lmrBuilders = {};                // builderId -> Set(agencyId)
+const lmrEditSets = {};                // bridgeId  -> Set(agencyId) for live edits
+
+function fetchLmrBridges() {
+    Promise.all([
+        fetch('/api/agencies').then(r => r.json()).catch(() => []),
+        fetch('/api/lmr-bridges').then(r => r.json()).catch(() => [])
+    ]).then(([agencies, bridges]) => {
+        agenciesList = agencies || [];
+        renderLmrAgencyPool(agenciesList);
+        renderLmrBridges(bridges || []);
+    }).catch(err => console.error('Failed to load LMR bridges:', err));
+}
+
+function renderLmrAgencyPool(agencies) {
+    const pool = document.getElementById('lmr-agency-pool');
+    const countEl = document.getElementById('lmr-agency-count');
+    if (!pool) return;
+    if (countEl) countEl.textContent = agencies.length;
+
+    if (!agencies.length) {
+        pool.innerHTML = '<div class="ma-empty">No agencies yet. Create agencies first.</div>';
+        return;
+    }
+    pool.innerHTML = agencies.map(a => `
+        <div class="ma-agency-card" draggable="true" data-agency-id="${escapeAttr(a.id)}"
+             ondragstart="maDragStart(event)" ondragend="maDragEnd(event)">
+            <div class="ma-agency-name">${escapeHtml(a.name)}</div>
+            <div class="ma-agency-id">${escapeHtml(a.id)}</div>
+        </div>`).join('');
+}
+
+function renderLmrBridges(bridges) {
+    const wrap = document.getElementById('lmr-bridges-list');
+    if (!wrap) return;
+
+    let existingHtml = '';
+    if (bridges.length) {
+        existingHtml = '<div class="ma-existing-label">Active Bridges</div>' + bridges.map(b => {
+            const safeId = escapeAttr(b.id);
+            const names = b.agency_names || b.agencies || [];
+            // Existing bridges are editable: each chip can be removed, and the
+            // card is itself a dropzone for adding more agencies.
+            const chips = (b.agencies || []).map((aid, i) =>
+                `<span class="ma-chip">${escapeHtml(names[i] || aid)}<button class="ma-chip-x"
+                    onclick="lmrRemoveAgency('${safeId}','${escapeAttr(aid)}')"
+                    title="Remove agency">&times;</button></span>`).join('');
+            const dot = b.online ? 'lmr-dot-on' : 'lmr-dot-off';
+            const state = b.enabled ? 'Enabled' : 'Disabled';
+            return `<div class="ma-patch-card ma-patch-existing" id="lmr-card-${safeId}">
+                <div class="ma-patch-card-head">
+                    <span class="ma-patch-title">
+                        <span class="lmr-dot ${dot}" title="${b.online ? 'Gateway connected' : 'Gateway offline'}"></span>
+                        ${escapeHtml(b.channel_name || b.name || 'LMR Bridge')}
+                    </span>
+                    <button class="ma-patch-remove" onclick="deleteLmrBridge('${safeId}')" title="Remove bridge">&times;</button>
+                </div>
+                <div class="ma-dropzone lmr-edit-zone"
+                     ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
+                     ondrop="lmrDropExisting(event,'${safeId}')">
+                    <div class="ma-patch-chips">${chips}</div>
+                    <div class="ma-dropzone-hint lmr-edit-hint">Drop an agency here to add it</div>
+                </div>
+                <div class="ma-patch-meta">
+                    Channel ${b.channel} &middot; gateway login <code>${escapeHtml(b.username || '')}</code>
+                    &middot; ${(b.agencies || []).length} agencies
+                    &middot; <a href="#" onclick="toggleLmrBridge('${safeId}');return false;">${state}</a>
+                </div>
+                <div class="lmr-actions">
+                    <button class="btn-secondary lmr-qr-btn"
+                            onclick="showLmrBridgeQr('${escapeAttr(b.username || '')}','${escapeAttr(b.agencies && b.agencies[0] || '')}')">
+                        Enrollment QR
+                    </button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    const openBuilders = wrap.querySelectorAll('.ma-patch-builder');
+    if (openBuilders.length === 0) {
+        wrap.innerHTML = '';
+        addLmrBuilder();
+        wrap.insertAdjacentHTML('beforeend', existingHtml);
+    } else {
+        const old = wrap.querySelector('.ma-existing-section');
+        if (old) old.remove();
+        wrap.insertAdjacentHTML('beforeend', `<div class="ma-existing-section">${existingHtml}</div>`);
+    }
+}
+
+function addLmrBuilder() {
+    const wrap = document.getElementById('lmr-bridges-list');
+    if (!wrap) return;
+    const id = 'lmrb-' + (++lmrBuilderSeq);
+    lmrBuilders[id] = new Set();
+    const html = `
+        <div class="ma-patch-card ma-patch-builder" id="${id}">
+            <input type="text" class="ma-patch-name lmr-name" placeholder="Bridge name (e.g. County VHF)" />
+            <div class="lmr-cred-row">
+                <input type="text" class="lmr-user" placeholder="Gateway username" autocomplete="off" />
+                <input type="password" class="lmr-pass" placeholder="Gateway password" autocomplete="new-password" />
+            </div>
+            <div class="ma-dropzone" ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
+                 ondrop="lmrDrop(event,'${id}')">
+                <div class="ma-dropzone-hint">Drag agencies here (one or more)</div>
+                <div class="ma-dropzone-items"></div>
+            </div>
+            <div class="ma-patch-actions">
+                <button class="btn-primary lmr-create-btn" onclick="createLmrBridge('${id}')" disabled>Create Bridge</button>
+                <button class="ma-patch-cancel" onclick="removeLmrBuilder('${id}')">Clear</button>
+            </div>
+        </div>`;
+    const existing = wrap.querySelector('.ma-existing-section, .ma-existing-label');
+    if (existing) existing.insertAdjacentHTML('beforebegin', html);
+    else wrap.insertAdjacentHTML('afterbegin', html);
+}
+
+function removeLmrBuilder(id) {
+    delete lmrBuilders[id];
+    const el = document.getElementById(id);
+    if (el) el.remove();
+    const wrap = document.getElementById('lmr-bridges-list');
+    if (wrap && !wrap.querySelector('.ma-patch-builder')) addLmrBuilder();
+}
+
+// Drop onto a NEW-bridge builder.
+function lmrDrop(e, builderId) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('ma-dropzone-over');
+    const agencyId = e.dataTransfer.getData('text/plain');
+    const agencyName = e.dataTransfer.getData('agency-name') || agencyId;
+    if (!agencyId) return;
+    const set = lmrBuilders[builderId];
+    if (!set || set.has(agencyId)) return;
+    set.add(agencyId);
+
+    const items = document.querySelector(`#${builderId} .ma-dropzone-items`);
+    if (items) {
+        items.insertAdjacentHTML('beforeend',
+            `<span class="ma-chip" data-agency-id="${escapeAttr(agencyId)}">${escapeHtml(agencyName)}<button
+                class="ma-chip-x" onclick="lmrUndrop('${builderId}','${escapeAttr(agencyId)}')">&times;</button></span>`);
+    }
+    refreshLmrBuilderState(builderId);
+}
+
+function lmrUndrop(builderId, agencyId) {
+    const set = lmrBuilders[builderId];
+    if (set) set.delete(agencyId);
+    const chip = document.querySelector(`#${builderId} .ma-chip[data-agency-id="${CSS.escape(agencyId)}"]`);
+    if (chip) chip.remove();
+    refreshLmrBuilderState(builderId);
+}
+
+function refreshLmrBuilderState(builderId) {
+    const el = document.getElementById(builderId);
+    if (!el) return;
+    const set = lmrBuilders[builderId];
+    const btn = el.querySelector('.lmr-create-btn');
+    const hint = el.querySelector('.ma-dropzone-hint');
+    const n = set ? set.size : 0;
+    if (btn) {
+        btn.disabled = n < 1;
+        btn.textContent = 'Create Bridge';
+    }
+    if (hint) hint.style.display = n ? 'none' : '';
+}
+
+function createLmrBridge(builderId) {
+    const el = document.getElementById(builderId);
+    if (!el) return;
+    const set = lmrBuilders[builderId];
+    const agencies = set ? Array.from(set) : [];
+    const name = el.querySelector('.lmr-name').value.trim();
+    const username = el.querySelector('.lmr-user').value.trim();
+    const password = el.querySelector('.lmr-pass').value;
+
+    if (!agencies.length) {
+        showStatus('lmr-status', 'Drag at least one agency onto the bridge', 'warning');
+        return;
+    }
+    if (!username || !password) {
+        showStatus('lmr-status', 'Gateway username and password are required', 'warning');
+        return;
+    }
+
+    const btn = el.querySelector('.lmr-create-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+
+    fetch('/api/lmr-bridges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: name, username: username, password: password,
+            agencies: agencies, channel_name: name || 'LMR Bridge'
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            showStatus('lmr-status', data.error, 'error');
+            if (btn) { btn.disabled = false; refreshLmrBuilderState(builderId); }
+            return;
+        }
+        showStatus('lmr-status',
+            `Bridge created on channel ${data.channel} — point the gateway at login "${username}"`, 'success');
+        removeLmrBuilder(builderId);
+        fetchLmrBridges();
+    })
+    .catch(err => {
+        showStatus('lmr-status', 'Failed to create bridge: ' + err.message, 'error');
+        if (btn) { btn.disabled = false; refreshLmrBuilderState(builderId); }
+    });
+}
+
+// --- editing an existing bridge -------------------------------------------
+
+// Drop an agency onto an EXISTING bridge card to add it.
+function lmrDropExisting(e, bridgeId) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('ma-dropzone-over');
+    const agencyId = e.dataTransfer.getData('text/plain');
+    if (!agencyId) return;
+    lmrPatchAgencies(bridgeId, agencyId, 'add');
+}
+
+function lmrRemoveAgency(bridgeId, agencyId) {
+    lmrPatchAgencies(bridgeId, agencyId, 'remove');
+}
+
+// Read the bridge's current agencies, apply one add/remove, PUT the new set.
+function lmrPatchAgencies(bridgeId, agencyId, op) {
+    fetch('/api/lmr-bridges').then(r => r.json()).then(list => {
+        const b = (list || []).find(x => x.id === bridgeId);
+        if (!b) return;
+        let agencies = (b.agencies || []).slice();
+        if (op === 'add') {
+            if (agencies.includes(agencyId)) return;   // already on the bridge
+            agencies.push(agencyId);
+        } else {
+            if (agencies.length <= 1) {
+                showStatus('lmr-status', 'A bridge needs at least one agency', 'warning');
+                return;
+            }
+            agencies = agencies.filter(a => a !== agencyId);
+        }
+        return fetch('/api/lmr-bridges/' + bridgeId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agencies: agencies })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('lmr-status', data.error, 'error'); return; }
+            showStatus('lmr-status',
+                op === 'add' ? 'Agency added — clients notified' : 'Agency removed — clients notified',
+                'success');
+            fetchLmrBridges();
+        });
+    })
+    .catch(err => showStatus('lmr-status', 'Failed to update bridge: ' + err.message, 'error'));
+}
+
+function toggleLmrBridge(id) {
+    fetch('/api/lmr-bridges/' + id + '/toggle', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('lmr-status', data.error, 'error'); return; }
+        showStatus('lmr-status', data.enabled ? 'Bridge enabled' : 'Bridge disabled', 'success');
+        fetchLmrBridges();
+    })
+    .catch(err => showStatus('lmr-status', 'Failed to toggle bridge: ' + err.message, 'error'));
+}
+
+function deleteLmrBridge(id) {
+    if (!confirm('Remove this bridge? Its channel is withdrawn from all agencies and the gateway login is deleted.')) {
+        return;
+    }
+    fetch('/api/lmr-bridges/' + id, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('lmr-status', data.error, 'error'); return; }
+        showStatus('lmr-status', 'Bridge removed', 'success');
+        fetchLmrBridges();
+    })
+    .catch(err => showStatus('lmr-status', 'Failed to remove bridge: ' + err.message, 'error'));
+}
+
+
+/**
+ * Show the enrollment QR for a bridge's gateway login.
+ *
+ * This is the same short-lived enrollment token the Users tab issues — the
+ * bridge owns the account, so the QR is surfaced here rather than making the
+ * operator go find the user. Scanning it in the MeshRelay Gateway app is the
+ * whole of gateway setup: server, username and token in one code.
+ */
+function showLmrBridgeQr(username, agencyId) {
+    if (!username) {
+        showStatus('lmr-status', 'This bridge has no gateway login', 'warning');
+        return;
+    }
+    showQRCode(username, agencyId || '');
+}

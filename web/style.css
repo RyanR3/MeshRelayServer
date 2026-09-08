@@ -2621,3 +2621,65 @@ body {
         grid-template-columns: repeat(2, 1fr);
     }
 }
+
+/* ===== LMR Bridges =====
+   The page reuses the Mutual Aid builder styles (.ma-*) so both read the same;
+   only the pieces with no mutual-aid equivalent are defined here. */
+
+/* Gateway credentials on a new-bridge builder. */
+.lmr-cred-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.lmr-cred-row input {
+    flex: 1;
+    min-width: 0;
+    background: #0D1117;
+    border: 1px solid #30363D;
+    border-radius: 6px;
+    color: #E6EDF3;
+    font-size: 13px;
+    padding: 8px 10px;
+}
+.lmr-cred-row input:focus {
+    outline: none;
+    border-color: #388BFD;
+}
+
+/* Existing bridge cards accept drops, so their chip area doubles as a
+   dropzone; keep it visually quieter than an empty builder's. */
+.lmr-edit-zone {
+    min-height: 0;
+    padding: 8px;
+    margin-top: 8px;
+}
+.lmr-edit-hint {
+    font-size: 11px;
+    opacity: 0.55;
+    margin-top: 6px;
+}
+
+/* Gateway presence dot. */
+.lmr-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.lmr-dot-on  { background: #3FB950; box-shadow: 0 0 6px #3FB95088; }
+.lmr-dot-off { background: #6E7681; }
+
+/* Enrollment QR action on a bridge card. The gateway login belongs to the
+   bridge, so its QR is offered here rather than only in the Users tab. */
+.lmr-actions {
+    margin-top: 10px;
+    display: flex;
+    gap: 8px;
+}
+.lmr-qr-btn {
+    font-size: 12px;
+    padding: 6px 12px;
+}

@@ -57,7 +57,7 @@ type UserAccount struct {
 	// MCX Step 3: floor-control priority (1=EMERGENCY,2=COMMAND,3=RESPONDER,
 	// 4=MONITOR). 0/absent = default RESPONDER. Assigned at provisioning; clients
 	// cannot self-elevate (except Emergency alert).
-	Priority     int    `json:"priority,omitempty"`
+	Priority int `json:"priority,omitempty"`
 	// MCX Step 2 note: the derived MCX identity (<callsign>@<agency>.<mcptt_domain>)
 	// is NOT stored — it's computed on demand (see userMCXID / GetUsers) and added
 	// to API responses. The plain Username remains the display name + routing key.
@@ -120,52 +120,53 @@ type EnrollmentToken struct {
 // GuestEvent is a temporary shared account for mutual aid / pop-up events.
 // Multiple clients can scan the same QR code simultaneously.
 type GuestEvent struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	AgencyID     string    `json:"agency_id"`
-	Channel      int       `json:"channel"`
-	Username     string    `json:"username"`     // auto-generated guest username
-	Token        string    `json:"token"`        // enrollment token (multi-use)
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"` // nil = no expiry
-	CreatedAt    string    `json:"created_at"`
-	CreatedBy    string    `json:"created_by"`
-	OwnsAgency   bool      `json:"owns_agency,omitempty"` // true if AgencyID was auto-created for this event and should be deleted with it
-	OwnerAgencyID string   `json:"owner_agency_id,omitempty"` // the real agency that created this event; "" = created by super_admin
-	IncludedAgencies []string `json:"included_agencies,omitempty"` // agencies bridged into this event's channel
-	MutualAidLinkID  string   `json:"mutual_aid_link_id,omitempty"` // the auto-created mutual-aid link (removed with the event)
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	AgencyID         string     `json:"agency_id"`
+	Channel          int        `json:"channel"`
+	Username         string     `json:"username"`             // auto-generated guest username
+	Token            string     `json:"token"`                // enrollment token (multi-use)
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"` // nil = no expiry
+	CreatedAt        string     `json:"created_at"`
+	CreatedBy        string     `json:"created_by"`
+	OwnsAgency       bool       `json:"owns_agency,omitempty"`        // true if AgencyID was auto-created for this event and should be deleted with it
+	OwnerAgencyID    string     `json:"owner_agency_id,omitempty"`    // the real agency that created this event; "" = created by super_admin
+	IncludedAgencies []string   `json:"included_agencies,omitempty"`  // agencies bridged into this event's channel
+	MutualAidLinkID  string     `json:"mutual_aid_link_id,omitempty"` // the auto-created mutual-aid link (removed with the event)
 }
 
 type Server struct {
-	config            *Config
-	configFile        string
-	conn              *net.UDPConn
-	clients           map[string]*Client        // username -> client
-	channels          map[string]*Channel       // "agencyID:channelNum" -> channel
-	groups            map[string]*GroupPacket    // groupID -> group
-	users             map[string]*UserAccount    // "agencyID:username" -> account
-	agencies          map[string]*Agency         // agencyID -> agency
-	authenticatedAddrs map[string]string         // addr string -> agencyID
-	pendingChallenges  map[string][32]byte       // addr string -> nonce (Phase 4f challenge-response)
+	config             *Config
+	configFile         string
+	conn               *net.UDPConn
+	clients            map[string]*Client          // username -> client
+	channels           map[string]*Channel         // "agencyID:channelNum" -> channel
+	groups             map[string]*GroupPacket     // groupID -> group
+	users              map[string]*UserAccount     // "agencyID:username" -> account
+	agencies           map[string]*Agency          // agencyID -> agency
+	authenticatedAddrs map[string]string           // addr string -> agencyID
+	pendingChallenges  map[string][32]byte         // addr string -> nonce (Phase 4f challenge-response)
 	enrollmentTokens   map[string]*EnrollmentToken // token string -> enrollment token
-	guestEvents        map[string]*GuestEvent     // eventID -> guest event
-	webAdmins          map[string]*WebAdmin      // "agencyID:username" -> admin account (web dashboard)
-	dispatchConns      map[string]*DispatchConn  // "agencyID:username" -> active dispatch WebSocket
-	webSessions        map[string]*WebSession    // session token -> session
-	mutualAidLinks     map[string]*MutualAidLink // linkID -> link
-	zelloBridges       map[string]*ZelloBridge   // bridgeID -> Zello Work channel bridge
-	ssrcToUser         map[uint32]string         // RTP SSRC -> username (MCX Step 1)
-	ssrcMu            sync.RWMutex               // guards ssrcToUser
-	floor              *FloorController          // MCX Step 3 floor control (per channel)
-	groupMgr           *GroupManager             // MCX Step 4 group types / ad-hoc
-	sipGateway         *SipGateway               // MCX Step 5 SIP gateway (nil = disabled)
-	testFloorSink      func(*net.UDPAddr, []byte) // test-only: capture floor packets
-	mu                sync.RWMutex
-	shutdown          chan struct{}
-	stats             *Stats
-	updateStatus      *UpdateStatus
-	activityLog       *ActivityLog
-	networkTimeSeries *NetworkTimeSeries
-	wsConnCount       int64 // atomic counter for active WebSocket connections
+	guestEvents        map[string]*GuestEvent      // eventID -> guest event
+	webAdmins          map[string]*WebAdmin        // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns      map[string]*DispatchConn    // "agencyID:username" -> active dispatch WebSocket
+	webSessions        map[string]*WebSession      // session token -> session
+	mutualAidLinks     map[string]*MutualAidLink   // linkID -> link
+	lmrBridges         map[string]*LMRBridge       // bridgeID -> LMR/VHF radio bridge
+	zelloBridges       map[string]*ZelloBridge     // bridgeID -> Zello Work channel bridge
+	ssrcToUser         map[uint32]string           // RTP SSRC -> username (MCX Step 1)
+	ssrcMu             sync.RWMutex                // guards ssrcToUser
+	floor              *FloorController            // MCX Step 3 floor control (per channel)
+	groupMgr           *GroupManager               // MCX Step 4 group types / ad-hoc
+	sipGateway         *SipGateway                 // MCX Step 5 SIP gateway (nil = disabled)
+	testFloorSink      func(*net.UDPAddr, []byte)  // test-only: capture floor packets
+	mu                 sync.RWMutex
+	shutdown           chan struct{}
+	stats              *Stats
+	updateStatus       *UpdateStatus
+	activityLog        *ActivityLog
+	networkTimeSeries  *NetworkTimeSeries
+	wsConnCount        int64 // atomic counter for active WebSocket connections
 }
 
 type Stats struct {
@@ -450,7 +451,7 @@ func (s *Server) CheckHealth() *HealthReport {
 	// 5. Storage — check all data files accessible and get total size
 	storageHealthy := true
 	var totalSize int64
-	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, "guest_events.json", "activity_log.json"} {
+	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, s.lmrBridgesFile(), "guest_events.json", "activity_log.json"} {
 		info, err := os.Stat(f)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -552,13 +553,13 @@ func (s *Server) ensureAgencyChannels(agencyID string) {
 
 func NewServer(config *Config, configFile string) *Server {
 	s := &Server{
-		config:            config,
-		configFile:        configFile,
-		clients:           make(map[string]*Client),
-		channels:          make(map[string]*Channel),
-		groups:            make(map[string]*GroupPacket),
-		users:             make(map[string]*UserAccount),
-		agencies:          make(map[string]*Agency),
+		config:             config,
+		configFile:         configFile,
+		clients:            make(map[string]*Client),
+		channels:           make(map[string]*Channel),
+		groups:             make(map[string]*GroupPacket),
+		users:              make(map[string]*UserAccount),
+		agencies:           make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]string),
 		pendingChallenges:  make(map[string][32]byte),
 		enrollmentTokens:   make(map[string]*EnrollmentToken),
@@ -567,9 +568,10 @@ func NewServer(config *Config, configFile string) *Server {
 		dispatchConns:      make(map[string]*DispatchConn),
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
+		lmrBridges:         make(map[string]*LMRBridge),
 		zelloBridges:       make(map[string]*ZelloBridge),
 		ssrcToUser:         make(map[uint32]string),
-		shutdown:          make(chan struct{}),
+		shutdown:           make(chan struct{}),
 		stats: &Stats{
 			StartTime: time.Now(),
 		},
@@ -584,6 +586,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadUsers()
 	s.loadWebAdmins()
 	s.loadMutualAid()
+	s.loadLMRBridges()
 	s.loadGuestEvents()
 	s.loadZelloBridges()
 
@@ -935,7 +938,6 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		}
 		s.mu.RUnlock()
 	}
-
 
 	// Check for mutual aid partners — also relay to partner agencies' same channel
 	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
@@ -1326,6 +1328,19 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		}
 	}
 
+	// Announce every enabled LMR bridge serving this agency, so the radio
+	// channel shows up for the joining client the way mutual aid does.
+	for _, b := range s.lmrBridges {
+		if b.Enabled && b.servesAgency(agencyID) {
+			pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
+				Channel:     b.Channel,
+				ChannelName: b.displayName(),
+				Active:      true,
+			})
+			toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent LMR bridge channel %d (%s) to newly joined %s [%s]", b.Channel, b.displayName(), packet.Username, agencyID)})
+		}
+	}
+
 	s.mu.Unlock()
 
 	// Log activity events outside the lock
@@ -1664,14 +1679,14 @@ func (s *Server) GetStats(agencyFilter string) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_clients":     clientCount,
-		"packets_received":  s.stats.PacketsReceived,
-		"packets_sent":      s.stats.PacketsSent,
-		"bytes_received":    s.stats.BytesReceived,
-		"bytes_sent":        s.stats.BytesSent,
-		"uptime_seconds":    int(uptime.Seconds()),
-		"start_time":        s.stats.StartTime,
-		"version":           Version,
+		"total_clients":    clientCount,
+		"packets_received": s.stats.PacketsReceived,
+		"packets_sent":     s.stats.PacketsSent,
+		"bytes_received":   s.stats.BytesReceived,
+		"bytes_sent":       s.stats.BytesSent,
+		"uptime_seconds":   int(uptime.Seconds()),
+		"start_time":       s.stats.StartTime,
+		"version":          Version,
 	}
 }
 
@@ -2383,8 +2398,8 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 type WebAdmin struct {
 	Username           string `json:"username"`
 	PasswordHash       string `json:"password_hash"`
-	Role               string `json:"role"`                  // "super_admin" or "agency_admin"
-	AgencyID           string `json:"agency_id,omitempty"`   // empty for super_admin
+	Role               string `json:"role"`                // "super_admin" or "agency_admin"
+	AgencyID           string `json:"agency_id,omitempty"` // empty for super_admin
 	MustChangePassword bool   `json:"must_change_password"`
 }
 
@@ -2754,7 +2769,17 @@ func (s *Server) saveMutualAid() error {
 
 // getMutualAidPartners returns all partner agency IDs if an active mutual aid link
 // exists for the given agency and channel. Returns nil if no link.
+// getMutualAidPartners returns the other agencies that share a channel with
+// this one, so audio/text/heartbeat fan out across the patch.
+//
+// LMR bridge channels (the 100-119 block) answer here too: a bridge patches
+// several agencies onto one radio channel, which is the same relationship a
+// mutual-aid link describes. Routing both through this one function means the
+// three relay sites that call it need no LMR-specific branch.
 func (s *Server) getMutualAidPartners(agencyID string, channel int) []string {
+	if p := s.getLMRPartners(agencyID, channel); len(p) > 0 {
+		return p
+	}
 	for _, link := range s.mutualAidLinks {
 		if !link.Active {
 			continue
@@ -2998,13 +3023,13 @@ func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expir
 	}
 
 	ev := &GuestEvent{
-		ID:         eventID,
-		Name:       name,
-		AgencyID:   eventAgencyID,
-		Channel:    channel,
-		Username:   username,
-		Token:      token,
-		ExpiresAt:  expiresAt,
+		ID:            eventID,
+		Name:          name,
+		AgencyID:      eventAgencyID,
+		Channel:       channel,
+		Username:      username,
+		Token:         token,
+		ExpiresAt:     expiresAt,
 		CreatedAt:     time.Now().Format(time.RFC3339),
 		CreatedBy:     createdBy,
 		OwnsAgency:    true,
@@ -3020,8 +3045,12 @@ func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expir
 		linkAgencies := []string{eventAgencyID}
 		seen := map[string]bool{eventAgencyID: true}
 		for _, aid := range includeAgencies {
-			if aid == "" || seen[aid] { continue }
-			if _, ok := s.agencies[aid]; !ok { continue } // skip unknown agencies
+			if aid == "" || seen[aid] {
+				continue
+			}
+			if _, ok := s.agencies[aid]; !ok {
+				continue
+			} // skip unknown agencies
 			linkAgencies = append(linkAgencies, aid)
 			seen[aid] = true
 		}
