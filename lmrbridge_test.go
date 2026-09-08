@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func newLMRTestServer() *Server {
 	return &Server{
@@ -199,19 +202,21 @@ func TestPickMutualAidChannelRespectsSharedPool(t *testing.T) {
 	s := newLMRTestServer()
 	s.zelloBridges = map[string]*ZelloBridge{}
 
-	// A Zello mapping occupies 19; mutual aid must not hand the same number out.
+	// usedHighChannels spans every server-allocated block, so a number claimed
+	// anywhere is off-limits to mutual aid even though Zello now has its own
+	// range.
 	s.zelloBridges["z1"] = &ZelloBridge{
 		AgencyID: "fire",
-		Mappings: []ZelloMapping{{ZelloChannel: "dispatch", MeshChannel: 19, AgencyID: "fire"}},
+		Mappings: []ZelloMapping{{ZelloChannel: "dispatch", MeshChannel: SharedChannelMax, AgencyID: "fire"}},
 	}
-	if got := s.pickMutualAidChannel(); got == 19 {
-		t.Fatal("handed out channel 19 while a Zello mapping occupies it")
+	if got := s.pickMutualAidChannel(); got == SharedChannelMax {
+		t.Fatalf("handed out channel %d while a mapping occupies it", SharedChannelMax)
 	}
 
 	// Fill the whole block: the allocator must report no capacity, not fall
-	// into the 0-9 talkgroup range.
-	for ch := 10; ch <= 19; ch++ {
-		s.mutualAidLinks[string(rune('a'+ch))] = &MutualAidLink{Channel: ch, Active: true}
+	// into the talkgroup range.
+	for ch := SharedChannelMin; ch <= SharedChannelMax; ch++ {
+		s.mutualAidLinks[fmt.Sprintf("l%d", ch)] = &MutualAidLink{Channel: ch, Active: true}
 	}
 	got := s.pickMutualAidChannel()
 	if got != 0 {
@@ -222,10 +227,10 @@ func TestPickMutualAidChannelRespectsSharedPool(t *testing.T) {
 func TestPickMutualAidChannelNeverReturnsTalkgroup(t *testing.T) {
 	s := newLMRTestServer()
 	s.zelloBridges = map[string]*ZelloBridge{}
-	for ch := 10; ch <= 19; ch++ {
-		s.mutualAidLinks[string(rune('a'+ch))] = &MutualAidLink{Channel: ch, Active: true}
+	for ch := SharedChannelMin; ch <= SharedChannelMax; ch++ {
+		s.mutualAidLinks[fmt.Sprintf("l%d", ch)] = &MutualAidLink{Channel: ch, Active: true}
 	}
-	if got := s.pickMutualAidChannel(); got >= 1 && got <= 9 {
+	if got := s.pickMutualAidChannel(); got >= 1 && got < SharedChannelMin {
 		t.Fatalf("allocated %d, which is an ordinary agency talkgroup", got)
 	}
 }

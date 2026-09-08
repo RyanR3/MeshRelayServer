@@ -23,8 +23,8 @@ func TestPickAdhocChannelAvoidsZello(t *testing.T) {
 	if ch == 11 || ch == 12 {
 		t.Fatalf("ad-hoc group allocated channel %d, which Zello already uses", ch)
 	}
-	if ch != 10 {
-		t.Errorf("expected the first free slot (10), got %d", ch)
+	if ch != SharedChannelMin {
+		t.Errorf("expected the first free slot (%d), got %d", SharedChannelMin, ch)
 	}
 	t.Logf("OK: ad-hoc group got channel %d, avoiding Zello's 11/12", ch)
 }

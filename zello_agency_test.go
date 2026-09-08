@@ -50,8 +50,9 @@ func TestMapZelloBridgePerAgency(t *testing.T) {
 	if m.AgencyID != "dev" {
 		t.Errorf("mapping agency = %q, want dev (cross-agency mapping was dropped/rewritten)", m.AgencyID)
 	}
-	if m.MeshChannel < 10 || m.MeshChannel > 19 {
-		t.Errorf("mesh channel = %d, want 10-19", m.MeshChannel)
+	if m.MeshChannel < ZelloChannelMin || m.MeshChannel > ZelloChannelMax {
+		t.Errorf("mesh channel = %d, want %d-%d",
+			m.MeshChannel, ZelloChannelMin, ZelloChannelMax)
 	}
 	t.Logf("OK: mapping %+v", m)
 }

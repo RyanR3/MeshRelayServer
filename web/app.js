@@ -2389,7 +2389,9 @@ function createAgency() {
     const name = document.getElementById('newAgencyName').value.trim();
     let id = document.getElementById('newAgencyId').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
     const maxUsers = parseInt(document.getElementById('newAgencyMaxUsers').value) || 100;
-    const maxChannels = parseInt(document.getElementById('newAgencyMaxChannels').value) || 20;
+    // Talkgroups only: 50+ is reserved for server-allocated channels
+    // (mutual aid and ad-hoc groups, LMR bridges, Zello bridges).
+    const maxChannels = parseInt(document.getElementById('newAgencyMaxChannels').value) || 50;
 
     if (!name || !id) {
         showStatus('agency-status', 'Name and ID are required', 'warning');

@@ -648,7 +648,13 @@
             <label class="modal-field-label">Max Users</label>
             <input type="number" id="newAgencyMaxUsers" placeholder="Max Users" value="100">
             <label class="modal-field-label">Max Channels</label>
-            <input type="number" id="newAgencyMaxChannels" placeholder="Max Channels" value="20">
+            <input type="number" id="newAgencyMaxChannels" placeholder="Max Channels"
+                   value="50" min="1" max="50">
+            <div class="modal-field-hint">
+                Talkgroups, up to 50. Higher channels are server-allocated and not an
+                agency setting: 51-99 mutual-aid patches and ad-hoc groups,
+                100-150 LMR bridges, 151-200 Zello bridges.
+            </div>
             <div class="modal-actions">
                 <button class="btn-primary" onclick="createAgency()">Create</button>
                 <button class="btn-secondary" onclick="closeModal('createAgencyModal')">Cancel</button>

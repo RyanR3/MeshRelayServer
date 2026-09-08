@@ -10,9 +10,9 @@ package main
 //
 // Two things distinguish this from the Zello bridge:
 //
-//   - Channel numbers come from their own block (100-119), NOT the 10-19 pool
-//     shared by ad-hoc groups, Zello mappings and mutual-aid links. That pool is
-//     already three-ways contended, so LMR stays clear of it entirely.
+//   - Channel numbers come from their own block (100-149). Every category has
+//     its own range now — talkgroups 0-49, mutual aid and ad-hoc groups 50-98,
+//     LMR 100-149, Zello 150-199 — so allocators cannot collide.
 //   - The bridge owns its gateway login. One row is the whole configuration:
 //     credentials, channel, and the agency list.
 
@@ -31,7 +31,7 @@ import (
 // range shared by ad-hoc groups, Zello mappings and mutual aid.
 const (
 	LMRChannelMin = 100
-	LMRChannelMax = 119
+	LMRChannelMax = 149
 )
 
 // DefaultLMRChannelName is what clients show for a bridge that has no name set.

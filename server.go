@@ -39,6 +39,27 @@ type Channel struct {
 	mu      sync.RWMutex
 }
 
+// Channel map. Every category gets its own block so allocators can never
+// collide, and a channel number alone says what kind of channel it is.
+//
+//	  0 -  49  agency talkgroups (the only ones an agency configures)
+//	 50 -  98  mutual-aid patches and ad-hoc groups
+//	100 - 149  LMR bridges
+//	150 - 199  Zello bridges
+//
+// The gap at 99 is deliberate padding between the shared block and the bridge
+// blocks. These are wire values; the UI shows talkgroups 1-based.
+const (
+	// MaxAgencyTalkgroups is how many ordinary channels an agency owns.
+	MaxAgencyTalkgroups = 50
+
+	SharedChannelMin = 50 // mutual aid + ad-hoc groups
+	SharedChannelMax = 98
+
+	ZelloChannelMin = 150
+	ZelloChannelMax = 199
+)
+
 type Agency struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -539,7 +560,10 @@ func userKey(agencyID, username string) string {
 
 // ensureAgencyChannels creates channels 0-19 for an agency if they don't exist.
 func (s *Server) ensureAgencyChannels(agencyID string) {
-	for i := 0; i < 20; i++ {
+	// Talkgroups plus the shared mutual-aid/ad-hoc block. Bridge channels
+	// (LMR, Zello) are created on demand by their own code, since a bridge
+	// only exists in the agencies it serves.
+	for i := 0; i <= SharedChannelMax; i++ {
 		key := channelKey(agencyID, i)
 		if _, exists := s.channels[key]; !exists {
 			s.channels[key] = &Channel{
@@ -2555,7 +2579,7 @@ func (s *Server) migrateToAgencies() {
 		Name:        "Watchtower",
 		CreatedAt:   time.Now().Format(time.RFC3339),
 		MaxUsers:    100,
-		MaxChannels: 20,
+		MaxChannels: MaxAgencyTalkgroups,
 	}
 
 	// Backfill users with agency_id and role, and re-key map
@@ -2888,7 +2912,7 @@ func (s *Server) pickMutualAidChannel() int {
 	//   - Channels 0-9 are ordinary agency talkgroups. Scanning down to 0 could
 	//     put a patch on someone's Channel 1.
 	used := s.usedHighChannels()
-	for ch := 19; ch >= 10; ch-- {
+	for ch := SharedChannelMax; ch >= SharedChannelMin; ch-- {
 		if !used[ch] {
 			return ch
 		}
@@ -2987,7 +3011,7 @@ func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expir
 		Name:        name,
 		CreatedAt:   time.Now().Format(time.RFC3339),
 		MaxUsers:    1000,
-		MaxChannels: 20,
+		MaxChannels: MaxAgencyTalkgroups,
 	}
 	s.ensureAgencyChannels(eventAgencyID)
 	if err := s.saveAgencies(); err != nil {

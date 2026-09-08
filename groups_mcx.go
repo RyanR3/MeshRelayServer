@@ -375,7 +375,7 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 	}
 	agencyID := creator.AgencyID
 
-	// Allocate a free high channel (10-19), like Zello/mutual-aid.
+	// Allocate a free channel from the shared block, like mutual aid.
 	s.mu.Lock()
 	channel := s.pickAdhocChannel(agencyID)
 	s.mu.Unlock()
@@ -525,7 +525,7 @@ func (s *Server) dissolveAdhocChannel(key string, channel int, name string) {
 	log.Printf("Ad-hoc group ch %d (%s) dissolved", channel, name)
 }
 
-// usedHighChannels returns every channel in the high range (10-19) already
+// usedHighChannels returns every server-allocated channel already
 // claimed by ANY feature: ad-hoc groups, Zello bridge mappings, and active
 // mutual-aid links. All three share the same range, so each allocator must see
 // all three or it will hand out a channel another feature already occupies
@@ -555,11 +555,11 @@ func (s *Server) usedHighChannels() map[int]bool {
 	return used
 }
 
-// pickAdhocChannel finds a free high channel (10-19) not used by another ad-hoc
+// pickAdhocChannel finds a free channel in the shared block, not used by another ad-hoc
 // group, Zello bridge mapping, or mutual-aid link. Caller holds s.mu.
 func (s *Server) pickAdhocChannel(agencyID string) int {
 	used := s.usedHighChannels()
-	for ch := 10; ch <= 19; ch++ {
+	for ch := SharedChannelMin; ch <= SharedChannelMax; ch++ {
 		if !used[ch] {
 			return ch
 		}

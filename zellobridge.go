@@ -944,14 +944,15 @@ func timeNowNano() int64 { return time.Now().UnixNano() }
 // mutual-aid links.
 // Caller must hold s.mu.
 func (s *Server) pickZelloBridgeChannel() int {
-	// Shared with ad-hoc groups and mutual aid — see usedHighChannels.
+	// Zello has its own block now, but still check usedHighChannels so a number
+	// can never be double-booked if the blocks are ever widened.
 	used := s.usedHighChannels()
-	for ch := 10; ch <= 19; ch++ {
+	for ch := ZelloChannelMin; ch <= ZelloChannelMax; ch++ {
 		if !used[ch] {
 			return ch
 		}
 	}
-	return 19
+	return 0 // block full — caller must treat 0 as "no capacity"
 }
 
 // announceChannelRemoval tells all clients in an agency to remove a specific
@@ -1073,7 +1074,7 @@ func (s *Server) handleCreateZelloBridge(w http.ResponseWriter, r *http.Request)
 	// named channels on clients (like mutual aid), not collide with the client's
 	// normal 0-9 channels (which requires a re-login to pick up).
 	meshCh := req.MeshChannel
-	if meshCh < 10 {
+	if meshCh < ZelloChannelMin || meshCh > ZelloChannelMax {
 		meshCh = s.pickZelloBridgeChannel()
 	}
 	b := &ZelloBridge{
@@ -1208,13 +1209,13 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pickHigh := func(agency string) int {
-		for ch := 10; ch <= 19; ch++ {
+		for ch := ZelloChannelMin; ch <= ZelloChannelMax; ch++ {
 			if !isUsed(agency, ch) {
 				markUsed(agency, ch)
 				return ch
 			}
 		}
-		return 19
+		return ZelloChannelMax
 	}
 	clean := make([]ZelloMapping, 0, len(req.Mappings))
 	for _, m := range req.Mappings {
@@ -1249,7 +1250,7 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 		// in, since a shared mapping claims the same number in all of them.
 		mesh := m.MeshChannel
 		freeEverywhere := func(ch int) bool {
-			if ch < 10 || ch > 19 {
+			if ch < ZelloChannelMin || ch > ZelloChannelMax {
 				return false
 			}
 			if isUsed(agency, ch) {
@@ -1264,7 +1265,7 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 		}
 		if !freeEverywhere(mesh) {
 			mesh = -1
-			for ch := 10; ch <= 19; ch++ {
+			for ch := ZelloChannelMin; ch <= ZelloChannelMax; ch++ {
 				if freeEverywhere(ch) {
 					mesh = ch
 					break

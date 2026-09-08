@@ -1456,8 +1456,14 @@ func (s *Server) handleCreateAgency(w http.ResponseWriter, r *http.Request) {
 	if req.MaxUsers <= 0 {
 		req.MaxUsers = 100
 	}
+	// Talkgroups only. 10-19 is the pool the server allocates from for
+	// mutual-aid patches, Zello mappings and ad-hoc groups, and LMR bridges sit
+	// at 100+, so an agency does not own those.
 	if req.MaxChannels <= 0 {
-		req.MaxChannels = 20
+		req.MaxChannels = MaxAgencyTalkgroups
+	}
+	if req.MaxChannels > MaxAgencyTalkgroups {
+		req.MaxChannels = MaxAgencyTalkgroups
 	}
 
 	s.mu.Lock()
