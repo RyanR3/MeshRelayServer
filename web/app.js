@@ -2610,40 +2610,21 @@ function showUpdateModal() {
     document.getElementById('update-apply-btn').disabled = false;
     document.getElementById('update-apply-btn').textContent = 'Update Server';
     document.getElementById('update-close-btn').textContent = 'Cancel';
-    // Reset confirm section
-    const confirmSection = document.getElementById('update-confirm-section');
-    if (confirmSection) {
-        confirmSection.style.display = 'none';
-        document.getElementById('update-confirm-password').value = '';
-    }
 
     showModal('updateModal');
 }
 
+// The modal itself IS the confirmation: it names the version and what will
+// happen, and the endpoint is already super-admin gated. The old flow also
+// demanded the password be re-typed, but the server never read it — the apply
+// handler has no password field at all — so it added a step without adding any
+// check.
 function applyUpdate() {
     if (!latestRelease) return;
-
-    const confirmSection = document.getElementById('update-confirm-section');
-    const passwordInput = document.getElementById('update-confirm-password');
-
-    // First click: show the confirm section with password field
-    if (confirmSection && confirmSection.style.display === 'none') {
-        confirmSection.style.display = 'block';
-        passwordInput.focus();
-        document.getElementById('update-apply-btn').textContent = 'Confirm & Update';
-        return;
-    }
-
-    // Second click: validate password is entered
-    if (!passwordInput || !passwordInput.value) {
-        showUpdateError('Please re-enter your password to confirm the update.');
-        return;
-    }
 
     const applyBtn = document.getElementById('update-apply-btn');
     applyBtn.disabled = true;
     applyBtn.textContent = 'Updating...';
-    if (confirmSection) confirmSection.style.display = 'none';
 
     document.getElementById('update-progress').style.display = 'block';
     document.getElementById('update-error').style.display = 'none';
@@ -2655,14 +2636,11 @@ function applyUpdate() {
             binary_url: latestRelease.binary_url,
             binary_name: latestRelease.binary_name || '',
             web_url: latestRelease.web_url || '',
-            checksum_url: latestRelease.checksum_url || '',
-            password: passwordInput.value
+            checksum_url: latestRelease.checksum_url || ''
         })
     })
     .then(r => r.json())
     .then(data => {
-        // Clear the password from the input immediately
-        passwordInput.value = '';
         if (data.error) {
             showUpdateError(data.error);
             return;
@@ -2671,7 +2649,6 @@ function applyUpdate() {
         startUpdatePolling();
     })
     .catch(err => {
-        passwordInput.value = '';
         showUpdateError('Failed to start update: ' + err.message);
     });
 }
