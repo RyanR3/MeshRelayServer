@@ -34,6 +34,12 @@ echo ""
 echo "Building server (Linux amd64)..."
 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${VERSION}" -o ptt-server-linux
 
+echo ""
+echo "Building server (Linux arm64)..."
+# Raspberry Pi deployments are aarch64. Releases have always shipped this
+# artifact; it just used to be built by hand.
+GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=${VERSION}" -o ptt-server-linux-arm64
+
 if [ $? -eq 0 ]; then
     echo ""
     echo "Build successful! Version: $VERSION"
@@ -41,10 +47,10 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "Generating SHA256SUMS..."
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum ptt-server ptt-server-linux > SHA256SUMS
+        sha256sum ptt-server ptt-server-linux ptt-server-linux-arm64 > SHA256SUMS
     else
         # macOS fallback (shasum -a 256), normalized to "<hash>  <file>" format
-        shasum -a 256 ptt-server ptt-server-linux > SHA256SUMS
+        shasum -a 256 ptt-server ptt-server-linux ptt-server-linux-arm64 > SHA256SUMS
     fi
     echo "  SHA256SUMS written:"
     cat SHA256SUMS
