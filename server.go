@@ -2876,21 +2876,24 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 	log.Printf("Mutual aid channel %s: notified %d clients in %v about channel %d (%s)", action, len(targets), agencies, channel, channelName)
 }
 
-// pickMutualAidChannel picks the highest unused channel number (starting from 19 down)
-// that has no active mutual aid link. Must be called with s.mu held.
+// pickMutualAidChannel picks the highest free channel in the shared 10-19 block,
+// or 0 when the block is full. Caller must hold s.mu.
 func (s *Server) pickMutualAidChannel() int {
-	used := make(map[int]bool)
-	for _, link := range s.mutualAidLinks {
-		if link.Active {
-			used[link.Channel] = true
-		}
-	}
-	for ch := 19; ch >= 0; ch-- {
+	// Two things this must respect, and originally didn't:
+	//
+	//   - The 10-19 block is SHARED with ad-hoc groups and Zello mappings, so
+	//     the free-channel test has to be usedHighChannels(), not just the
+	//     mutual-aid links. Looking at links alone handed out numbers already
+	//     serving a Zello bridge or an ad-hoc group.
+	//   - Channels 0-9 are ordinary agency talkgroups. Scanning down to 0 could
+	//     put a patch on someone's Channel 1.
+	used := s.usedHighChannels()
+	for ch := 19; ch >= 10; ch-- {
 		if !used[ch] {
 			return ch
 		}
 	}
-	return 19 // fallback
+	return 0 // block full — caller must treat 0 as "no capacity"
 }
 
 // --- Guest Events ---
@@ -3163,6 +3166,7 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 	for i, addr := range kickAddrs {
 		resp := SerializeAuthResponse(&AuthResponsePacket{
 			Success: false,
+			Revoked: true,
 			Message: "Guest event ended",
 		})
 		s.sendPacket(resp, addr)

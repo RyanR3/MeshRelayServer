@@ -329,6 +329,7 @@ func (s *Server) handleDeleteLMRBridge(w http.ResponseWriter, r *http.Request) {
 	for i, addr := range kickAddrs {
 		resp := SerializeAuthResponse(&AuthResponsePacket{
 			Success: false,
+			Revoked: true,
 			Message: "LMR bridge removed",
 		})
 		s.sendPacket(resp, addr)

@@ -7,23 +7,37 @@ import (
 	"io"
 )
 
+// Auth-response status byte values. This is a SEPARATE namespace from the
+// packet types below — it is the first body byte of PacketTypeAuthResponse,
+// not a packet type — so 0x02 here does not collide with PacketTypeHeartbeat.
+const (
+	AuthStatusFailed  byte = 0x00
+	AuthStatusSuccess byte = 0x01
+	// AuthStatusRevoked: the server ended an ESTABLISHED session on purpose
+	// (bridge deleted, guest event ended, account removed) rather than
+	// rejecting a login. Lets clients react without string-matching the
+	// human-readable message. Older clients test for == 0x01 and so still
+	// treat this as a failure.
+	AuthStatusRevoked byte = 0x02
+)
+
 // Packet types matching Android app
 const (
-	PacketTypeAudio       byte = 0x00
-	PacketTypeText        byte = 0x01
-	PacketTypeHeartbeat   byte = 0x02
-	PacketTypeJoin        byte = 0x03
-	PacketTypeLeave       byte = 0x04
-	PacketTypeGroupCreate byte = 0x05
-	PacketTypeGroupUpdate byte = 0x06
-	PacketTypeDirectAudio byte = 0x07
+	PacketTypeAudio         byte = 0x00
+	PacketTypeText          byte = 0x01
+	PacketTypeHeartbeat     byte = 0x02
+	PacketTypeJoin          byte = 0x03
+	PacketTypeLeave         byte = 0x04
+	PacketTypeGroupCreate   byte = 0x05
+	PacketTypeGroupUpdate   byte = 0x06
+	PacketTypeDirectAudio   byte = 0x07
 	PacketTypeAuthRequest   byte = 0x08
 	PacketTypeAuthResponse  byte = 0x09
 	PacketTypeChannelSwitch byte = 0x0A
 
 	// Phase 4 key management packet types
-	PacketTypeKeyJoinRequest  byte = 0x0B
-	PacketTypeKeyJoinResponse byte = 0x0C
+	PacketTypeKeyJoinRequest   byte = 0x0B
+	PacketTypeKeyJoinResponse  byte = 0x0C
 	PacketTypeAuthChallengeReq byte = 0x0D // Client requests challenge nonce
 	PacketTypeAuthChallenge    byte = 0x0E // Server sends challenge nonce
 	PacketTypeKeyAnnounce      byte = 0x0F // Wrapped key announcement for group propagation
@@ -230,6 +244,11 @@ type AuthChallengePacket struct {
 type AuthResponsePacket struct {
 	Success bool
 	Message string
+	// Revoked marks a session the SERVER ended deliberately (its bridge was
+	// deleted, its guest event ended, its account removed) as opposed to a
+	// login that failed. It rides in the success byte as a third value so
+	// clients can react correctly without parsing the human-readable message.
+	Revoked bool
 }
 
 // ChannelSwitchPacket notifies a PTT client about a mutual aid channel
@@ -883,10 +902,16 @@ func SerializeAuthResponse(packet *AuthResponsePacket) []byte {
 	// Write packet type
 	buf.WriteByte(PacketTypeAuthResponse)
 
-	// Write success byte
-	if packet.Success {
+	// Write success byte. 0x02 means "session revoked by the server" — a
+	// deliberate teardown rather than a rejected login. Older clients test for
+	// == 0x01, so they read 0x02 as a plain failure and still disconnect;
+	// nothing breaks by adding it.
+	switch {
+	case packet.Success:
 		buf.WriteByte(0x01)
-	} else {
+	case packet.Revoked:
+		buf.WriteByte(AuthStatusRevoked)
+	default:
 		buf.WriteByte(0x00)
 	}
 

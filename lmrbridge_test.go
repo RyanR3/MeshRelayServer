@@ -190,3 +190,70 @@ func TestDeleteBridgeRemovesAccountAndTokens(t *testing.T) {
 		t.Fatal("deletion removed an unrelated user's enrollment token")
 	}
 }
+
+// pickMutualAidChannel shares the 10-19 block with ad-hoc groups and Zello
+// mappings, so it must consult usedHighChannels() rather than only the
+// mutual-aid links — and must never dip into 0-9, which are ordinary agency
+// talkgroups.
+func TestPickMutualAidChannelRespectsSharedPool(t *testing.T) {
+	s := newLMRTestServer()
+	s.zelloBridges = map[string]*ZelloBridge{}
+
+	// A Zello mapping occupies 19; mutual aid must not hand the same number out.
+	s.zelloBridges["z1"] = &ZelloBridge{
+		AgencyID: "fire",
+		Mappings: []ZelloMapping{{ZelloChannel: "dispatch", MeshChannel: 19, AgencyID: "fire"}},
+	}
+	if got := s.pickMutualAidChannel(); got == 19 {
+		t.Fatal("handed out channel 19 while a Zello mapping occupies it")
+	}
+
+	// Fill the whole block: the allocator must report no capacity, not fall
+	// into the 0-9 talkgroup range.
+	for ch := 10; ch <= 19; ch++ {
+		s.mutualAidLinks[string(rune('a'+ch))] = &MutualAidLink{Channel: ch, Active: true}
+	}
+	got := s.pickMutualAidChannel()
+	if got != 0 {
+		t.Fatalf("full block returned %d, want 0 (no capacity)", got)
+	}
+}
+
+func TestPickMutualAidChannelNeverReturnsTalkgroup(t *testing.T) {
+	s := newLMRTestServer()
+	s.zelloBridges = map[string]*ZelloBridge{}
+	for ch := 10; ch <= 19; ch++ {
+		s.mutualAidLinks[string(rune('a'+ch))] = &MutualAidLink{Channel: ch, Active: true}
+	}
+	if got := s.pickMutualAidChannel(); got >= 1 && got <= 9 {
+		t.Fatalf("allocated %d, which is an ordinary agency talkgroup", got)
+	}
+}
+
+// The revoked status must ride in the success byte, so clients can tell a
+// deliberate teardown from a rejected login without matching message text.
+func TestAuthResponseRevokedStatusByte(t *testing.T) {
+	cases := []struct {
+		name string
+		pkt  AuthResponsePacket
+		want byte
+	}{
+		{"success", AuthResponsePacket{Success: true}, AuthStatusSuccess},
+		{"failure", AuthResponsePacket{Success: false}, AuthStatusFailed},
+		{"revoked", AuthResponsePacket{Success: false, Revoked: true}, AuthStatusRevoked},
+		// Success wins if both are somehow set: a live session is not revoked.
+		{"success beats revoked", AuthResponsePacket{Success: true, Revoked: true}, AuthStatusSuccess},
+	}
+	for _, c := range cases {
+		b := SerializeAuthResponse(&c.pkt)
+		if len(b) < 2 {
+			t.Fatalf("%s: packet too short", c.name)
+		}
+		if b[0] != PacketTypeAuthResponse {
+			t.Fatalf("%s: type = %#x, want %#x", c.name, b[0], PacketTypeAuthResponse)
+		}
+		if b[1] != c.want {
+			t.Fatalf("%s: status byte = %#x, want %#x", c.name, b[1], c.want)
+		}
+	}
+}

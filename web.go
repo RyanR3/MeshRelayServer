@@ -1035,7 +1035,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Name        *string `json:"name"`
-		NewUsername  *string `json:"new_username"`
+		NewUsername *string `json:"new_username"`
 		NewAgencyID *string `json:"new_agency_id"`
 		Password    *string `json:"password"`
 	}
@@ -1669,14 +1669,14 @@ func (s *Server) handleGetMutualAid(w http.ResponseWriter, r *http.Request) {
 			agencyNames = append(agencyNames, name)
 		}
 		links = append(links, map[string]interface{}{
-			"id":            link.ID,
-			"agencies":      link.Agencies,
-			"agency_names":  agencyNames,
-			"channel":       link.Channel,
-			"channel_name":  link.ChannelName,
-			"created_at":    link.CreatedAt,
-			"created_by":    link.CreatedBy,
-			"active":        link.Active,
+			"id":           link.ID,
+			"agencies":     link.Agencies,
+			"agency_names": agencyNames,
+			"channel":      link.Channel,
+			"channel_name": link.ChannelName,
+			"created_at":   link.CreatedAt,
+			"created_by":   link.CreatedBy,
+			"active":       link.Active,
 		})
 	}
 	json.NewEncoder(w).Encode(links)
@@ -1730,8 +1730,14 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Auto-assign channel number
+	// Auto-assign channel number from the shared 10-19 block.
 	channel := s.pickMutualAidChannel()
+	if channel == 0 {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"no free channel — the 10-19 block is full (remove a patch, Zello mapping, or ad-hoc group)"}`))
+		return
+	}
 
 	// Generate link ID
 	idBytes := make([]byte, 8)
