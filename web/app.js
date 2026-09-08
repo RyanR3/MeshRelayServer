@@ -1810,11 +1810,16 @@ function addMappingRow(id) {
     if (zelloCardChannels[id]) fillZelloSelect(row.querySelector('.zbmap-zello'), zelloCardChannels[id], '');
 }
 
-// MeshRelay channel <option>s. High slots (10-19) so a bridged channel is a NEW
-// named channel on clients (like mutual aid) and doesn't collide with 0-9.
+// MeshRelay channel <option>s for a Zello mapping. Zello has its own block in
+// the server's channel map (0-49 talkgroups, 50-98 mutual aid and ad-hoc
+// groups, 100-149 LMR bridges, 150-199 Zello), so a bridged channel arrives as
+// a NEW named channel on clients and cannot collide with a talkgroup.
+const ZELLO_CHANNEL_MIN = 150;
+const ZELLO_CHANNEL_MAX = 199;
+
 function meshChannelOptions(sel) {
     let o = '';
-    for (let i = 10; i < 20; i++) {
+    for (let i = ZELLO_CHANNEL_MIN; i <= ZELLO_CHANNEL_MAX; i++) {
         o += `<option value="${i}" ${i === sel ? 'selected' : ''}>Bridge channel ${i}</option>`;
     }
     return o;
