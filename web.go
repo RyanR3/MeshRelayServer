@@ -114,6 +114,14 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid/requests/{id}/decline", s.requireAdmin(s.handleDeclineMutualAidRequest)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}/leave", s.requireAdmin(s.handleLeaveMutualAid)).Methods("POST")
 
+	// Agency-owned Zello bridges (agency_admin). A bridge is private to the
+	// agency that created it; the owner may grant another agency USE of it.
+	api.HandleFunc("/my-agency/zello-bridges", s.requireAdmin(s.handleGetMyZelloBridges)).Methods("GET")
+	api.HandleFunc("/my-agency/zello-bridges", s.requireAdmin(s.handleCreateMyZelloBridge)).Methods("POST")
+	api.HandleFunc("/my-agency/zello-bridges/{id}", s.requireAdmin(s.handleDeleteMyZelloBridge)).Methods("DELETE")
+	api.HandleFunc("/my-agency/zello-bridges/{id}/share", s.requireAdmin(s.handleShareZelloBridge)).Methods("POST")
+	api.HandleFunc("/my-agency/zello-bridges/{id}/unshare", s.requireAdmin(s.handleUnshareZelloBridge)).Methods("POST")
+
 	// LMR (VHF/UHF/P25) radio bridges (super_admin)
 	api.HandleFunc("/lmr-bridges", s.requireSuperAdmin(s.handleGetLMRBridges)).Methods("GET")
 	api.HandleFunc("/lmr-bridges", s.requireSuperAdmin(s.handleCreateLMRBridge)).Methods("POST")

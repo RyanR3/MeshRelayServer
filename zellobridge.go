@@ -45,10 +45,24 @@ type ZelloBridge struct {
 	// AgencyID is the bridge-level DEFAULT agency: it's used for mappings that
 	// don't set their own AgencyID (backward compatibility — every existing
 	// bridge's mappings inherit it). New mappings may each target any agency.
-	AgencyID     string         `json:"agency_id"`               // default agency for mappings that omit one
-	Mappings     []ZelloMapping `json:"mappings"`                // zello_channel <-> mesh_channel pairs (each with its own agency)
-	ZelloChannel string         `json:"zello_channel,omitempty"` // legacy single mapping
-	MeshChannel  int            `json:"mesh_channel,omitempty"`  // legacy single mapping
+	AgencyID string `json:"agency_id"` // default agency for mappings that omit one
+
+	// OwnerAgencyID is the agency that CREATED and controls this bridge. It is
+	// explicit rather than inferred from AgencyID or mapping order, because
+	// ownership decides who may edit, share and delete — and an inferred owner
+	// silently changes when the mapping list is reordered.
+	//
+	// A bridge is private to its owner: other agencies see it only when the
+	// owner grants them access, which is expressed as ExtraAgencies on a
+	// mapping. Recipients get the channel and nothing else — never the Zello
+	// credentials, the mapping editor, or delete.
+	//
+	// Empty means a pre-existing super_admin bridge with no agency owner;
+	// those stay super_admin-managed.
+	OwnerAgencyID string         `json:"owner_agency_id,omitempty"`
+	Mappings      []ZelloMapping `json:"mappings"`                // zello_channel <-> mesh_channel pairs (each with its own agency)
+	ZelloChannel  string         `json:"zello_channel,omitempty"` // legacy single mapping
+	MeshChannel   int            `json:"mesh_channel,omitempty"`  // legacy single mapping
 
 	Enabled   bool   `json:"enabled"`
 	CreatedAt string `json:"created_at"`
@@ -142,6 +156,30 @@ func (m ZelloMapping) targetAgencies() []string {
 
 // servesAgency reports whether this mapping feeds the given agency, whether as
 // its primary or as one of the shared extras.
+// ownedBy reports whether an agency controls this bridge (edit/share/delete).
+func (b *ZelloBridge) ownedBy(agencyID string) bool {
+	return agencyID != "" && b.OwnerAgencyID == agencyID
+}
+
+// sharedWith reports whether an agency has been granted USE of this bridge —
+// i.e. any mapping targets it. Owners are covered by ownedBy, not this.
+func (b *ZelloBridge) sharedWith(agencyID string) bool {
+	if agencyID == "" {
+		return false
+	}
+	for _, m := range b.effectiveMappings() {
+		if m.servesAgency(agencyID) {
+			return true
+		}
+	}
+	return false
+}
+
+// visibleTo reports whether an agency should see this bridge at all.
+func (b *ZelloBridge) visibleTo(agencyID string) bool {
+	return b.ownedBy(agencyID) || b.sharedWith(agencyID)
+}
+
 func (m ZelloMapping) servesAgency(agencyID string) bool {
 	if m.AgencyID == agencyID {
 		return true
@@ -217,6 +255,13 @@ func (s *Server) loadZelloBridges() {
 	s.mu.Lock()
 	for _, b := range bridges {
 		b.setStatus("disconnected", "")
+		// Adopt pre-ownership bridges to the agency they were created under, so
+		// that agency can manage its own bridge instead of it being orphaned
+		// (visible to its mapped agencies but editable by nobody but a
+		// super_admin).
+		if b.OwnerAgencyID == "" && b.AgencyID != "" {
+			b.OwnerAgencyID = b.AgencyID
+		}
 		s.zelloBridges[b.ID] = b
 	}
 	s.mu.Unlock()
