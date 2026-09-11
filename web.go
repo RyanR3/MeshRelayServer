@@ -696,12 +696,13 @@ func (s *Server) sendWebSocketUpdate(conn *websocket.Conn, agencyID string) erro
 			"network_timeseries": s.networkTimeSeries.GetPoints(),
 			"health":             s.CheckHealth(),
 			"activity":           s.activityLog.GetRecent(20),
-			// A cheap fingerprint of this agency's mutual-aid state. The
-			// dashboard reloads the page's data only when it CHANGES, so an
-			// incoming request or a partner leaving appears without the
-			// operator hitting refresh — and without polling four endpoints
-			// every two seconds.
-			"mutual_aid_rev": s.mutualAidRevision(agencyID),
+			// A cheap fingerprint of everything this agency's pages show:
+			// mutual aid plus the Zello and LMR bridges it owns or has been
+			// granted. The dashboard reloads the open page only when this
+			// CHANGES, so a request arriving, a bridge being shared, or one
+			// being deleted appears without the operator hitting refresh —
+			// and without polling those endpoints every two seconds.
+			"mutual_aid_rev": s.agencyRevision(agencyID),
 		},
 	}
 

@@ -222,6 +222,56 @@ func (s *Server) mutualAidRevision(agencyID string) uint64 {
 	return rev
 }
 
+// agencyRevision fingerprints everything the agency dashboard displays: its
+// mutual-aid state plus the Zello and LMR bridges it owns or has been granted.
+// The pages reload only when this changes, so a bridge appearing, being shared,
+// or being deleted shows up without the operator clicking away and back.
+//
+// Like mutualAidRevision it sums per-record hashes, so the value does not
+// depend on map iteration order — a whole-set hash would appear to change on
+// every tick and reload the page constantly.
+func (s *Server) agencyRevision(agencyID string) uint64 {
+	if agencyID == "" {
+		return 0
+	}
+	rev := s.mutualAidRevision(agencyID)
+
+	s.mu.RLock()
+	for _, b := range s.zelloBridges {
+		if !b.visibleTo(agencyID) {
+			continue
+		}
+		// Fold in the things the card shows, so an enable, a status change or a
+		// re-share registers — not just the bridge existing.
+		h := fnv64(b.ID) ^ fnv64(b.Name)
+		if b.Enabled {
+			h ^= fnv64("enabled")
+		}
+		for _, m := range b.effectiveMappings() {
+			h ^= fnv64(m.ZelloChannel) ^ uint64(m.MeshChannel)
+			for _, ag := range m.ExtraAgencies {
+				h ^= fnv64(ag)
+			}
+		}
+		rev += h
+	}
+	for _, b := range s.lmrBridges {
+		if !b.visibleTo(agencyID) {
+			continue
+		}
+		h := fnv64(b.ID) ^ fnv64(b.displayName()) ^ uint64(b.Channel)
+		if b.Enabled {
+			h ^= fnv64("enabled")
+		}
+		for _, ag := range b.Agencies {
+			h ^= fnv64(ag)
+		}
+		rev += h
+	}
+	s.mu.RUnlock()
+	return rev
+}
+
 // fnv64 is the FNV-1a hash of a short string.
 func fnv64(v string) uint64 {
 	const offset64 = 14695981039346656037

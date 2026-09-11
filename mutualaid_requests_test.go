@@ -185,3 +185,91 @@ func TestMutualAidRevisionZeroForSuperAdmin(t *testing.T) {
 		t.Fatal("super_admin has no per-agency view; revision should be 0")
 	}
 }
+
+// The revision must also track bridges, or a bridge appearing, being shared, or
+// being deleted leaves the open page stale until the operator navigates away
+// and back.
+func TestAgencyRevisionTracksBridges(t *testing.T) {
+	s := newMARTestServer()
+	s.lmrBridges = map[string]*LMRBridge{}
+	base := s.agencyRevision("fire")
+
+	// A bridge another agency owns and has not shared must not disturb us.
+	s.zelloBridges["z-other"] = &ZelloBridge{
+		ID: "z-other", OwnerAgencyID: "dpw",
+		Mappings: []ZelloMapping{{ZelloChannel: "X", MeshChannel: 150, AgencyID: "dpw"}},
+	}
+	if s.agencyRevision("fire") != base {
+		t.Fatal("another agency's private bridge changed our revision")
+	}
+
+	// Our own Zello bridge must.
+	s.zelloBridges["z1"] = &ZelloBridge{
+		ID: "z1", OwnerAgencyID: "fire",
+		Mappings: []ZelloMapping{{ZelloChannel: "Dispatch", MeshChannel: 151, AgencyID: "fire"}},
+	}
+	withZello := s.agencyRevision("fire")
+	if withZello == base {
+		t.Fatal("our own Zello bridge did not change the revision")
+	}
+
+	// Sharing it must change it again — the card gains a chip.
+	s.zelloBridges["z1"].Mappings[0].ExtraAgencies = []string{"ems"}
+	afterShare := s.agencyRevision("fire")
+	if afterShare == withZello {
+		t.Fatal("sharing a bridge did not change the revision")
+	}
+
+	// An LMR bridge must count too.
+	s.lmrBridges["l1"] = &LMRBridge{
+		ID: "l1", OwnerAgencyID: "fire", Username: "gw",
+		Agencies: []string{"fire"}, Channel: LMRChannelMin, Enabled: true,
+	}
+	withLmr := s.agencyRevision("fire")
+	if withLmr == afterShare {
+		t.Fatal("an LMR bridge did not change the revision")
+	}
+
+	// And deleting it must return the value toward where it was.
+	delete(s.lmrBridges, "l1")
+	if s.agencyRevision("fire") != afterShare {
+		t.Fatal("deleting a bridge did not change the revision back")
+	}
+}
+
+// A recipient's view changes when a bridge is shared WITH them, so their
+// revision must move too.
+func TestAgencyRevisionMovesForShareRecipient(t *testing.T) {
+	s := newMARTestServer()
+	s.lmrBridges = map[string]*LMRBridge{}
+	before := s.agencyRevision("ems")
+
+	s.lmrBridges["l1"] = &LMRBridge{
+		ID: "l1", OwnerAgencyID: "fire", Username: "gw",
+		Agencies: []string{"fire"}, Channel: LMRChannelMin,
+	}
+	if s.agencyRevision("ems") != before {
+		t.Fatal("a bridge EMS cannot see changed EMS's revision")
+	}
+
+	s.lmrBridges["l1"].Agencies = append(s.lmrBridges["l1"].Agencies, "ems")
+	if s.agencyRevision("ems") == before {
+		t.Fatal("being granted access did not change the recipient's revision")
+	}
+}
+
+func TestAgencyRevisionIsStableAcrossCalls(t *testing.T) {
+	s := newMARTestServer()
+	s.lmrBridges = map[string]*LMRBridge{}
+	for i := 0; i < 15; i++ {
+		id := string(rune('a' + i))
+		s.zelloBridges[id] = &ZelloBridge{ID: id, OwnerAgencyID: "fire",
+			Mappings: []ZelloMapping{{ZelloChannel: id, MeshChannel: 150 + i, AgencyID: "fire"}}}
+	}
+	first := s.agencyRevision("fire")
+	for i := 0; i < 10; i++ {
+		if s.agencyRevision("fire") != first {
+			t.Fatal("revision changed with no state change (map ordering?)")
+		}
+	}
+}

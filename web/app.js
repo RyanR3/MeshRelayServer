@@ -3571,10 +3571,18 @@ function maCheckRevision(data) {
     if (rev === maLastRevision) return;
     maLastRevision = rev;
 
-    const page = document.getElementById('page-mutual-aid');
-    if (page && page.classList.contains('active') && currentRole !== 'super_admin') {
-        fetchAgencyMutualAid();
-    }
+    if (currentRole === 'super_admin') return;
+
+    // Refresh whichever agency page is open. The fingerprint covers mutual aid
+    // AND both bridge types, so a bridge appearing or being shared updates the
+    // page the operator is actually looking at.
+    const active = id => {
+        const el = document.getElementById(id);
+        return el && el.classList.contains('active');
+    };
+    if (active('page-mutual-aid')) fetchAgencyMutualAid();
+    if (active('page-zello-bridges')) fetchAgencyZelloBridges();
+    if (active('page-lmr-bridges')) fetchAgencyLmrBridges();
     maUpdateNavBadge();
 }
 
