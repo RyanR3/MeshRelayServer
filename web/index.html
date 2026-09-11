@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=15">
+    <link rel="stylesheet" href="style.css?v=16">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -46,7 +46,7 @@
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><line x1="19" y1="9" x2="23" y2="9"/></svg></span>
                     <span class="nav-label">Guest Events</span>
                 </li>
-                <li class="nav-item super-admin-only" data-page="zello-bridges">
+                <li class="nav-item admin-only" data-page="zello-bridges">
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/></svg></span>
                     <span class="nav-label">Zello Bridges</span>
                 </li>
@@ -555,15 +555,46 @@
             <div class="page" id="page-zello-bridges">
                 <div class="page-header">
                     <h2>Zello Bridges</h2>
-                    <button class="btn-create" onclick="showCreateZelloBridgeModal()">+ Add Bridge</button>
+                    <button class="btn-create" id="zb-add-btn" onclick="zbAddBridge()">+ Add Bridge</button>
                 </div>
-                <p class="modal-subtitle" style="margin:0 0 12px;">Bridge a MeshRelay channel to a Zello Work channel. Audio relays both ways when enabled.</p>
+                <p class="modal-subtitle" style="margin:0 0 12px;" id="zb-subtitle">Bridge a MeshRelay channel to a Zello Work channel. Audio relays both ways when enabled.</p>
                 <div id="zello-bridges-status" class="status-message" style="display: none;"></div>
-                <div id="zello-bridges-list" class="zb-list"></div>
-                <div id="zello-bridges-empty" class="empty-state" style="display:none;">
-                    <div class="empty-state-icon">&#128225;</div>
-                    <div>No Zello bridges configured</div>
-                    <div style="font-size:13px;color:#888;margin-top:8px;">Add a bridge to connect a MeshRelay channel to Zello Work.</div>
+
+                <!-- super_admin: every bridge on the server -->
+                <div id="zb-superadmin-view">
+                    <div id="zello-bridges-list" class="zb-list"></div>
+                    <div id="zello-bridges-empty" class="empty-state" style="display:none;">
+                        <div class="empty-state-icon">&#128225;</div>
+                        <div>No Zello bridges configured</div>
+                        <div style="font-size:13px;color:#888;margin-top:8px;">Add a bridge to connect a MeshRelay channel to Zello Work.</div>
+                    </div>
+                </div>
+
+                <!-- agency_admin: bridges this agency owns, plus any shared with
+                     it. A bridge is private to its owner; sharing is a grant,
+                     so the owner drags an agency onto the bridge. -->
+                <div id="zb-agency-view" style="display:none;">
+                    <div class="ma-builder">
+                        <div class="ma-col ma-agencies-col">
+                            <div class="ma-col-header">
+                                <span>Agencies</span>
+                                <span class="ma-count" id="zb-dir-count">0</span>
+                            </div>
+                            <div id="zb-dir-search-row" class="ma-dir-search-row" style="display:none;">
+                                <input type="text" id="zb-dir-search" class="ma-dir-search"
+                                       placeholder="Search agencies by name"
+                                       oninput="zbFilterDirectory()">
+                            </div>
+                            <div class="ma-agency-pool" id="zb-directory"></div>
+                        </div>
+                        <div class="ma-col ma-patches-col">
+                            <div class="ma-col-header">
+                                <span>Your Bridges</span>
+                                <span class="ma-count" id="zb-bridge-count">0</span>
+                            </div>
+                            <div class="ma-patches" id="zb-agency-list"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -920,6 +951,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=23"></script>
+    <script src="app.js?v=24"></script>
 </body>
 </html>

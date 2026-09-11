@@ -2786,3 +2786,19 @@ body {
 
 /* The trust toggle sits inside a draggable card, so give it room. */
 .ma-agency-card .ma-trust-btn { margin-top: 6px; }
+
+/* Zello bridge card as a share target. Quieter than an empty builder dropzone,
+   since the card already has content above it. */
+.zb-share-zone {
+    min-height: 0;
+    padding: 8px;
+    margin-top: 10px;
+}
+.ma-edit-hint {
+    font-size: 11px;
+    opacity: 0.55;
+    margin-top: 6px;
+}
+
+/* Channel mappings listed on an owner's bridge card. */
+.zb-maps { margin: 8px 0 0; }

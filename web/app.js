@@ -60,9 +60,18 @@ function navigateTo(pageName) {
     } else if (pageName === 'guest-events') {
         fetchGuestEvents();
     } else if (pageName === 'zello-bridges') {
-        // Load agencies for the per-mapping agency dropdowns, then bridges.
-        fetch('/api/agencies').then(r => r.json()).then(a => { agenciesList = a || []; }).catch(() => {});
-        fetchZelloBridges();
+        // super_admin manages every bridge on the server; an agency admin sees
+        // only the bridges it owns or has been granted.
+        if (currentRole === 'super_admin') {
+            document.getElementById('zb-agency-view').style.display = 'none';
+            document.getElementById('zb-superadmin-view').style.display = '';
+            fetch('/api/agencies').then(r => r.json()).then(a => { agenciesList = a || []; }).catch(() => {});
+            fetchZelloBridges();
+        } else {
+            document.getElementById('zb-superadmin-view').style.display = 'none';
+            document.getElementById('zb-agency-view').style.display = '';
+            fetchAgencyZelloBridges();
+        }
     } else if (pageName === 'lmr-bridges') {
         fetchLmrBridges();
     } else if (pageName === 'activity') {
@@ -3566,4 +3575,245 @@ function maUpdateNavBadge() {
             badge.textContent = inbound;
         })
         .catch(() => {});
+}
+
+
+// ===== Zello Bridges — agency-admin view =====
+//
+// A Zello bridge belongs to the agency that created it, backed by that agency's
+// own Zello Work account. It is private: no other agency knows it exists until
+// the owner grants access. Granting is a direct act by the owner — their
+// bridge, their account — so there is nothing to approve.
+//
+// A recipient gets USE only: the channel appears for their clients, but the API
+// never sends them the Zello network, username or mappings, and they cannot
+// share, edit or delete. They may leave, which withdraws the channel.
+//
+// Layout mirrors Mutual Aid: agencies on the left, bridges on the right, drag
+// to grant.
+
+let zbDirectory = [];
+let zbBridges = [];
+
+function fetchAgencyZelloBridges() {
+    const arr = v => Array.isArray(v) ? v : [];
+    Promise.all([
+        fetch('/api/my-agency/zello-bridges').then(r => r.json()).catch(() => []),
+        fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => [])
+    ]).then(([bridges, directory]) => {
+        zbBridges = arr(bridges);
+        zbDirectory = arr(directory);
+        const safe = (name, fn) => {
+            try { fn(); } catch (e) { console.error('Zello: ' + name, e); }
+        };
+        safe('directory', zbFilterDirectory);
+        safe('bridges', zbRenderBridges);
+    }).catch(err => console.error('Failed to load Zello bridges:', err));
+}
+
+// --- left column: agencies you can grant access to ---
+
+function zbFilterDirectory() {
+    const box = document.getElementById('zb-dir-search');
+    const q = (box ? box.value : '').trim().toLowerCase();
+    const shown = q
+        ? zbDirectory.filter(a => (a.name || '').toLowerCase().includes(q)
+                               || (a.id || '').toLowerCase().includes(q))
+        : zbDirectory;
+    zbRenderDirectory(shown, q);
+}
+
+function zbRenderDirectory(agencies, query) {
+    const pool = document.getElementById('zb-directory');
+    const count = document.getElementById('zb-dir-count');
+    const search = document.getElementById('zb-dir-search-row');
+    if (!pool) return;
+    if (count) count.textContent = zbDirectory.length;
+    if (search) search.style.display = zbDirectory.length > 5 ? '' : 'none';
+
+    if (!agencies.length) {
+        pool.innerHTML = query
+            ? `<div class="ma-empty">No agency matches &ldquo;${escapeHtml(query)}&rdquo;.</div>`
+            : `<div class="ma-empty">No other agencies are discoverable.
+                 Only discoverable agencies can be granted access.</div>`;
+        return;
+    }
+    pool.innerHTML = agencies.map(a => `
+        <div class="ma-agency-card" draggable="true" data-agency-id="${escapeAttr(a.id)}"
+             ondragstart="maDragStart(event)" ondragend="maDragEnd(event)">
+            <div class="ma-agency-name">${escapeHtml(a.name)}</div>
+            <div class="ma-agency-id">${escapeHtml(a.id)}</div>
+        </div>`).join('');
+}
+
+// --- right column: your bridges ---
+
+function zbRenderBridges() {
+    const wrap = document.getElementById('zb-agency-list');
+    const count = document.getElementById('zb-bridge-count');
+    const addBtn = document.getElementById('zb-add-btn');
+    if (!wrap) return;
+    if (count) count.textContent = zbBridges.length;
+    if (addBtn) addBtn.style.display = '';
+
+    if (!zbBridges.length) {
+        wrap.innerHTML = `<div class="ma-empty">
+            No Zello bridges yet. Add one to connect your agency's Zello Work
+            account, then drag an agency here to share it.
+        </div>`;
+        return;
+    }
+
+    wrap.innerHTML = zbBridges.map(b => {
+        const owner = b.access === 'owner';
+        const dot = zelloStatusColor(b.status);
+        const safeId = escapeAttr(b.id);
+
+        if (!owner) {
+            // Shared with us: channels and nothing else. No credentials, no
+            // mapping editor, no delete — only the option to leave.
+            const chans = (b.channels || []).map(c =>
+                `<span class="ma-chip">${escapeHtml(c.name || 'channel')} &middot; ch ${c.channel}</span>`
+            ).join('') || '<span class="zb-map-empty">no channels</span>';
+            return `<div class="ma-patch-card ma-patch-existing">
+                <div class="ma-patch-card-head">
+                    <span class="ma-patch-title">
+                        <span class="zb-dot" style="background:${dot}"></span>
+                        ${escapeHtml(b.name)}
+                    </span>
+                    <button class="ma-patch-remove" onclick="zbLeave('${safeId}')"
+                            title="Leave this bridge">&times;</button>
+                </div>
+                <div class="ma-patch-chips">${chans}</div>
+                <div class="ma-patch-meta">Shared by ${escapeHtml(b.owner_name || 'another agency')}
+                    &middot; ${escapeHtml(b.status || 'unknown')}</div>
+            </div>`;
+        }
+
+        // Owner: the bridge is a drop target for granting access.
+        const shared = (b.shared_with || []).map(a =>
+            `<span class="ma-chip">${escapeHtml(a.name)}<button class="ma-chip-x"
+                onclick="zbUnshare('${safeId}','${escapeAttr(a.id)}')"
+                title="Revoke access">&times;</button></span>`).join('');
+        const maps = (b.mappings || []).map(m =>
+            `<div class="zb-map">${escapeHtml(m.zello_channel || '(unmapped)')}
+                <span class="zb-arrow">&rarr;</span> ch ${m.mesh_channel}</div>`).join('')
+            || '<div class="zb-map-empty">No channels mapped yet</div>';
+
+        return `<div class="ma-patch-card" id="zb-card-${safeId}">
+            <div class="ma-patch-card-head">
+                <span class="ma-patch-title">
+                    <span class="zb-dot" style="background:${dot}"></span>
+                    ${escapeHtml(b.name)}
+                </span>
+                <button class="ma-patch-remove" onclick="zbDelete('${safeId}','${escapeAttr(b.name)}')"
+                        title="Delete this bridge">&times;</button>
+            </div>
+            <div class="ma-patch-meta">${escapeHtml(b.network || '')}
+                &middot; ${escapeHtml(b.status || 'disconnected')}
+                ${b.last_error ? '&middot; <span class="zb-error">' + escapeHtml(b.last_error) + '</span>' : ''}
+            </div>
+            <div class="zb-maps">${maps}</div>
+            <div class="ma-dropzone zb-share-zone"
+                 ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
+                 ondrop="zbShareDrop(event,'${safeId}')">
+                <div class="ma-patch-chips">${shared}</div>
+                <div class="ma-dropzone-hint ma-edit-hint">Drag an agency here to share this bridge</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// --- actions ---
+
+function zbShareDrop(e, bridgeId) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('ma-dropzone-over');
+    const agencyId = e.dataTransfer.getData('text/plain');
+    if (!agencyId) return;
+    fetch('/api/my-agency/zello-bridges/' + bridgeId + '/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agency_id: agencyId })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status', 'Access granted — the channel now appears for them', 'success');
+        fetchAgencyZelloBridges();
+    })
+    .catch(err => showStatus('zello-bridges-status', 'Failed to share: ' + err.message, 'error'));
+}
+
+function zbUnshare(bridgeId, agencyId) {
+    fetch('/api/my-agency/zello-bridges/' + bridgeId + '/unshare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agency_id: agencyId })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status', 'Access revoked — the channel was removed from their clients', 'success');
+        fetchAgencyZelloBridges();
+    })
+    .catch(err => showStatus('zello-bridges-status', 'Failed: ' + err.message, 'error'));
+}
+
+function zbLeave(bridgeId) {
+    if (!confirm('Leave this bridge? Its channel is removed from your clients.')) return;
+    fetch('/api/my-agency/zello-bridges/' + bridgeId + '/unshare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status', 'Left the bridge', 'success');
+        fetchAgencyZelloBridges();
+    })
+    .catch(err => showStatus('zello-bridges-status', 'Failed to leave: ' + err.message, 'error'));
+}
+
+function zbDelete(bridgeId, name) {
+    if (!confirm('Delete "' + name + '"? Its channels are removed from every agency using it.')) return;
+    fetch('/api/my-agency/zello-bridges/' + bridgeId, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status', 'Bridge deleted', 'success');
+        fetchAgencyZelloBridges();
+    })
+    .catch(err => showStatus('zello-bridges-status', 'Failed to delete: ' + err.message, 'error'));
+}
+
+// "+ Add Bridge" routes by role: super_admin gets the existing modal (which
+// asks which agency to target); an agency admin creates one owned by their own
+// agency, so no agency picker is needed.
+function zbAddBridge() {
+    if (currentRole === 'super_admin') { showCreateZelloBridgeModal(); return; }
+    const name = prompt('Name this bridge (e.g. County Dispatch):');
+    if (name === null || !name.trim()) return;
+    const network = prompt('Zello Work network (the subdomain, e.g. myorg):');
+    if (network === null || !network.trim()) return;
+    const username = prompt('Zello bot account username:') || '';
+    const password = prompt('Zello bot account password:') || '';
+
+    fetch('/api/my-agency/zello-bridges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: name.trim(), network: network.trim(),
+            username: username.trim(), password: password
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        showStatus('zello-bridges-status',
+            'Bridge created. Map a Zello channel to it before sharing.', 'success');
+        fetchAgencyZelloBridges();
+    })
+    .catch(err => showStatus('zello-bridges-status', 'Failed to create: ' + err.message, 'error'));
 }
