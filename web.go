@@ -101,6 +101,18 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/mutual-aid", s.requireSuperAdmin(s.handleCreateMutualAid)).Methods("POST")
 	api.HandleFunc("/mutual-aid/{id}", s.requireSuperAdmin(s.handleDeleteMutualAid)).Methods("DELETE")
 
+	// Agency-driven mutual aid (agency_admin): discovery settings, the
+	// directory, and the request/approve flow. Each handler scopes itself to
+	// the caller's own agency; super_admin sees everything.
+	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleGetMyDiscovery)).Methods("GET")
+	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleUpdateMyDiscovery)).Methods("PUT")
+	api.HandleFunc("/agencies/discoverable", s.requireAdmin(s.handleGetDiscoverableAgencies)).Methods("GET")
+	api.HandleFunc("/mutual-aid/requests", s.requireAdmin(s.handleGetMutualAidRequests)).Methods("GET")
+	api.HandleFunc("/mutual-aid/requests", s.requireAdmin(s.handleCreateMutualAidRequest)).Methods("POST")
+	api.HandleFunc("/mutual-aid/requests/{id}/approve", s.requireAdmin(s.handleApproveMutualAidRequest)).Methods("POST")
+	api.HandleFunc("/mutual-aid/requests/{id}/decline", s.requireAdmin(s.handleDeclineMutualAidRequest)).Methods("POST")
+	api.HandleFunc("/mutual-aid/{id}/leave", s.requireAdmin(s.handleLeaveMutualAid)).Methods("POST")
+
 	// LMR (VHF/UHF/P25) radio bridges (super_admin)
 	api.HandleFunc("/lmr-bridges", s.requireSuperAdmin(s.handleGetLMRBridges)).Methods("GET")
 	api.HandleFunc("/lmr-bridges", s.requireSuperAdmin(s.handleCreateLMRBridge)).Methods("POST")

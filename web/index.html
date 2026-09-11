@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=11">
+    <link rel="stylesheet" href="style.css?v=12">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -38,7 +38,7 @@
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 21h18M9 8h1M9 12h1M9 16h1M14 8h1M14 12h1M14 16h1M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16"/></svg></span>
                     <span class="nav-label">Agencies</span>
                 </li>
-                <li class="nav-item super-admin-only" data-page="mutual-aid">
+                <li class="nav-item admin-only" data-page="mutual-aid">
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
                     <span class="nav-label">Mutual Aid</span>
                 </li>
@@ -441,7 +441,49 @@
 
                 <div id="mutual-aid-status" class="status-message" style="display: none;"></div>
 
-                <div class="ma-builder">
+                <!-- Agency-admin view: discovery settings, the directory, and
+                     the request/approve flow. Hidden from super_admin, who gets
+                     the drag-and-drop builder below instead. -->
+                <div id="ma-agency-view" style="display: none;">
+
+                    <div class="ma-section">
+                        <div class="ma-col-header"><span>Your Agency</span></div>
+                        <div class="ma-discovery-card">
+                            <label class="ma-switch-row">
+                                <input type="checkbox" id="ma-discoverable"
+                                       onchange="saveDiscovery()">
+                                <span>Discoverable to other agencies</span>
+                            </label>
+                            <p class="ma-discovery-hint">
+                                When on, every other agency admin on this server can see
+                                your agency <strong>name</strong> and request a mutual-aid
+                                patch. Nothing else is shared &mdash; not your users,
+                                channels, or activity. Turn it off to disappear from the
+                                directory; existing patches are unaffected.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="ma-section" id="ma-requests-section" style="display:none;">
+                        <div class="ma-col-header">
+                            <span>Requests</span>
+                            <span class="ma-count" id="ma-request-count">0</span>
+                        </div>
+                        <div id="ma-requests"></div>
+                    </div>
+
+                    <div class="ma-section">
+                        <div class="ma-col-header"><span>Active Patches</span></div>
+                        <div id="ma-my-patches"></div>
+                    </div>
+
+                    <div class="ma-section">
+                        <div class="ma-col-header"><span>Find Agencies</span></div>
+                        <div id="ma-directory"></div>
+                    </div>
+                </div>
+
+                <div class="ma-builder" id="ma-superadmin-view">
                     <!-- Left: agency pool -->
                     <div class="ma-col ma-agencies-col">
                         <div class="ma-col-header">
@@ -867,6 +909,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=19"></script>
+    <script src="app.js?v=20"></script>
 </body>
 </html>

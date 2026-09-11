@@ -2691,3 +2691,54 @@ body {
     color: #8B949E;
     margin: -4px 0 12px;
 }
+
+/* ===== Mutual Aid — agency-admin view =====
+   Reuses the ma-* patch cards from the super-admin builder; only the pieces
+   with no equivalent there are defined here. */
+
+.ma-section { margin-bottom: 22px; }
+
+.ma-discovery-card {
+    background: #151B23;
+    border: 1px solid #1E2733;
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+.ma-switch-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #E6EDF3;
+    cursor: pointer;
+}
+.ma-switch-row input { width: 16px; height: 16px; accent-color: #FF5722; cursor: pointer; }
+
+.ma-discovery-hint {
+    margin: 8px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #8B949E;
+}
+
+/* Direction label on a pending request. */
+.ma-req-dir { font-size: 11px; color: #8B949E; }
+
+/* Relationship state in the directory. */
+.ma-state-ok   { font-size: 12px; font-weight: 600; color: #3FB950; }
+.ma-state-wait { font-size: 12px; font-weight: 600; color: #FBBF24; }
+
+/* Standing-agreement toggle. */
+.ma-trust-btn {
+    background: transparent;
+    border: 1px solid #30363D;
+    color: #8B949E;
+    border-radius: 12px;
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+}
+.ma-trust-btn:hover { border-color: #FF5722; color: #E6EDF3; }
+.ma-trust-on { border-color: #3FB950; color: #3FB950; }

@@ -33,7 +33,9 @@ func main() {
 		config.WebPort = *webPort
 	}
 
-	log.Printf("=== MeshRelay Server v%s Starting ===", Version)
+	// Version already carries its "v" (build.sh uses `git describe --tags`),
+	// so don't prefix another one — that printed "vv3.3.0".
+	log.Printf("=== MeshRelay Server %s Starting ===", Version)
 	log.Printf("PTT Port: %d", config.PTTPort)
 	log.Printf("Web GUI: http://localhost:%d", config.WebPort)
 	log.Printf("Max Clients: %d", config.MaxClients)

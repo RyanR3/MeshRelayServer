@@ -46,7 +46,17 @@ function navigateTo(pageName) {
     } else if (pageName === 'users') {
         fetchUsers();
     } else if (pageName === 'mutual-aid') {
-        fetchMutualAid();
+        // Super admins keep the drag-and-drop builder (they can patch any two
+        // agencies). Agency admins get discovery + request/approve instead.
+        if (currentRole === 'super_admin') {
+            document.getElementById('ma-agency-view').style.display = 'none';
+            document.getElementById('ma-superadmin-view').style.display = '';
+            fetchMutualAid();
+        } else {
+            document.getElementById('ma-superadmin-view').style.display = 'none';
+            document.getElementById('ma-agency-view').style.display = '';
+            fetchAgencyMutualAid();
+        }
     } else if (pageName === 'guest-events') {
         fetchGuestEvents();
     } else if (pageName === 'zello-bridges') {
@@ -3181,4 +3191,241 @@ function showLmrBridgeQr(username, agencyId) {
         return;
     }
     showQRCode(username, agencyId || '');
+}
+
+
+// ===== Mutual Aid — agency-admin view =====
+//
+// An agency opts into the directory, finds partners by name, and requests a
+// patch. If the RECEIVING agency already trusts the sender, the link goes live
+// at once; otherwise it waits for approval. Either side can leave a live patch.
+
+function fetchAgencyMutualAid() {
+    Promise.all([
+        fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null),
+        fetch('/api/mutual-aid/requests').then(r => r.json()).catch(() => []),
+        fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
+        fetch('/api/mutual-aid').then(r => r.json()).catch(() => [])
+    ]).then(([discovery, requests, directory, links]) => {
+        renderDiscovery(discovery);
+        renderMaRequests(requests || []);
+        renderMyPatches(links || [], discovery);
+        renderDirectory(directory || [], discovery);
+    }).catch(err => console.error('Failed to load mutual aid:', err));
+}
+
+let myAgencyId = null;
+
+function renderDiscovery(d) {
+    if (!d) return;
+    myAgencyId = d.agency_id;
+    const cb = document.getElementById('ma-discoverable');
+    if (cb) cb.checked = !!d.discoverable;
+}
+
+function saveDiscovery() {
+    const cb = document.getElementById('ma-discoverable');
+    fetch('/api/my-agency/discovery', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discoverable: cb.checked })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        showStatus('mutual-aid-status',
+            cb.checked ? 'Your agency is now discoverable to other agencies'
+                       : 'Your agency is hidden from the directory',
+            'success');
+        fetchAgencyMutualAid();
+    })
+    .catch(err => showStatus('mutual-aid-status', 'Failed to save: ' + err.message, 'error'));
+}
+
+function renderMaRequests(requests) {
+    const pending = requests.filter(r => r.status === 'pending');
+    const section = document.getElementById('ma-requests-section');
+    const wrap = document.getElementById('ma-requests');
+    const count = document.getElementById('ma-request-count');
+    if (!wrap) return;
+
+    if (!pending.length) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    if (count) count.textContent = pending.length;
+
+    wrap.innerHTML = pending.map(r => {
+        const inbound = r.direction === 'inbound';
+        const who = inbound ? r.from_name : r.to_name;
+        const safeId = escapeAttr(r.id);
+        // Inbound: approve or decline. Outbound: you may withdraw your own ask.
+        const actions = inbound
+            ? `<button class="btn-primary" onclick="approveMaRequest('${safeId}')">Approve</button>
+               <button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Decline</button>`
+            : `<button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Withdraw</button>`;
+        return `<div class="ma-patch-card">
+            <div class="ma-patch-card-head">
+                <span class="ma-patch-title">${escapeHtml(who)}</span>
+                <span class="ma-req-dir">${inbound ? 'wants to patch with you' : 'request sent'}</span>
+            </div>
+            <div class="ma-patch-meta">Channel name: ${escapeHtml(r.channel_name || 'Mutual Aid')}</div>
+            <div class="ma-patch-actions">${actions}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderMyPatches(links, discovery) {
+    const wrap = document.getElementById('ma-my-patches');
+    if (!wrap) return;
+    const mine = (links || []).filter(l =>
+        (l.agencies || []).includes(discovery ? discovery.agency_id : null));
+
+    if (!mine.length) {
+        wrap.innerHTML = '<div class="ma-empty">No active patches.</div>';
+        return;
+    }
+    wrap.innerHTML = mine.map(l => {
+        const names = l.agency_names || l.agencies || [];
+        const chips = (l.agencies || []).map((aid, i) =>
+            `<span class="ma-chip">${escapeHtml(names[i] || aid)}</span>`).join('');
+        return `<div class="ma-patch-card ma-patch-existing">
+            <div class="ma-patch-card-head">
+                <span class="ma-patch-title">${escapeHtml(l.channel_name || 'Mutual Aid')}</span>
+                <button class="ma-patch-remove" onclick="leavePatch('${escapeAttr(l.id)}')"
+                        title="Leave this patch">&times;</button>
+            </div>
+            <div class="ma-patch-chips">${chips}</div>
+            <div class="ma-patch-meta">Channel ${l.channel}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderDirectory(agencies, discovery) {
+    const wrap = document.getElementById('ma-directory');
+    if (!wrap) return;
+
+    if (!discovery || !discovery.discoverable) {
+        wrap.innerHTML = `<div class="ma-empty">
+            Turn on <strong>Discoverable</strong> above to browse other agencies.
+            Discovery is mutual &mdash; agencies that hide themselves are not listed.
+        </div>`;
+        return;
+    }
+    if (!agencies.length) {
+        wrap.innerHTML = '<div class="ma-empty">No other agencies are discoverable yet.</div>';
+        return;
+    }
+
+    wrap.innerHTML = agencies.map(a => {
+        const safeId = escapeAttr(a.id);
+        let action, note = '';
+        switch (a.state) {
+            case 'linked':
+                action = '<span class="ma-state-ok">Patched</span>';
+                break;
+            case 'requested':
+                action = '<span class="ma-state-wait">Request sent</span>';
+                break;
+            case 'awaiting_you':
+                action = '<span class="ma-state-wait">Awaiting your approval</span>';
+                break;
+            default:
+                action = `<button class="btn-secondary"
+                            onclick="requestPatch('${safeId}','${escapeAttr(a.name)}')">Request patch</button>`;
+                // Tell the operator up front whether this will link instantly.
+                if (a.auto_accepts_us) note = '<div class="ma-patch-meta">Auto-accepts your requests</div>';
+        }
+        const trust = a.we_trust_them
+            ? `<button class="ma-trust-btn ma-trust-on" onclick="toggleTrust('${safeId}', false)"
+                 title="You auto-accept their requests. Click to stop.">Trusted</button>`
+            : `<button class="ma-trust-btn" onclick="toggleTrust('${safeId}', true)"
+                 title="Auto-accept future requests from this agency.">Trust</button>`;
+        return `<div class="ma-patch-card">
+            <div class="ma-patch-card-head">
+                <span class="ma-patch-title">${escapeHtml(a.name)}</span>
+                ${trust}
+            </div>
+            ${note}
+            <div class="ma-patch-actions">${action}</div>
+        </div>`;
+    }).join('');
+}
+
+function requestPatch(agencyId, agencyName) {
+    const name = prompt('Name this mutual-aid channel:', 'Mutual Aid');
+    if (name === null) return;
+    fetch('/api/mutual-aid/requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to_agency: agencyId, channel_name: name.trim() || 'Mutual Aid' })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        showStatus('mutual-aid-status', data.auto_accepted
+            ? `Patched with ${agencyName} on channel ${data.channel} (standing agreement)`
+            : `Request sent to ${agencyName} — waiting for their approval`, 'success');
+        fetchAgencyMutualAid();
+    })
+    .catch(err => showStatus('mutual-aid-status', 'Failed to request: ' + err.message, 'error'));
+}
+
+function approveMaRequest(id) {
+    fetch('/api/mutual-aid/requests/' + id + '/approve', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        showStatus('mutual-aid-status', `Patched on channel ${data.channel}`, 'success');
+        fetchAgencyMutualAid();
+    })
+    .catch(err => showStatus('mutual-aid-status', 'Failed to approve: ' + err.message, 'error'));
+}
+
+function declineMaRequest(id) {
+    fetch('/api/mutual-aid/requests/' + id + '/decline', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        showStatus('mutual-aid-status', 'Request closed', 'success');
+        fetchAgencyMutualAid();
+    })
+    .catch(err => showStatus('mutual-aid-status', 'Failed: ' + err.message, 'error'));
+}
+
+function leavePatch(id) {
+    if (!confirm('Leave this patch? The channel is removed from BOTH agencies.')) return;
+    fetch('/api/mutual-aid/' + id + '/leave', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        showStatus('mutual-aid-status', 'Patch removed', 'success');
+        fetchAgencyMutualAid();
+    })
+    .catch(err => showStatus('mutual-aid-status', 'Failed to leave: ' + err.message, 'error'));
+}
+
+// Add or remove an agency from this agency's standing-agreement list. The list
+// governs what WE accept, so trusting someone does not let us skip THEIR
+// approval — it lets their requests to us link instantly.
+function toggleTrust(agencyId, trust) {
+    fetch('/api/my-agency/discovery')
+    .then(r => r.json())
+    .then(d => {
+        const current = (d.auto_accept || []).map(x => x.id);
+        const next = trust
+            ? Array.from(new Set(current.concat([agencyId])))
+            : current.filter(id => id !== agencyId);
+        return fetch('/api/my-agency/discovery', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto_accept_from: next })
+        }).then(r => r.json());
+    })
+    .then(data => {
+        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        showStatus('mutual-aid-status', trust
+            ? 'Added to your standing agreements — their requests will link instantly'
+            : 'Removed from your standing agreements', 'success');
+        fetchAgencyMutualAid();
+    })
+    .catch(err => showStatus('mutual-aid-status', 'Failed: ' + err.message, 'error'));
 }

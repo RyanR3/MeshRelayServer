@@ -1,0 +1,186 @@
+package main
+
+// Agency-to-agency mutual-aid negotiation.
+//
+// Mutual-aid links used to be a super_admin-only construct: the server operator
+// decided who was patched to whom. This lets the agencies arrange it themselves.
+//
+//   1. An agency opts into the directory (Agency.Discoverable).
+//   2. Another agency admin finds it by name and requests a patch.
+//   3. If the RECEIVING agency already trusts the sender (AutoAcceptFrom), the
+//      link goes live immediately; otherwise the request waits for approval.
+//   4. Approval creates an ordinary MutualAidLink — the same object the
+//      super_admin path has always produced, so relay, channel allocation and
+//      teardown are unchanged.
+//
+// Either side may leave a live patch, and super_admin retains an override.
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"log"
+	"os"
+	"time"
+)
+
+// Request lifecycle states.
+const (
+	MARequestPending  = "pending"
+	MARequestApproved = "approved"
+	MARequestDeclined = "declined"
+)
+
+// MutualAidRequest is one agency asking another for a patch.
+type MutualAidRequest struct {
+	ID          string `json:"id"`
+	FromAgency  string `json:"from_agency"`
+	ToAgency    string `json:"to_agency"`
+	ChannelName string `json:"channel_name"`
+	Status      string `json:"status"`
+	CreatedAt   string `json:"created_at"`
+	CreatedBy   string `json:"created_by"`
+	// ResolvedAt/ResolvedBy record the approve or decline.
+	ResolvedAt string `json:"resolved_at,omitempty"`
+	ResolvedBy string `json:"resolved_by,omitempty"`
+	// LinkID is the MutualAidLink this became, once approved.
+	LinkID string `json:"link_id,omitempty"`
+	// AutoAccepted marks a request that skipped approval via a standing
+	// agreement, so the audit trail distinguishes it from a human approval.
+	AutoAccepted bool `json:"auto_accepted,omitempty"`
+}
+
+func (s *Server) mutualAidRequestsFile() string {
+	if s.config != nil && s.config.MutualAidRequestsFile != "" {
+		return s.config.MutualAidRequestsFile
+	}
+	return "mutual_aid_requests.json"
+}
+
+// loadMutualAidRequests reads requests from disk. A missing file is not an error.
+func (s *Server) loadMutualAidRequests() {
+	path := s.mutualAidRequestsFile()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("Mutual aid: failed to read %s: %v", path, err)
+		}
+		return
+	}
+	var list []*MutualAidRequest
+	if err := json.Unmarshal(data, &list); err != nil {
+		log.Printf("Mutual aid: failed to parse %s: %v", path, err)
+		return
+	}
+	for _, r := range list {
+		if r.ID != "" {
+			s.mutualAidRequests[r.ID] = r
+		}
+	}
+	log.Printf("Loaded %d mutual aid request(s)", len(s.mutualAidRequests))
+}
+
+// saveMutualAidRequests writes requests to disk. Caller must NOT hold s.mu.
+func (s *Server) saveMutualAidRequests() error {
+	s.mu.RLock()
+	list := make([]*MutualAidRequest, 0, len(s.mutualAidRequests))
+	for _, r := range s.mutualAidRequests {
+		list = append(list, r)
+	}
+	s.mu.RUnlock()
+
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.mutualAidRequestsFile(), data, 0600)
+}
+
+// newMutualAidRequestID mints a random request id.
+func newMutualAidRequestID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// pendingRequestBetween returns an existing pending request between two
+// agencies in EITHER direction, or nil. Stops both sides from stacking up
+// duplicate asks while one is already open.
+// Caller must hold s.mu (read is enough).
+func (s *Server) pendingRequestBetween(a, b string) *MutualAidRequest {
+	for _, r := range s.mutualAidRequests {
+		if r.Status != MARequestPending {
+			continue
+		}
+		if (r.FromAgency == a && r.ToAgency == b) ||
+			(r.FromAgency == b && r.ToAgency == a) {
+			return r
+		}
+	}
+	return nil
+}
+
+// linkBetween returns an ACTIVE mutual-aid link covering both agencies, or nil.
+// Caller must hold s.mu (read is enough).
+func (s *Server) linkBetween(a, b string) *MutualAidLink {
+	for _, l := range s.mutualAidLinks {
+		if !l.Active {
+			continue
+		}
+		var hasA, hasB bool
+		for _, id := range l.Agencies {
+			if id == a {
+				hasA = true
+			}
+			if id == b {
+				hasB = true
+			}
+		}
+		if hasA && hasB {
+			return l
+		}
+	}
+	return nil
+}
+
+// nowStamp is the timestamp format used across the request records.
+func nowStamp() string { return time.Now().Format(time.RFC3339) }
+
+// createMutualAidLink allocates a channel, stores the link, and announces it to
+// every member agency. Shared by the super_admin create path and by request
+// approval, so both produce an identical link.
+//
+// Caller must hold s.mu (write). Returns nil when the shared channel block is
+// full. Announcement and persistence happen on the caller's side, outside the
+// lock, via finishMutualAidLink.
+func (s *Server) createMutualAidLinkLocked(agencies []string, channelName, createdBy string) *MutualAidLink {
+	channel := s.pickMutualAidChannel()
+	if channel == 0 {
+		return nil
+	}
+	link := &MutualAidLink{
+		ID:          newMutualAidRequestID(),
+		Agencies:    agencies,
+		Channel:     channel,
+		ChannelName: channelName,
+		CreatedAt:   nowStamp(),
+		CreatedBy:   createdBy,
+		Active:      true,
+	}
+	s.mutualAidLinks[link.ID] = link
+	return link
+}
+
+// finishMutualAidLink announces a new link and refreshes each member's roster.
+// Call AFTER releasing s.mu.
+func (s *Server) finishMutualAidLink(link *MutualAidLink) {
+	agencies := append([]string(nil), link.Agencies...)
+	go s.notifyMutualAidChannel(agencies, link.Channel, link.ChannelName, true)
+	// Linked agencies can now see each other, so push a fresh roster to each —
+	// otherwise their merged user list stays stale until the next join/leave.
+	go func() {
+		for _, a := range agencies {
+			s.broadcastRoster(a)
+		}
+	}()
+}

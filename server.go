@@ -66,6 +66,30 @@ type Agency struct {
 	CreatedAt   string `json:"created_at"`
 	MaxUsers    int    `json:"max_users"`
 	MaxChannels int    `json:"max_channels"`
+
+	// Discoverable opts this agency into the server-wide directory: every other
+	// agency admin can see its NAME and send it a mutual-aid request. Nothing
+	// else is exposed — no users, channels, or activity. Off by default, so an
+	// agency stays invisible until it deliberately opts in.
+	Discoverable bool `json:"discoverable"`
+
+	// AutoAcceptFrom lists agency IDs whose mutual-aid requests are accepted
+	// without approval — a standing agreement with a trusted partner.
+	//
+	// It is deliberately one-directional: it governs what THIS agency accepts,
+	// not what it may send. So a link auto-joins only when the RECEIVING side
+	// already trusts the sender, and "both agreed" means both added each other.
+	AutoAcceptFrom []string `json:"auto_accept_from,omitempty"`
+}
+
+// trustsAgency reports whether this agency auto-accepts requests from another.
+func (a *Agency) trustsAgency(agencyID string) bool {
+	for _, id := range a.AutoAcceptFrom {
+		if id == agencyID {
+			return true
+		}
+	}
+	return false
 }
 
 type UserAccount struct {
@@ -160,27 +184,28 @@ type Server struct {
 	config             *Config
 	configFile         string
 	conn               *net.UDPConn
-	clients            map[string]*Client          // username -> client
-	channels           map[string]*Channel         // "agencyID:channelNum" -> channel
-	groups             map[string]*GroupPacket     // groupID -> group
-	users              map[string]*UserAccount     // "agencyID:username" -> account
-	agencies           map[string]*Agency          // agencyID -> agency
-	authenticatedAddrs map[string]string           // addr string -> agencyID
-	pendingChallenges  map[string][32]byte         // addr string -> nonce (Phase 4f challenge-response)
-	enrollmentTokens   map[string]*EnrollmentToken // token string -> enrollment token
-	guestEvents        map[string]*GuestEvent      // eventID -> guest event
-	webAdmins          map[string]*WebAdmin        // "agencyID:username" -> admin account (web dashboard)
-	dispatchConns      map[string]*DispatchConn    // "agencyID:username" -> active dispatch WebSocket
-	webSessions        map[string]*WebSession      // session token -> session
-	mutualAidLinks     map[string]*MutualAidLink   // linkID -> link
-	lmrBridges         map[string]*LMRBridge       // bridgeID -> LMR/VHF radio bridge
-	zelloBridges       map[string]*ZelloBridge     // bridgeID -> Zello Work channel bridge
-	ssrcToUser         map[uint32]string           // RTP SSRC -> username (MCX Step 1)
-	ssrcMu             sync.RWMutex                // guards ssrcToUser
-	floor              *FloorController            // MCX Step 3 floor control (per channel)
-	groupMgr           *GroupManager               // MCX Step 4 group types / ad-hoc
-	sipGateway         *SipGateway                 // MCX Step 5 SIP gateway (nil = disabled)
-	testFloorSink      func(*net.UDPAddr, []byte)  // test-only: capture floor packets
+	clients            map[string]*Client           // username -> client
+	channels           map[string]*Channel          // "agencyID:channelNum" -> channel
+	groups             map[string]*GroupPacket      // groupID -> group
+	users              map[string]*UserAccount      // "agencyID:username" -> account
+	agencies           map[string]*Agency           // agencyID -> agency
+	authenticatedAddrs map[string]string            // addr string -> agencyID
+	pendingChallenges  map[string][32]byte          // addr string -> nonce (Phase 4f challenge-response)
+	enrollmentTokens   map[string]*EnrollmentToken  // token string -> enrollment token
+	guestEvents        map[string]*GuestEvent       // eventID -> guest event
+	webAdmins          map[string]*WebAdmin         // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns      map[string]*DispatchConn     // "agencyID:username" -> active dispatch WebSocket
+	webSessions        map[string]*WebSession       // session token -> session
+	mutualAidLinks     map[string]*MutualAidLink    // linkID -> link
+	lmrBridges         map[string]*LMRBridge        // bridgeID -> LMR/VHF radio bridge
+	mutualAidRequests  map[string]*MutualAidRequest // requestID -> agency-to-agency ask
+	zelloBridges       map[string]*ZelloBridge      // bridgeID -> Zello Work channel bridge
+	ssrcToUser         map[uint32]string            // RTP SSRC -> username (MCX Step 1)
+	ssrcMu             sync.RWMutex                 // guards ssrcToUser
+	floor              *FloorController             // MCX Step 3 floor control (per channel)
+	groupMgr           *GroupManager                // MCX Step 4 group types / ad-hoc
+	sipGateway         *SipGateway                  // MCX Step 5 SIP gateway (nil = disabled)
+	testFloorSink      func(*net.UDPAddr, []byte)   // test-only: capture floor packets
 	mu                 sync.RWMutex
 	shutdown           chan struct{}
 	stats              *Stats
@@ -472,7 +497,7 @@ func (s *Server) CheckHealth() *HealthReport {
 	// 5. Storage — check all data files accessible and get total size
 	storageHealthy := true
 	var totalSize int64
-	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, s.lmrBridgesFile(), "guest_events.json", "activity_log.json"} {
+	for _, f := range []string{s.config.UsersFile, s.config.WebAdminsFile, s.config.AgenciesFile, s.config.MutualAidFile, s.lmrBridgesFile(), s.mutualAidRequestsFile(), "guest_events.json", "activity_log.json"} {
 		info, err := os.Stat(f)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -593,6 +618,7 @@ func NewServer(config *Config, configFile string) *Server {
 		webSessions:        make(map[string]*WebSession),
 		mutualAidLinks:     make(map[string]*MutualAidLink),
 		lmrBridges:         make(map[string]*LMRBridge),
+		mutualAidRequests:  make(map[string]*MutualAidRequest),
 		zelloBridges:       make(map[string]*ZelloBridge),
 		ssrcToUser:         make(map[uint32]string),
 		shutdown:           make(chan struct{}),
@@ -611,6 +637,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadWebAdmins()
 	s.loadMutualAid()
 	s.loadLMRBridges()
+	s.loadMutualAidRequests()
 	s.loadGuestEvents()
 	s.loadZelloBridges()
 

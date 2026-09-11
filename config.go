@@ -6,22 +6,23 @@ import (
 )
 
 type Config struct {
-	PTTPort          int    `json:"ptt_port"`
-	WebPort          int    `json:"web_port"`
-	MaxClients       int    `json:"max_clients"`
-	MaxChannels      int    `json:"max_channels"`
-	LogLevel         string `json:"log_level"`
-	AuthEnabled      bool   `json:"auth_enabled"`
-	UsersFile        string `json:"users_file"`
-	WebAdminsFile    string `json:"web_admins_file"`
-	AgenciesFile     string `json:"agencies_file"`
-	MutualAidFile    string `json:"mutual_aid_file"`
-	LMRBridgeFile    string `json:"lmr_bridge_file"`
-	ZelloBridgesFile string `json:"zello_bridges_file"`
-	GitHubToken      string `json:"github_token,omitempty"`
-	DebugPprof       bool   `json:"debug_pprof,omitempty"`
-	TLSCertFile      string `json:"tls_cert_file,omitempty"`
-	TLSKeyFile       string `json:"tls_key_file,omitempty"`
+	PTTPort               int    `json:"ptt_port"`
+	WebPort               int    `json:"web_port"`
+	MaxClients            int    `json:"max_clients"`
+	MaxChannels           int    `json:"max_channels"`
+	LogLevel              string `json:"log_level"`
+	AuthEnabled           bool   `json:"auth_enabled"`
+	UsersFile             string `json:"users_file"`
+	WebAdminsFile         string `json:"web_admins_file"`
+	AgenciesFile          string `json:"agencies_file"`
+	MutualAidFile         string `json:"mutual_aid_file"`
+	LMRBridgeFile         string `json:"lmr_bridge_file"`
+	MutualAidRequestsFile string `json:"mutual_aid_requests_file"`
+	ZelloBridgesFile      string `json:"zello_bridges_file"`
+	GitHubToken           string `json:"github_token,omitempty"`
+	DebugPprof            bool   `json:"debug_pprof,omitempty"`
+	TLSCertFile           string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile            string `json:"tls_key_file,omitempty"`
 	// MCX Step 2: the MCPTT domain for this deployment. Per-agency MCX identities
 	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. raptor7@sullivan.meshrelayptt.com).
 	// Empty disables MCX id derivation (ids fall back to the plain domain).
@@ -61,19 +62,20 @@ type SipGatewayConfig struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		PTTPort:          5000,
-		WebPort:          8080,
-		MaxClients:       1000,
-		MaxChannels:      100,
-		LogLevel:         "INFO",
-		AuthEnabled:      true,
-		UsersFile:        "users.json",
-		WebAdminsFile:    "web_admins.json",
-		AgenciesFile:     "agencies.json",
-		MutualAidFile:    "mutual_aid.json",
-		LMRBridgeFile:    "lmr_bridges.json",
-		ZelloBridgesFile: "zello_bridges.json",
-		McpttDomain:      "meshrelayptt.com",
+		PTTPort:               5000,
+		WebPort:               8080,
+		MaxClients:            1000,
+		MaxChannels:           100,
+		LogLevel:              "INFO",
+		AuthEnabled:           true,
+		UsersFile:             "users.json",
+		WebAdminsFile:         "web_admins.json",
+		AgenciesFile:          "agencies.json",
+		MutualAidFile:         "mutual_aid.json",
+		LMRBridgeFile:         "lmr_bridges.json",
+		MutualAidRequestsFile: "mutual_aid_requests.json",
+		ZelloBridgesFile:      "zello_bridges.json",
+		McpttDomain:           "meshrelayptt.com",
 	}
 }
 
