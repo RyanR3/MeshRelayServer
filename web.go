@@ -1388,6 +1388,15 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	}
 	admin.PasswordHash = newHash
 	admin.MustChangePassword = false
+
+	// Keep the PTT account in step. An agency_admin usually has a users.json
+	// entry too, and changing only the dashboard hash leaves the app unable to
+	// log in with the new password — the two stores must not drift apart.
+	pttSynced := false
+	if user, ok := s.users[userKey(session.AgencyID, username)]; ok {
+		user.PasswordHash = hashPassword(req.NewPassword)
+		pttSynced = true
+	}
 	s.mu.Unlock()
 
 	if err := s.saveWebAdmins(); err != nil {
@@ -1395,6 +1404,11 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"failed to save"}`))
 		return
+	}
+	if pttSynced {
+		if err := s.saveUsers(); err != nil {
+			log.Printf("Password change: failed to save users for %s: %v", username, err)
+		}
 	}
 
 	log.Printf("Web admin password changed for: %s [%s]", username, session.AgencyID)

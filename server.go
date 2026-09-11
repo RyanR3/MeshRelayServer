@@ -2263,28 +2263,41 @@ func (s *Server) UpdatePassword(agencyID, username, password string) error {
 	defer s.mu.Unlock()
 
 	key := userKey(agencyID, username)
-	user, exists := s.users[key]
-	if !exists {
+	user, userExists := s.users[key]
+	admin, adminExists := s.webAdmins[key]
+
+	// An account can exist in either store, or both: a PTT user has a
+	// users.json entry, a dashboard login has a web_admins.json entry, and an
+	// agency_admin normally has both. Updating only one leaves the other stale,
+	// which shows up as a password that works in the app but not the dashboard
+	// (or vice versa), and appears to "revert" after a restart because the
+	// stale file is what gets reloaded.
+	if !userExists && !adminExists {
 		return fmt.Errorf("user %s not found", username)
 	}
 
-	user.PasswordHash = hashPassword(password) // PTT auth uses SHA-256 (Phase 4f will migrate to challenge-response)
+	if userExists {
+		// PTT auth uses SHA-256 (challenge-response HMACs over this hash).
+		user.PasswordHash = hashPassword(password)
+		if err := s.saveUsers(); err != nil {
+			return err
+		}
+	}
 
-	// Also update web admin password if they have one — use bcrypt for web
-	if admin, ok := s.webAdmins[key]; ok {
+	if adminExists {
+		// The dashboard prefers bcrypt; checkPassword still accepts SHA-256.
 		if bcryptHash, err := hashPasswordSecure(password); err == nil {
 			admin.PasswordHash = bcryptHash
 		} else {
 			admin.PasswordHash = hashPassword(password) // fallback
 		}
-		s.saveWebAdmins()
+		if err := s.saveWebAdmins(); err != nil {
+			return err
+		}
 	}
 
-	if err := s.saveUsers(); err != nil {
-		return err
-	}
-
-	log.Printf("Updated password for user: %s [%s]", username, agencyID)
+	log.Printf("Updated password for %s [%s] (ptt=%v dashboard=%v)",
+		username, agencyID, userExists, adminExists)
 	return nil
 }
 
