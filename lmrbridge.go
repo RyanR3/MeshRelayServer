@@ -49,9 +49,21 @@ type LMRBridge struct {
 	// here as the link between bridge and account.
 	Username string `json:"username"`
 
-	// Agencies that can see and use this bridge. Order is not significant; the
-	// first entry is treated as the owning agency for the gateway's own client
-	// record (it has to belong to exactly one for channel bookkeeping).
+	// OwnerAgencyID is the agency that CREATED and controls this bridge: it
+	// alone may edit, share and delete it, and the gateway's UserAccount is
+	// scoped to it.
+	//
+	// It is explicit rather than Agencies[0], which made ownership depend on
+	// slice order — reordering the list silently moved the bridge to another
+	// agency and orphaned the gateway account, since that account is keyed
+	// userKey(owner, username).
+	//
+	// Empty means a bridge created before this field existed; those adopt
+	// Agencies[0] on load.
+	OwnerAgencyID string `json:"owner_agency_id,omitempty"`
+
+	// Agencies that can see and use this bridge, including the owner. Others
+	// are here because the owner granted them access.
 	Agencies []string `json:"agencies"`
 
 	// Channel is allocated from the LMR block and is stable for the bridge's
@@ -66,10 +78,34 @@ type LMRBridge struct {
 
 // ownerAgency is the agency the gateway's own client record belongs to.
 func (b *LMRBridge) ownerAgency() string {
+	if b.OwnerAgencyID != "" {
+		return b.OwnerAgencyID
+	}
+	// Pre-ownership bridges: fall back to the first agency, which is what the
+	// gateway account was keyed under when they were created.
 	if len(b.Agencies) == 0 {
 		return ""
 	}
 	return b.Agencies[0]
+}
+
+// ownedBy reports whether an agency controls this bridge (edit/share/delete).
+func (b *LMRBridge) ownedBy(agencyID string) bool {
+	return agencyID != "" && b.ownerAgency() == agencyID
+}
+
+// sharedWith reports whether an agency has been granted USE of this bridge.
+// The owner is covered by ownedBy, not this.
+func (b *LMRBridge) sharedWith(agencyID string) bool {
+	if agencyID == "" || b.ownedBy(agencyID) {
+		return false
+	}
+	return b.servesAgency(agencyID)
+}
+
+// visibleTo reports whether an agency should see this bridge at all.
+func (b *LMRBridge) visibleTo(agencyID string) bool {
+	return b.ownedBy(agencyID) || b.sharedWith(agencyID)
 }
 
 // servesAgency reports whether this bridge reaches the given agency.
@@ -124,6 +160,11 @@ func (s *Server) loadLMRBridges() {
 		if b.Channel < LMRChannelMin || b.Channel > LMRChannelMax {
 			log.Printf("LMR: bridge %s has out-of-range channel %d, skipping", b.ID, b.Channel)
 			continue
+		}
+		// Adopt pre-ownership bridges to their first agency, matching the
+		// account key they were created with.
+		if b.OwnerAgencyID == "" && len(b.Agencies) > 0 {
+			b.OwnerAgencyID = b.Agencies[0]
 		}
 		s.lmrBridges[b.ID] = b
 		// The bridge's channel must exist in every agency it serves, or audio

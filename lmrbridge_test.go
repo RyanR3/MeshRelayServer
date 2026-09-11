@@ -262,3 +262,72 @@ func TestAuthResponseRevokedStatusByte(t *testing.T) {
 		}
 	}
 }
+
+// Ownership must be explicit. Agencies[0] made it depend on slice order, so
+// reordering the list moved the bridge to another agency — and orphaned the
+// gateway account, which is keyed userKey(owner, username).
+func TestLMROwnershipSurvivesAgencyReorder(t *testing.T) {
+	b := &LMRBridge{
+		ID: "b1", OwnerAgencyID: "fire", Username: "gw-vhf",
+		Agencies: []string{"fire", "ems"}, Channel: LMRChannelMin,
+	}
+	b.Agencies[0], b.Agencies[1] = b.Agencies[1], b.Agencies[0]
+
+	if b.ownerAgency() != "fire" {
+		t.Fatalf("reordering agencies changed the owner to %q", b.ownerAgency())
+	}
+	if !b.ownedBy("fire") {
+		t.Error("fire should still own it")
+	}
+	if b.ownedBy("ems") {
+		t.Error("a granted agency became the owner")
+	}
+}
+
+// A bridge is private: another agency sees it only once granted, and access is
+// USE only — never ownership.
+func TestLMRBridgeVisibility(t *testing.T) {
+	b := &LMRBridge{
+		ID: "b1", OwnerAgencyID: "fire", Username: "gw-vhf",
+		Agencies: []string{"fire"}, Channel: LMRChannelMin,
+	}
+	if b.visibleTo("ems") {
+		t.Error("an ungranted agency must not see the bridge")
+	}
+	if b.sharedWith("fire") {
+		t.Error("the owner is an owner, not a share recipient")
+	}
+
+	b.Agencies = append(b.Agencies, "ems")
+	if !b.sharedWith("ems") {
+		t.Error("ems should now have access")
+	}
+	if !b.visibleTo("ems") {
+		t.Error("ems should now see it")
+	}
+	if b.ownedBy("ems") {
+		t.Error("access must never confer ownership")
+	}
+	if b.visibleTo("dpw") {
+		t.Error("a third agency still must not see it")
+	}
+	if b.visibleTo("") {
+		t.Error("an empty agency id must see nothing")
+	}
+}
+
+// Bridges predating OwnerAgencyID fall back to the first agency, which is the
+// account key they were created with.
+func TestLMRLegacyBridgeFallsBackToFirstAgency(t *testing.T) {
+	b := &LMRBridge{ID: "old", Username: "gw", Agencies: []string{"fire", "ems"}}
+	if b.ownerAgency() != "fire" {
+		t.Fatalf("legacy owner = %q, want fire", b.ownerAgency())
+	}
+	if !b.ownedBy("fire") {
+		t.Error("legacy bridge should be owned by its first agency")
+	}
+	empty := &LMRBridge{ID: "x"}
+	if empty.ownerAgency() != "" {
+		t.Error("a bridge with no agencies has no owner")
+	}
+}

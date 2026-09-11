@@ -119,15 +119,18 @@ func (s *Server) handleCreateLMRBridge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := &LMRBridge{
-		ID:          newLMRBridgeID(),
-		Name:        req.Name,
-		Username:    req.Username,
-		Agencies:    req.Agencies,
-		Channel:     channel,
-		ChannelName: channelName,
-		Enabled:     true,
-		CreatedAt:   nowRFC3339(),
-		CreatedBy:   createdBy,
+		ID:   newLMRBridgeID(),
+		Name: req.Name,
+		// A super_admin bridge is owned by the first agency it serves — the
+		// same agency its gateway account is created under.
+		OwnerAgencyID: req.Agencies[0],
+		Username:      req.Username,
+		Agencies:      req.Agencies,
+		Channel:       channel,
+		ChannelName:   channelName,
+		Enabled:       true,
+		CreatedAt:     nowRFC3339(),
+		CreatedBy:     createdBy,
 	}
 	for _, aid := range b.Agencies {
 		s.ensureLMRChannel(aid, channel, b.displayName())
