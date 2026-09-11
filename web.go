@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -2357,7 +2358,16 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		if s.config.GitHubToken != "" && asset.URL != "" {
 			dlURL = asset.URL
 		}
-		if asset.Name == "ptt-server-linux" || asset.Name == "ptt-server" {
+		// Pick the asset matching THIS machine's architecture. Raspberry Pi
+		// deployments are aarch64 and releases ship both; without this the
+		// updater always took the amd64 "ptt-server-linux" and installed a
+		// binary that could not execute. A generic name is the last resort,
+		// and an exact arch match always wins over one already chosen.
+		if asset.Name == archBinaryAsset() {
+			binaryURL = dlURL
+			binaryName = asset.Name
+		} else if binaryName != archBinaryAsset() &&
+			(asset.Name == "ptt-server-linux" || asset.Name == "ptt-server") {
 			binaryURL = dlURL
 			binaryName = asset.Name
 		}
@@ -2617,6 +2627,16 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghTok
 	s.setUpdateStatus("done", 100, "Update installed. Server is restarting...", "")
 }
 
+// archBinaryAsset is the release asset name built for the architecture this
+// server is running on. Releases ship ptt-server-linux (amd64) alongside
+// ptt-server-linux-arm64; the updater must not mix them up.
+func archBinaryAsset() string {
+	if runtime.GOARCH == "arm64" {
+		return "ptt-server-linux-arm64"
+	}
+	return "ptt-server-linux"
+}
+
 // verifyBinaryChecksum downloads the SHA256SUMS file and verifies the binary's
 // hash against it. binaryName is the real asset filename (e.g. "ptt-server-linux")
 // used to look up the entry in SHA256SUMS. Returns (true, nil) if verified,
@@ -2654,7 +2674,10 @@ func (s *Server) verifyBinaryChecksum(binaryPath, binaryName, checksumURL, ghTok
 	// Try exact match first, then try common binary names as fallback
 	var expectedHash string
 	namesToTry := []string{binaryName}
-	if binaryName != "ptt-server-linux" {
+	// Only fall back to the generic amd64 name when that is actually this
+	// machine's architecture. Falling back on arm64 would happily verify the
+	// wrong binary and install something that cannot run.
+	if binaryName != "ptt-server-linux" && archBinaryAsset() == "ptt-server-linux" {
 		namesToTry = append(namesToTry, "ptt-server-linux")
 	}
 	if binaryName != "ptt-server" {
