@@ -3909,9 +3909,13 @@ function lmrRenderDirectory(agencies, query) {
 function lmrRenderAgencyBridges() {
     const wrap = document.getElementById('lmr-agency-list');
     if (!wrap) return;
+    // A push update can re-render mid-entry; keep an open builder and its
+    // typed values rather than discarding them.
+    const openBuilder = document.getElementById('lmr-agency-builder');
+    const keep = openBuilder ? openBuilder.outerHTML : null;
 
     if (!lmrMyBridges.length) {
-        wrap.innerHTML = `<div class="ma-empty">
+        wrap.innerHTML = (keep || '') + `<div class="ma-empty">
             No LMR bridges yet. Create one to connect a radio gateway, then drag
             an agency here to share its channel.
         </div>`;
@@ -3959,6 +3963,7 @@ function lmrRenderAgencyBridges() {
             </div>
         </div>`;
     }).join('');
+    if (keep) wrap.insertAdjacentHTML('afterbegin', keep);
 }
 
 function lmrShareDrop(e, bridgeId) {
@@ -4024,25 +4029,109 @@ function lmrDelete(bridgeId, name) {
     .catch(err => showStatus('lmr-status', 'Failed to delete: ' + err.message, 'error'));
 }
 
+// Inline builder, mirroring the super_admin one: name, gateway credentials, and
+// a dropzone. The difference is what a dropped agency MEANS — the bridge is
+// owned by the caller's agency, so agencies dropped here are ones to SHARE it
+// with, and dropping none is perfectly valid (a private bridge).
+let lmrAgencyShare = new Set();
+
 function lmrAddBridge() {
-    const name = prompt('Name this bridge (e.g. County VHF):', 'LMR Bridge');
-    if (name === null) return;
-    const username = prompt('Gateway login username (the MeshRelay Gateway app signs in with this):');
-    if (username === null || !username.trim()) return;
-    const password = prompt('Gateway login password:');
-    if (password === null || !password) return;
+    const wrap = document.getElementById('lmr-agency-list');
+    if (!wrap) return;
+    if (document.getElementById('lmr-agency-builder')) return;   // one at a time
+    lmrAgencyShare = new Set();
+    wrap.insertAdjacentHTML('afterbegin', `
+        <div class="ma-patch-card ma-patch-builder" id="lmr-agency-builder">
+            <input type="text" class="ma-patch-name" id="lmr-new-name"
+                   placeholder="Bridge name (e.g. County VHF)" />
+            <div class="lmr-cred-row">
+                <input type="text" id="lmr-new-user" placeholder="Gateway username" autocomplete="off" />
+                <input type="password" id="lmr-new-pass" placeholder="Gateway password" autocomplete="new-password" />
+            </div>
+            <div class="ma-dropzone" ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
+                 ondrop="lmrNewDrop(event)">
+                <div class="ma-dropzone-hint" id="lmr-new-hint">
+                    Optional: drag agencies here to share this bridge with them</div>
+                <div class="ma-dropzone-items" id="lmr-new-items"></div>
+            </div>
+            <div class="ma-patch-actions">
+                <button class="btn-primary" onclick="createMyLmrBridge()">Create Bridge</button>
+                <button class="ma-patch-cancel" onclick="cancelLmrBuilder()">Clear</button>
+            </div>
+        </div>`);
+    const nameEl = document.getElementById('lmr-new-name');
+    if (nameEl) nameEl.focus();
+}
+
+function cancelLmrBuilder() {
+    lmrAgencyShare = new Set();
+    const el = document.getElementById('lmr-agency-builder');
+    if (el) el.remove();
+}
+
+function lmrNewDrop(e) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('ma-dropzone-over');
+    const id = e.dataTransfer.getData('text/plain');
+    const name = e.dataTransfer.getData('agency-name') || id;
+    if (!id || lmrAgencyShare.has(id)) return;
+    lmrAgencyShare.add(id);
+    const items = document.getElementById('lmr-new-items');
+    const hint = document.getElementById('lmr-new-hint');
+    if (items) {
+        items.insertAdjacentHTML('beforeend',
+            `<span class="ma-chip" data-agency-id="${escapeAttr(id)}">${escapeHtml(name)}<button
+                class="ma-chip-x" onclick="lmrNewUndrop('${escapeAttr(id)}')">&times;</button></span>`);
+    }
+    if (hint) hint.style.display = 'none';
+}
+
+function lmrNewUndrop(agencyId) {
+    lmrAgencyShare.delete(agencyId);
+    const chip = document.querySelector(
+        `#lmr-new-items .ma-chip[data-agency-id="${CSS.escape(agencyId)}"]`);
+    if (chip) chip.remove();
+    const hint = document.getElementById('lmr-new-hint');
+    if (hint && !lmrAgencyShare.size) hint.style.display = '';
+}
+
+function createMyLmrBridge() {
+    const name = (document.getElementById('lmr-new-name').value || '').trim();
+    const username = (document.getElementById('lmr-new-user').value || '').trim();
+    const password = document.getElementById('lmr-new-pass').value || '';
+    if (!username || !password) {
+        showStatus('lmr-status', 'Gateway username and password are required', 'warning');
+        return;
+    }
+    const shareWith = Array.from(lmrAgencyShare);
 
     fetch('/api/my-agency/lmr-bridges', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            name: name.trim(), channel_name: name.trim() || 'LMR Bridge',
-            username: username.trim(), password: password
+            name: name || 'LMR Bridge',
+            channel_name: name || 'LMR Bridge',
+            username: username, password: password
         })
     })
     .then(r => r.json())
     .then(data => {
-        if (data.error) { showStatus('lmr-status', data.error, 'error'); return; }
+        if (data.error) { showStatus('lmr-status', data.error, 'error'); return null; }
+        // Grant any agencies dropped into the builder, in sequence so one
+        // failure does not silently skip the rest.
+        return shareWith.reduce((chain, agencyId) => chain.then(() =>
+            fetch('/api/my-agency/lmr-bridges/' + data.id + '/share', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ agency_id: agencyId })
+            }).then(r => r.json()).then(res => {
+                if (res.error) showStatus('lmr-status', 'Shared partly: ' + res.error, 'warning');
+            })
+        ), Promise.resolve()).then(() => data);
+    })
+    .then(data => {
+        if (!data) return;
+        cancelLmrBuilder();
         showStatus('lmr-status',
             `Bridge created on channel ${data.channel} — scan the Enrollment QR on the gateway`,
             'success');
