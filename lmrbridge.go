@@ -249,14 +249,19 @@ func (s *Server) lmrBridgeForChannel(channel int) *LMRBridge {
 	return nil
 }
 
-// lmrBridgeByUsername returns the enabled bridge whose gateway account matches.
+// lmrBridgeByUsername returns any bridge whose gateway account matches,
+// enabled or not.
 // Caller must hold s.mu (read is enough).
 func (s *Server) lmrBridgeByUsername(username string) *LMRBridge {
 	if username == "" {
 		return nil
 	}
 	for _, b := range s.lmrBridges {
-		if b.Enabled && b.Username == username {
+		// Deliberately NOT filtered on Enabled: a disabled bridge still owns
+		// its gateway account, so its username is still taken. Filtering here
+		// let creation past this check only to fail later inside AddUser with
+		// "user already exists in agency", which does not explain the cause.
+		if b.Username == username {
 			return b
 		}
 	}

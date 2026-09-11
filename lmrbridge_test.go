@@ -156,9 +156,12 @@ func TestLMRBridgeLookupByUsername(t *testing.T) {
 	if b := s.lmrBridgeByUsername("nobody"); b != nil {
 		t.Fatalf("unknown username resolved to %v", b)
 	}
+	// A disabled bridge still owns its gateway account, so the username stays
+	// taken. This asserted the opposite until 2026-09-11; see
+	// TestLMRUsernameHeldByDisabledBridge.
 	s.lmrBridges["b1"].Enabled = false
-	if b := s.lmrBridgeByUsername("gw-county"); b != nil {
-		t.Fatalf("disabled bridge resolved by username")
+	if b := s.lmrBridgeByUsername("gw-county"); b == nil {
+		t.Fatalf("disabled bridge must still hold its username")
 	}
 }
 
@@ -329,5 +332,39 @@ func TestLMRLegacyBridgeFallsBackToFirstAgency(t *testing.T) {
 	empty := &LMRBridge{ID: "x"}
 	if empty.ownerAgency() != "" {
 		t.Error("a bridge with no agencies has no owner")
+	}
+}
+
+// A DISABLED bridge still owns its gateway account, so its username is still
+// taken. Filtering the lookup on Enabled let creation past this check only to
+// fail later inside AddUser with a message about users, not bridges.
+func TestLMRUsernameHeldByDisabledBridge(t *testing.T) {
+	s := newLMRTestServer()
+	s.lmrBridges["b1"] = &LMRBridge{
+		ID: "b1", Username: "gw-vhf", OwnerAgencyID: "fire",
+		Agencies: []string{"fire"}, Channel: LMRChannelMin, Enabled: false,
+	}
+	if s.lmrBridgeByUsername("gw-vhf") == nil {
+		t.Fatal("a disabled bridge must still hold its gateway username")
+	}
+	s.lmrBridges["b1"].Enabled = true
+	if s.lmrBridgeByUsername("gw-vhf") == nil {
+		t.Fatal("an enabled bridge must hold its username too")
+	}
+	if s.lmrBridgeByUsername("free-name") != nil {
+		t.Fatal("an unused username must be free")
+	}
+}
+
+// Deleting a bridge must release its username for reuse.
+func TestLMRUsernameFreedAfterDelete(t *testing.T) {
+	s := newLMRTestServer()
+	s.lmrBridges["b1"] = &LMRBridge{
+		ID: "b1", Username: "gw-vhf", OwnerAgencyID: "fire",
+		Agencies: []string{"fire"}, Channel: LMRChannelMin, Enabled: true,
+	}
+	delete(s.lmrBridges, "b1")
+	if s.lmrBridgeByUsername("gw-vhf") != nil {
+		t.Fatal("the username should be free once the bridge is gone")
 	}
 }
