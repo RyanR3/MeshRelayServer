@@ -2755,3 +2755,15 @@ body {
     padding: 9px 12px;
 }
 .ma-dir-search:focus { outline: none; border-color: #FF5722; }
+
+/* Pending-request count on the Mutual Aid nav item. */
+.nav-badge {
+    margin-left: auto;
+    background: #FF5722;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 3px 7px;
+    border-radius: 10px;
+}

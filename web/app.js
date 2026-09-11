@@ -97,6 +97,7 @@ function connectWebSocket() {
         const message = JSON.parse(event.data);
         if (message.type === 'update') {
             updateDashboard(message.data);
+            maCheckRevision(message.data);
         }
     };
 
@@ -3467,4 +3468,54 @@ function toggleTrust(agencyId, trust) {
         fetchAgencyMutualAid();
     })
     .catch(err => showStatus('mutual-aid-status', 'Failed: ' + err.message, 'error'));
+}
+
+
+// The dashboard socket carries a fingerprint of this agency's mutual-aid state
+// (pending requests + active patches). When it changes, something happened that
+// the open page would otherwise only show after a manual refresh — an incoming
+// request, an approval, a partner leaving. Reload just that page's data.
+//
+// Comparing a revision rather than polling keeps the four endpoints idle while
+// nothing is happening, which is almost always.
+let maLastRevision = null;
+
+function maCheckRevision(data) {
+    if (!data || data.mutual_aid_rev === undefined) return;
+    const rev = data.mutual_aid_rev;
+
+    // First message just establishes the baseline.
+    if (maLastRevision === null) { maLastRevision = rev; return; }
+    if (rev === maLastRevision) return;
+    maLastRevision = rev;
+
+    // Only refresh what the operator is actually looking at.
+    const page = document.getElementById('page-mutual-aid');
+    if (page && page.classList.contains('active') && currentRole !== 'super_admin') {
+        fetchAgencyMutualAid();
+    }
+    maUpdateNavBadge();
+}
+
+// Show a count of pending inbound requests on the Mutual Aid nav item, so an
+// admin sitting on another page still notices one arriving.
+function maUpdateNavBadge() {
+    if (currentRole === 'super_admin') return;
+    fetch('/api/mutual-aid/requests')
+        .then(r => r.json())
+        .then(list => {
+            const inbound = (Array.isArray(list) ? list : [])
+                .filter(r => r.status === 'pending' && r.direction === 'inbound').length;
+            const nav = document.querySelector('.nav-item[data-page="mutual-aid"]');
+            if (!nav) return;
+            let badge = nav.querySelector('.nav-badge');
+            if (!inbound) { if (badge) badge.remove(); return; }
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'nav-badge';
+                nav.appendChild(badge);
+            }
+            badge.textContent = inbound;
+        })
+        .catch(() => {});
 }

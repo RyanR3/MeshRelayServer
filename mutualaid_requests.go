@@ -184,3 +184,52 @@ func (s *Server) finishMutualAidLink(link *MutualAidLink) {
 		}
 	}()
 }
+
+// mutualAidRevision is a cheap fingerprint of everything this agency's Mutual
+// Aid page displays: its pending requests and its active patches. The dashboard
+// socket carries it every tick, and the page reloads only when the value
+// changes — so a new request or a partner leaving shows up on its own, without
+// polling the four endpoints on a timer.
+//
+// It is a count-and-id digest rather than a hash of the full records: the page
+// cares that the SET changed, and a stable value must not depend on map
+// iteration order. Summing ids is order-independent; adding the state makes an
+// approve or decline of an existing request register as a change.
+func (s *Server) mutualAidRevision(agencyID string) uint64 {
+	if agencyID == "" {
+		return 0 // super_admin: no per-agency view to keep fresh
+	}
+	var rev uint64
+	s.mu.RLock()
+	for _, r := range s.mutualAidRequests {
+		if r.FromAgency != agencyID && r.ToAgency != agencyID {
+			continue
+		}
+		rev += fnv64(r.ID) ^ fnv64(r.Status)
+	}
+	for _, l := range s.mutualAidLinks {
+		if !l.Active {
+			continue
+		}
+		for _, a := range l.Agencies {
+			if a == agencyID {
+				rev += fnv64(l.ID)
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	return rev
+}
+
+// fnv64 is the FNV-1a hash of a short string.
+func fnv64(v string) uint64 {
+	const offset64 = 14695981039346656037
+	const prime64 = 1099511628211
+	h := uint64(offset64)
+	for i := 0; i < len(v); i++ {
+		h ^= uint64(v[i])
+		h *= prime64
+	}
+	return h
+}

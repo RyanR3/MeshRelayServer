@@ -122,3 +122,66 @@ func TestCreateLinkAllocatesFromSharedBlock(t *testing.T) {
 		t.Fatal("link was not stored")
 	}
 }
+
+// The revision must change when anything on this agency's Mutual Aid page
+// changes, and stay put otherwise — it is what decides whether the open page
+// reloads itself.
+func TestMutualAidRevisionTracksChanges(t *testing.T) {
+	s := newMARTestServer()
+	base := s.mutualAidRevision("fire")
+
+	// A request involving someone else must not disturb us.
+	s.mutualAidRequests["other"] = &MutualAidRequest{
+		ID: "other", FromAgency: "ems", ToAgency: "dpw", Status: MARequestPending}
+	if s.mutualAidRevision("fire") != base {
+		t.Fatal("an unrelated agency's request changed our revision")
+	}
+
+	// An inbound request must change it.
+	s.mutualAidRequests["r1"] = &MutualAidRequest{
+		ID: "r1", FromAgency: "ems", ToAgency: "fire", Status: MARequestPending}
+	withReq := s.mutualAidRevision("fire")
+	if withReq == base {
+		t.Fatal("an inbound request did not change the revision")
+	}
+
+	// Approving it must change it again — the page shows a different thing.
+	s.mutualAidRequests["r1"].Status = MARequestApproved
+	if s.mutualAidRevision("fire") == withReq {
+		t.Fatal("resolving a request did not change the revision")
+	}
+
+	// A live patch must count too.
+	afterResolve := s.mutualAidRevision("fire")
+	s.mutualAidLinks["l1"] = &MutualAidLink{
+		ID: "l1", Agencies: []string{"fire", "ems"}, Active: true, Channel: 50}
+	if s.mutualAidRevision("fire") == afterResolve {
+		t.Fatal("a new patch did not change the revision")
+	}
+}
+
+// Repeated calls with no underlying change must return the same value, or the
+// page would reload on every socket tick.
+func TestMutualAidRevisionIsStable(t *testing.T) {
+	s := newMARTestServer()
+	for i := 0; i < 20; i++ {
+		s.mutualAidRequests[string(rune('a'+i))] = &MutualAidRequest{
+			ID: string(rune('a' + i)), FromAgency: "fire", ToAgency: "ems",
+			Status: MARequestPending}
+	}
+	first := s.mutualAidRevision("fire")
+	for i := 0; i < 10; i++ {
+		if s.mutualAidRevision("fire") != first {
+			t.Fatal("revision changed without any state change (map ordering?)")
+		}
+	}
+}
+
+func TestMutualAidRevisionZeroForSuperAdmin(t *testing.T) {
+	s := newMARTestServer()
+	s.mutualAidLinks["l1"] = &MutualAidLink{
+		ID: "l1", Agencies: []string{"fire", "ems"}, Active: true}
+	if s.mutualAidRevision("") != 0 {
+		t.Fatal("super_admin has no per-agency view; revision should be 0")
+	}
+}

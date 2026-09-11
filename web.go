@@ -605,6 +605,14 @@ func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Capture the session BEFORE upgrading: the dashboard socket carries a
+	// per-agency mutual-aid signal, and after the upgrade there is no request
+	// to read cookies from.
+	wsAgency := ""
+	if session := s.getSession(r); session != nil {
+		wsAgency = session.AgencyID
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade error: %v", err)
@@ -634,7 +642,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Send initial data
-	s.sendWebSocketUpdate(conn)
+	s.sendWebSocketUpdate(conn, wsAgency)
 
 	// Send updates every 2 seconds, ping every 30 seconds
 	ticker := time.NewTicker(2 * time.Second)
@@ -653,7 +661,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
-			if err := s.sendWebSocketUpdate(conn); err != nil {
+			if err := s.sendWebSocketUpdate(conn, wsAgency); err != nil {
 				log.Printf("WebSocket send error: %v", err)
 				return
 			}
@@ -661,7 +669,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
+func (s *Server) sendWebSocketUpdate(conn *websocket.Conn, agencyID string) error {
 	// WebSocket sends unfiltered data; the frontend filters by role
 	msg := WebSocketMessage{
 		Type: "update",
@@ -672,6 +680,12 @@ func (s *Server) sendWebSocketUpdate(conn *websocket.Conn) error {
 			"network_timeseries": s.networkTimeSeries.GetPoints(),
 			"health":             s.CheckHealth(),
 			"activity":           s.activityLog.GetRecent(20),
+			// A cheap fingerprint of this agency's mutual-aid state. The
+			// dashboard reloads the page's data only when it CHANGES, so an
+			// incoming request or a partner leaving appears without the
+			// operator hitting refresh — and without polling four endpoints
+			// every two seconds.
+			"mutual_aid_rev": s.mutualAidRevision(agencyID),
 		},
 	}
 
