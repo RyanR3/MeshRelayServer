@@ -305,6 +305,7 @@ func (s *Server) handleCreateMyZelloBridge(w http.ResponseWriter, r *http.Reques
 		Username  string `json:"username"`
 		Password  string `json:"password"`
 		AuthToken string `json:"auth_token"`
+		Enabled   bool   `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request")
@@ -330,16 +331,22 @@ func (s *Server) handleCreateMyZelloBridge(w http.ResponseWriter, r *http.Reques
 		AuthToken:     req.AuthToken,
 		AgencyID:      mine,
 		OwnerAgencyID: mine,
-		Enabled:       false, // connect deliberately, once channels are mapped
+		Enabled:       req.Enabled,
 		CreatedAt:     nowStamp(),
 		CreatedBy:     createdBy,
 	}
 	s.zelloBridges[b.ID] = b
+	enabled := b.Enabled
 	s.mu.Unlock()
 
 	if err := s.saveZelloBridges(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
+	}
+	// "Connect immediately" — same behaviour as the super_admin path, so the
+	// operator can pick channels on the card as soon as it is up.
+	if enabled {
+		go s.startZelloBridge(b)
 	}
 	log.Printf("Zello: agency %s created bridge %s (%s)", mine, b.ID, b.Name)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": b.ID})

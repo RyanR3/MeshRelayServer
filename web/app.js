@@ -1915,6 +1915,10 @@ function applyZelloMapping(id) {
 }
 
 function showCreateZelloBridgeModal() {
+    // Re-enable the agency picker: the agency-admin path disables it, and the
+    // element is shared between both roles.
+    const agencySel = document.getElementById('zbAgency');
+    if (agencySel) agencySel.disabled = false;
     document.getElementById('zelloBridgeModalTitle').textContent = 'Add Zello Connection';
     document.getElementById('zbEditId').value = '';
     ['zbName','zbNetwork','zbUsername','zbPassword','zbAuthToken'].forEach(id => document.getElementById(id).value = '');
@@ -1930,6 +1934,9 @@ function showCreateZelloBridgeModal() {
 // Fetch the account's Zello channels via the server (classic ZelloWork REST) and
 // populate the dropdown, so the user picks a real channel instead of typing it.
 function editZelloBridge(b) {
+    // The modal is shared with the agency-admin create path, which locks this.
+    const agencySel = document.getElementById('zbAgency');
+    if (agencySel) agencySel.disabled = false;
     document.getElementById('zelloBridgeModalTitle').textContent = 'Edit Zello Bridge';
     document.getElementById('zbEditId').value = b.id;
     document.getElementById('zbName').value = b.name || '';
@@ -1981,15 +1988,23 @@ function saveZelloBridge() {
         return;
     }
     errorEl.style.display = 'none';
+    // An agency admin creates through the agency endpoint, which stamps their
+    // own agency as owner; the super_admin routes stay as they were.
+    const agencyMode = currentRole !== 'super_admin';
     const method = id ? 'PUT' : 'POST';
-    const path = id ? '/api/zello-bridges/' + id : '/api/zello-bridges';
+    let path;
+    if (agencyMode) {
+        path = id ? '/api/zello-bridges/' + id : '/api/my-agency/zello-bridges';
+    } else {
+        path = id ? '/api/zello-bridges/' + id : '/api/zello-bridges';
+    }
     fetch(path, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) })
     .then(r => r.json())
     .then(data => {
         if (data.error) { errorEl.textContent = data.error; errorEl.style.display = 'block'; return; }
         closeModal('zelloBridgeModal');
         showStatus('zello-bridges-status', id ? 'Bridge updated' : 'Bridge created', 'success');
-        fetchZelloBridges();
+        if (agencyMode) fetchAgencyZelloBridges(); else fetchZelloBridges();
     })
     .catch(err => { errorEl.textContent = 'Failed to save: ' + err.message; errorEl.style.display = 'block'; });
 }
@@ -3593,16 +3608,21 @@ function maUpdateNavBadge() {
 // to grant.
 
 let zbDirectory = [];
+let zbAgencyName = '';
 let zbBridges = [];
 
 function fetchAgencyZelloBridges() {
     const arr = v => Array.isArray(v) ? v : [];
     Promise.all([
         fetch('/api/my-agency/zello-bridges').then(r => r.json()).catch(() => []),
-        fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => [])
-    ]).then(([bridges, directory]) => {
+        fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
+        // The session carries only the agency ID; this is where the NAME comes
+        // from, for the locked Agency field in the create modal.
+        fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null)
+    ]).then(([bridges, directory, discovery]) => {
         zbBridges = arr(bridges);
         zbDirectory = arr(directory);
+        if (discovery && discovery.agency_name) zbAgencyName = discovery.agency_name;
         const safe = (name, fn) => {
             try { fn(); } catch (e) { console.error('Zello: ' + name, e); }
         };
@@ -3788,32 +3808,30 @@ function zbDelete(bridgeId, name) {
     .catch(err => showStatus('zello-bridges-status', 'Failed to delete: ' + err.message, 'error'));
 }
 
-// "+ Add Bridge" routes by role: super_admin gets the existing modal (which
-// asks which agency to target); an agency admin creates one owned by their own
-// agency, so no agency picker is needed.
+// "+ Add Bridge" uses the SAME modal for both roles — it is the only place that
+// collects the API key, which the prompt-based flow this replaced did not. For
+// an agency admin the Agency field is locked to their own agency: they cannot
+// create a bridge owned by anyone else.
 function zbAddBridge() {
     if (currentRole === 'super_admin') { showCreateZelloBridgeModal(); return; }
-    const name = prompt('Name this bridge (e.g. County Dispatch):');
-    if (name === null || !name.trim()) return;
-    const network = prompt('Zello Work network (the subdomain, e.g. myorg):');
-    if (network === null || !network.trim()) return;
-    const username = prompt('Zello bot account username:') || '';
-    const password = prompt('Zello bot account password:') || '';
 
-    fetch('/api/my-agency/zello-bridges', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            name: name.trim(), network: network.trim(),
-            username: username.trim(), password: password
-        })
-    })
-    .then(r => r.json())
-    .then(data => {
-        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
-        showStatus('zello-bridges-status',
-            'Bridge created. Map a Zello channel to it before sharing.', 'success');
-        fetchAgencyZelloBridges();
-    })
-    .catch(err => showStatus('zello-bridges-status', 'Failed to create: ' + err.message, 'error'));
+    document.getElementById('zelloBridgeModalTitle').textContent = 'Add Zello Connection';
+    document.getElementById('zbEditId').value = '';
+    ['zbName','zbNetwork','zbUsername','zbPassword','zbAuthToken']
+        .forEach(id => document.getElementById(id).value = '');
+    document.getElementById('zbZelloChannel').innerHTML = '';  // mapped on the card
+    document.getElementById('zbMeshChannel').value = '0';
+    document.getElementById('zbEnabled').checked = true;
+    document.getElementById('zbEnabled').parentElement.style.display = '';
+    document.getElementById('zelloBridgeError').style.display = 'none';
+
+    // Lock the agency to the caller's own. Shown (so it is clear which agency
+    // will own the bridge) but not changeable.
+    const sel = document.getElementById('zbAgency');
+    sel.innerHTML = `<option value="${escapeAttr(currentAgencyId || '')}">${
+        escapeHtml(zbAgencyName || currentAgencyId || 'Your agency')}</option>`;
+    sel.value = currentAgencyId || '';
+    sel.disabled = true;
+
+    showModal('zelloBridgeModal');
 }
