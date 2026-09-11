@@ -3197,15 +3197,22 @@ function showLmrBridgeQr(username, agencyId) {
 
 // ===== Mutual Aid — agency-admin view =====
 //
-// An agency opts into the directory, finds partners by name, and requests a
-// patch. If the RECEIVING agency already trusts the sender, the link goes live
-// at once; otherwise it waits for approval. Either side can leave a live patch.
+// Deliberately the same interaction as the super_admin builder: a pool of
+// agencies on the left, a drop target on the right. The difference is what the
+// action MEANS — an agency requests a patch with one partner, rather than
+// creating one across many — so the dropzone holds a single agency and the
+// button reads "Request Patch".
+//
+// A request waits for the other agency to approve, unless they already list us
+// as a standing agreement, in which case it links immediately.
+
+let maDirectoryCache = [];
+let maDiscovery = null;
+let maPendingReq = [];
+let maPatches = [];
+let maDropped = null;          // the agency currently in the dropzone
 
 function fetchAgencyMutualAid() {
-    // An endpoint returning an error object instead of an array used to throw
-    // inside the shared .then(), which aborted the rest of the chain and left
-    // whole sections blank. Coerce to arrays, and render each section in its
-    // own try so one failure cannot take the others down.
     const arr = v => Array.isArray(v) ? v : [];
     Promise.all([
         fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null),
@@ -3213,26 +3220,24 @@ function fetchAgencyMutualAid() {
         fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
         fetch('/api/my-agency/mutual-aid').then(r => r.json()).catch(() => [])
     ]).then(([discovery, requests, directory, links]) => {
+        maDiscovery = discovery;
+        maPendingReq = arr(requests).filter(r => r.status === 'pending');
+        maDirectoryCache = arr(directory);
+        maPatches = arr(links);
+        // Render each section independently: one failing endpoint must not
+        // blank the others.
         const safe = (name, fn) => {
-            try { fn(); } catch (e) { console.error('Mutual aid: ' + name + ' failed', e); }
+            try { fn(); } catch (e) { console.error('Mutual aid: ' + name, e); }
         };
-        safe('discovery', () => renderDiscovery(discovery));
-        safe('requests', () => renderMaRequests(arr(requests)));
-        safe('patches', () => renderMyPatches(arr(links), discovery));
-        safe('directory', () => {
-            maDirectoryCache = arr(directory);
-            renderDirectory(maDirectoryCache, discovery);
-        });
+        safe('discovery', renderDiscovery);
+        safe('directory', () => filterDirectory());
+        safe('patches', renderAgencyPatches);
     }).catch(err => console.error('Failed to load mutual aid:', err));
 }
 
-let myAgencyId = null;
-
-function renderDiscovery(d) {
-    if (!d) return;
-    myAgencyId = d.agency_id;
+function renderDiscovery() {
     const cb = document.getElementById('ma-discoverable');
-    if (cb) cb.checked = !!d.discoverable;
+    if (cb && maDiscovery) cb.checked = !!maDiscovery.discoverable;
 }
 
 function saveDiscovery() {
@@ -3247,75 +3252,14 @@ function saveDiscovery() {
         if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
         showStatus('mutual-aid-status',
             cb.checked ? 'Your agency is now discoverable to other agencies'
-                       : 'Your agency is hidden from the directory',
-            'success');
+                       : 'Your agency is hidden from the directory', 'success');
         fetchAgencyMutualAid();
     })
     .catch(err => showStatus('mutual-aid-status', 'Failed to save: ' + err.message, 'error'));
 }
 
-function renderMaRequests(requests) {
-    const pending = requests.filter(r => r.status === 'pending');
-    const section = document.getElementById('ma-requests-section');
-    const wrap = document.getElementById('ma-requests');
-    const count = document.getElementById('ma-request-count');
-    if (!wrap) return;
+// --- left column: draggable agency cards ---
 
-    if (!pending.length) { section.style.display = 'none'; return; }
-    section.style.display = '';
-    if (count) count.textContent = pending.length;
-
-    wrap.innerHTML = pending.map(r => {
-        const inbound = r.direction === 'inbound';
-        const who = inbound ? r.from_name : r.to_name;
-        const safeId = escapeAttr(r.id);
-        // Inbound: approve or decline. Outbound: you may withdraw your own ask.
-        const actions = inbound
-            ? `<button class="btn-primary" onclick="approveMaRequest('${safeId}')">Approve</button>
-               <button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Decline</button>`
-            : `<button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Withdraw</button>`;
-        return `<div class="ma-patch-card">
-            <div class="ma-patch-card-head">
-                <span class="ma-patch-title">${escapeHtml(who)}</span>
-                <span class="ma-req-dir">${inbound ? 'wants to patch with you' : 'request sent'}</span>
-            </div>
-            <div class="ma-patch-meta">Channel name: ${escapeHtml(r.channel_name || 'Mutual Aid')}</div>
-            <div class="ma-patch-actions">${actions}</div>
-        </div>`;
-    }).join('');
-}
-
-function renderMyPatches(links, discovery) {
-    const wrap = document.getElementById('ma-my-patches');
-    if (!wrap) return;
-    // The endpoint returns only this agency's patches, so no client-side filter
-    // is needed — filtering on a possibly-null agency_id silently hid them all.
-    const mine = Array.isArray(links) ? links : [];
-
-    if (!mine.length) {
-        wrap.innerHTML = '<div class="ma-empty">No active patches.</div>';
-        return;
-    }
-    wrap.innerHTML = mine.map(l => {
-        const names = l.agency_names || l.agencies || [];
-        const chips = (l.agencies || []).map((aid, i) =>
-            `<span class="ma-chip">${escapeHtml(names[i] || aid)}</span>`).join('');
-        return `<div class="ma-patch-card ma-patch-existing">
-            <div class="ma-patch-card-head">
-                <span class="ma-patch-title">${escapeHtml(l.channel_name || 'Mutual Aid')}</span>
-                <button class="ma-patch-remove" onclick="leavePatch('${escapeAttr(l.id)}')"
-                        title="Leave this patch">&times;</button>
-            </div>
-            <div class="ma-patch-chips">${chips}</div>
-            <div class="ma-patch-meta">Channel ${l.channel}</div>
-        </div>`;
-    }).join('');
-}
-
-let maDirectoryCache = [];
-
-// Filter the directory as the operator types. Kept client-side: the list is
-// already loaded, and names are all it contains.
 function filterDirectory() {
     const box = document.getElementById('ma-dir-search');
     const q = (box ? box.value : '').trim().toLowerCase();
@@ -3323,91 +3267,203 @@ function filterDirectory() {
         ? maDirectoryCache.filter(a => (a.name || '').toLowerCase().includes(q)
                                     || (a.id || '').toLowerCase().includes(q))
         : maDirectoryCache;
-    renderDirectoryList(shown, q);
+    renderDirectoryPool(shown, q);
 }
 
-function renderDirectory(agencies, discovery) {
-    const wrap = document.getElementById('ma-directory');
+function renderDirectoryPool(agencies, query) {
+    const pool = document.getElementById('ma-directory');
+    const count = document.getElementById('ma-dir-count');
     const search = document.getElementById('ma-dir-search-row');
-    if (!wrap) return;
+    if (!pool) return;
+    if (count) count.textContent = maDirectoryCache.length;
+    if (search) search.style.display = maDirectoryCache.length > 5 ? '' : 'none';
 
-    if (!discovery || !discovery.discoverable) {
-        if (search) search.style.display = 'none';
-        wrap.innerHTML = `<div class="ma-empty">
+    if (!maDiscovery || !maDiscovery.discoverable) {
+        pool.innerHTML = `<div class="ma-empty">
             Turn on <strong>Discoverable</strong> above to browse other agencies.
             Discovery is mutual &mdash; agencies that hide themselves are not listed.
         </div>`;
         return;
     }
-    if (search) search.style.display = agencies.length > 5 ? '' : 'none';
-    renderDirectoryList(agencies, '');
-}
-
-function renderDirectoryList(agencies, query) {
-    const wrap = document.getElementById('ma-directory');
-    if (!wrap) return;
-    const discovery = { discoverable: true }; // reached only when discoverable
-
     if (!agencies.length) {
-        wrap.innerHTML = query
+        pool.innerHTML = query
             ? `<div class="ma-empty">No agency matches &ldquo;${escapeHtml(query)}&rdquo;.</div>`
             : '<div class="ma-empty">No other agencies are discoverable yet.</div>';
         return;
     }
 
-    wrap.innerHTML = agencies.map(a => {
-        const safeId = escapeAttr(a.id);
-        let action, note = '';
-        switch (a.state) {
-            case 'linked':
-                action = '<span class="ma-state-ok">Patched</span>';
-                break;
-            case 'requested':
-                action = '<span class="ma-state-wait">Request sent</span>';
-                break;
-            case 'awaiting_you':
-                action = '<span class="ma-state-wait">Awaiting your approval</span>';
-                break;
-            default:
-                action = `<button class="btn-secondary"
-                            onclick="requestPatch('${safeId}','${escapeAttr(a.name)}')">Request patch</button>`;
-                // Tell the operator up front whether this will link instantly.
-                if (a.auto_accepts_us) note = '<div class="ma-patch-meta">Auto-accepts your requests</div>';
-        }
+    pool.innerHTML = agencies.map(a => {
+        // An agency already patched or mid-request cannot be dragged again.
+        const busy = a.state !== 'none';
+        const label = a.state === 'linked' ? 'Patched'
+                    : a.state === 'requested' ? 'Requested'
+                    : a.state === 'awaiting_you' ? 'Awaiting you' : '';
         const trust = a.we_trust_them
-            ? `<button class="ma-trust-btn ma-trust-on" onclick="toggleTrust('${safeId}', false)"
+            ? `<button class="ma-trust-btn ma-trust-on" onclick="toggleTrust(event,'${escapeAttr(a.id)}',false)"
                  title="You auto-accept their requests. Click to stop.">Trusted</button>`
-            : `<button class="ma-trust-btn" onclick="toggleTrust('${safeId}', true)"
+            : `<button class="ma-trust-btn" onclick="toggleTrust(event,'${escapeAttr(a.id)}',true)"
                  title="Auto-accept future requests from this agency.">Trust</button>`;
-        return `<div class="ma-patch-card">
-            <div class="ma-patch-card-head">
-                <span class="ma-patch-title">${escapeHtml(a.name)}</span>
-                ${trust}
-            </div>
-            ${note}
-            <div class="ma-patch-actions">${action}</div>
+        return `<div class="ma-agency-card${busy ? ' ma-agency-busy' : ''}"
+                     ${busy ? '' : 'draggable="true"'}
+                     data-agency-id="${escapeAttr(a.id)}"
+                     ondragstart="maDragStart(event)" ondragend="maDragEnd(event)">
+            <div class="ma-agency-name">${escapeHtml(a.name)}</div>
+            <div class="ma-agency-id">${busy ? escapeHtml(label) : escapeHtml(a.id)}</div>
+            ${a.auto_accepts_us && !busy
+                ? '<div class="ma-agency-note">Auto-accepts &mdash; links instantly</div>' : ''}
+            ${trust}
         </div>`;
     }).join('');
 }
 
-function requestPatch(agencyId, agencyName) {
-    const name = prompt('Name this mutual-aid channel:', 'Mutual Aid');
-    if (name === null) return;
+// --- right column: request builder, pending requests, live patches ---
+
+function renderAgencyPatches() {
+    const wrap = document.getElementById('ma-patches-agency');
+    const count = document.getElementById('ma-request-count');
+    if (!wrap) return;
+    if (count) count.textContent = maPendingReq.length + maPatches.length;
+
+    let html = requestBuilderHtml();
+
+    if (maPendingReq.length) {
+        html += '<div class="ma-existing-label">Pending Requests</div>';
+        html += maPendingReq.map(r => {
+            const inbound = r.direction === 'inbound';
+            const who = inbound ? r.from_name : r.to_name;
+            const safeId = escapeAttr(r.id);
+            const actions = inbound
+                ? `<button class="btn-primary" onclick="approveMaRequest('${safeId}')">Approve</button>
+                   <button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Decline</button>`
+                : `<button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Withdraw</button>`;
+            return `<div class="ma-patch-card">
+                <div class="ma-patch-card-head">
+                    <span class="ma-patch-title">${escapeHtml(r.channel_name || 'Mutual Aid')}</span>
+                    <span class="ma-req-dir">${inbound ? 'requested by ' + escapeHtml(who)
+                                                       : 'sent to ' + escapeHtml(who)}</span>
+                </div>
+                <div class="ma-patch-actions">${actions}</div>
+            </div>`;
+        }).join('');
+    }
+
+    if (maPatches.length) {
+        html += '<div class="ma-existing-label">Active Patches</div>';
+        html += maPatches.map(l => {
+            const names = l.agency_names || l.agencies || [];
+            const chips = (l.agencies || []).map((aid, i) =>
+                `<span class="ma-chip">${escapeHtml(names[i] || aid)}</span>`).join('');
+            return `<div class="ma-patch-card ma-patch-existing">
+                <div class="ma-patch-card-head">
+                    <span class="ma-patch-title">${escapeHtml(l.channel_name || 'Mutual Aid')}</span>
+                    <button class="ma-patch-remove" onclick="leavePatch('${escapeAttr(l.id)}')"
+                            title="Leave this patch">&times;</button>
+                </div>
+                <div class="ma-patch-chips">${chips}</div>
+                <div class="ma-patch-meta">Channel ${l.channel}</div>
+            </div>`;
+        }).join('');
+    }
+    wrap.innerHTML = html;
+    refreshRequestBuilder();
+}
+
+function requestBuilderHtml() {
+    return `<div class="ma-patch-card ma-patch-builder" id="ma-req-builder">
+        <input type="text" class="ma-patch-name" id="ma-req-name"
+               placeholder="Channel name (e.g. County Ops)" />
+        <div class="ma-dropzone" ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
+             ondrop="maAgencyDrop(event)">
+            <div class="ma-dropzone-hint" id="ma-req-hint">Drag one agency here</div>
+            <div class="ma-dropzone-items" id="ma-req-items"></div>
+        </div>
+        <div class="ma-patch-actions">
+            <button class="btn-primary" id="ma-req-btn" onclick="sendPatchRequest()" disabled>
+                Request Patch</button>
+            <button class="ma-patch-cancel" onclick="clearRequestBuilder()">Clear</button>
+        </div>
+    </div>`;
+}
+
+// Drop handler for the request builder. Only ONE agency: a request is between
+// two agencies, unlike a super_admin patch which may span several.
+function maAgencyDrop(e) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('ma-dropzone-over');
+    const id = e.dataTransfer.getData('text/plain');
+    const name = e.dataTransfer.getData('agency-name') || id;
+    if (!id) return;
+    const entry = maDirectoryCache.find(a => a.id === id);
+    if (entry && entry.state !== 'none') {
+        showStatus('mutual-aid-status',
+            'That agency is already patched or has a request pending', 'warning');
+        return;
+    }
+    maDropped = { id, name };
+    refreshRequestBuilder();
+}
+
+function refreshRequestBuilder() {
+    const items = document.getElementById('ma-req-items');
+    const hint = document.getElementById('ma-req-hint');
+    const btn = document.getElementById('ma-req-btn');
+    if (!items) return;
+    if (maDropped) {
+        const a = maDirectoryCache.find(x => x.id === maDropped.id);
+        items.innerHTML = `<span class="ma-chip">${escapeHtml(maDropped.name)}<button
+            class="ma-chip-x" onclick="clearRequestBuilder()">&times;</button></span>`;
+        if (hint) hint.style.display = 'none';
+        if (btn) {
+            btn.disabled = false;
+            // Say up front whether this will link now or wait for approval.
+            btn.textContent = (a && a.auto_accepts_us) ? 'Request Patch (links now)' : 'Request Patch';
+        }
+    } else {
+        items.innerHTML = '';
+        if (hint) hint.style.display = '';
+        if (btn) { btn.disabled = true; btn.textContent = 'Request Patch'; }
+    }
+}
+
+function clearRequestBuilder() {
+    maDropped = null;
+    refreshRequestBuilder();
+}
+
+function sendPatchRequest() {
+    if (!maDropped) return;
+    const nameEl = document.getElementById('ma-req-name');
+    const channelName = (nameEl ? nameEl.value : '').trim() || 'Mutual Aid';
+    const target = maDropped;
+    const btn = document.getElementById('ma-req-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Requesting…'; }
+
     fetch('/api/mutual-aid/requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to_agency: agencyId, channel_name: name.trim() || 'Mutual Aid' })
+        body: JSON.stringify({ to_agency: target.id, channel_name: channelName })
     })
     .then(r => r.json())
     .then(data => {
-        if (data.error) { showStatus('mutual-aid-status', data.error, 'error'); return; }
+        if (data.error) {
+            showStatus('mutual-aid-status', data.error, 'error');
+            refreshRequestBuilder();
+            return;
+        }
         showStatus('mutual-aid-status', data.auto_accepted
-            ? `Patched with ${agencyName} on channel ${data.channel} (standing agreement)`
-            : `Request sent to ${agencyName} — waiting for their approval`, 'success');
+            ? `Patched with ${target.name} on channel ${data.channel} (standing agreement)`
+            : `Request sent to ${target.name} — waiting for their approval`, 'success');
+        maDropped = null;
+        if (nameEl) nameEl.value = '';
         fetchAgencyMutualAid();
     })
-    .catch(err => showStatus('mutual-aid-status', 'Failed to request: ' + err.message, 'error'));
+    .catch(err => {
+        showStatus('mutual-aid-status', 'Failed to request: ' + err.message, 'error');
+        refreshRequestBuilder();
+    });
 }
+
+// --- actions ---
 
 function approveMaRequest(id) {
     fetch('/api/mutual-aid/requests/' + id + '/approve', { method: 'POST' })
@@ -3443,10 +3499,10 @@ function leavePatch(id) {
     .catch(err => showStatus('mutual-aid-status', 'Failed to leave: ' + err.message, 'error'));
 }
 
-// Add or remove an agency from this agency's standing-agreement list. The list
-// governs what WE accept, so trusting someone does not let us skip THEIR
-// approval — it lets their requests to us link instantly.
-function toggleTrust(agencyId, trust) {
+// Standing agreements govern what WE accept, so trusting a partner does not let
+// our own requests skip their approval — it lets theirs to us link instantly.
+function toggleTrust(ev, agencyId, trust) {
+    if (ev) ev.stopPropagation();   // the card is draggable; don't start a drag
     fetch('/api/my-agency/discovery')
     .then(r => r.json())
     .then(d => {
@@ -3470,26 +3526,19 @@ function toggleTrust(agencyId, trust) {
     .catch(err => showStatus('mutual-aid-status', 'Failed: ' + err.message, 'error'));
 }
 
-
-// The dashboard socket carries a fingerprint of this agency's mutual-aid state
-// (pending requests + active patches). When it changes, something happened that
-// the open page would otherwise only show after a manual refresh — an incoming
-// request, an approval, a partner leaving. Reload just that page's data.
-//
-// Comparing a revision rather than polling keeps the four endpoints idle while
-// nothing is happening, which is almost always.
+// The dashboard socket carries a fingerprint of this agency's mutual-aid state.
+// When it changes, something happened that the open page would otherwise only
+// show after a manual refresh — an incoming request, an approval, a partner
+// leaving. Comparing a revision keeps the endpoints idle while nothing happens.
 let maLastRevision = null;
 
 function maCheckRevision(data) {
     if (!data || data.mutual_aid_rev === undefined) return;
     const rev = data.mutual_aid_rev;
-
-    // First message just establishes the baseline.
     if (maLastRevision === null) { maLastRevision = rev; return; }
     if (rev === maLastRevision) return;
     maLastRevision = rev;
 
-    // Only refresh what the operator is actually looking at.
     const page = document.getElementById('page-mutual-aid');
     if (page && page.classList.contains('active') && currentRole !== 'super_admin') {
         fetchAgencyMutualAid();
@@ -3497,8 +3546,7 @@ function maCheckRevision(data) {
     maUpdateNavBadge();
 }
 
-// Show a count of pending inbound requests on the Mutual Aid nav item, so an
-// admin sitting on another page still notices one arriving.
+// Pending inbound count on the nav item, so an admin on another page notices.
 function maUpdateNavBadge() {
     if (currentRole === 'super_admin') return;
     fetch('/api/mutual-aid/requests')

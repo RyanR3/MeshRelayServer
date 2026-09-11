@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=14">
+    <link rel="stylesheet" href="style.css?v=15">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -444,47 +444,53 @@
                 <!-- Agency-admin view: discovery settings, the directory, and
                      the request/approve flow. Hidden from super_admin, who gets
                      the drag-and-drop builder below instead. -->
+                <!-- Agency-admin view. Mirrors the super_admin builder: a pool of
+                     agencies on the left, a drop target on the right. The
+                     difference is that an agency REQUESTS a patch with one
+                     partner rather than creating one across many. -->
                 <div id="ma-agency-view" style="display: none;">
 
-                    <div class="ma-section">
-                        <div class="ma-col-header"><span>Your Agency</span></div>
-                        <div class="ma-discovery-card">
-                            <label class="ma-switch-row">
-                                <input type="checkbox" id="ma-discoverable"
-                                       onchange="saveDiscovery()">
-                                <span>Discoverable to other agencies</span>
-                            </label>
-                            <p class="ma-discovery-hint">
-                                When on, every other agency admin on this server can see
-                                your agency <strong>name</strong> and request a mutual-aid
-                                patch. Nothing else is shared &mdash; not your users,
-                                channels, or activity. Turn it off to disappear from the
-                                directory; existing patches are unaffected.
-                            </p>
-                        </div>
+                    <div class="ma-discovery-card">
+                        <label class="ma-switch-row">
+                            <input type="checkbox" id="ma-discoverable" onchange="saveDiscovery()">
+                            <span>Discoverable to other agencies</span>
+                        </label>
+                        <p class="ma-discovery-hint">
+                            When on, every other agency admin on this server can see your
+                            agency <strong>name</strong> and request a mutual-aid patch.
+                            Nothing else is shared &mdash; not your users, channels, or
+                            activity. Turn it off to disappear from the directory; existing
+                            patches are unaffected.
+                        </p>
                     </div>
 
-                    <div class="ma-section" id="ma-requests-section" style="display:none;">
-                        <div class="ma-col-header">
-                            <span>Requests</span>
-                            <span class="ma-count" id="ma-request-count">0</span>
+                    <div class="ma-builder">
+                        <!-- Left: discoverable agencies, draggable -->
+                        <div class="ma-col ma-agencies-col">
+                            <div class="ma-col-header">
+                                <span>Agencies</span>
+                                <span class="ma-count" id="ma-dir-count">0</span>
+                            </div>
+                            <div id="ma-dir-search-row" class="ma-dir-search-row" style="display:none;">
+                                <input type="text" id="ma-dir-search" class="ma-dir-search"
+                                       placeholder="Search agencies by name"
+                                       oninput="filterDirectory()">
+                            </div>
+                            <div class="ma-agency-pool" id="ma-directory">
+                                <!-- draggable agency cards populated by JS -->
+                            </div>
                         </div>
-                        <div id="ma-requests"></div>
-                    </div>
 
-                    <div class="ma-section">
-                        <div class="ma-col-header"><span>Active Patches</span></div>
-                        <div id="ma-my-patches"></div>
-                    </div>
-
-                    <div class="ma-section">
-                        <div class="ma-col-header"><span>Find Agencies</span></div>
-                        <div id="ma-dir-search-row" class="ma-dir-search-row" style="display:none;">
-                            <input type="text" id="ma-dir-search" class="ma-dir-search"
-                                   placeholder="Search agencies by name"
-                                   oninput="filterDirectory()">
+                        <!-- Right: request builder, pending requests, live patches -->
+                        <div class="ma-col ma-patches-col">
+                            <div class="ma-col-header">
+                                <span>Patch Channels</span>
+                                <span class="ma-count" id="ma-request-count">0</span>
+                            </div>
+                            <div class="ma-patches" id="ma-patches-agency">
+                                <!-- builder + requests + patches populated by JS -->
+                            </div>
                         </div>
-                        <div id="ma-directory"></div>
                     </div>
                 </div>
 
@@ -914,6 +920,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=22"></script>
+    <script src="app.js?v=23"></script>
 </body>
 </html>

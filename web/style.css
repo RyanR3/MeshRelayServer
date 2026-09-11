@@ -2767,3 +2767,22 @@ body {
     padding: 3px 7px;
     border-radius: 10px;
 }
+
+/* Agency card in the request pool: already-patched or mid-request agencies are
+   dimmed and not draggable, so the operator can see them without being able to
+   start a second request. */
+.ma-agency-busy {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+.ma-agency-busy:hover { border-color: #30363D; }
+
+/* "Auto-accepts — links instantly" note on a card with a standing agreement. */
+.ma-agency-note {
+    margin-top: 4px;
+    font-size: 10px;
+    color: #3FB950;
+}
+
+/* The trust toggle sits inside a draggable card, so give it room. */
+.ma-agency-card .ma-trust-btn { margin-top: 6px; }
