@@ -105,9 +105,12 @@ func (s *Server) handleCreateLMRBridge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.lmrBridgeByUsername(req.Username) != nil {
+	// Scoped to the owning agency: gateway accounts are per-agency, so another
+	// agency using this name is not a conflict.
+	if s.lmrBridgeByUsername(req.Agencies[0], req.Username) != nil {
 		s.mu.Unlock()
-		writeJSONError(w, http.StatusConflict, "a bridge already uses that gateway username")
+		writeJSONError(w, http.StatusConflict,
+			"a bridge in this agency already uses that gateway username")
 		return
 	}
 	// A gateway account can outlive its bridge if an earlier delete failed

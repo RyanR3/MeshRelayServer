@@ -148,19 +148,22 @@ func TestLMRBridgeDisplayNameFallsBack(t *testing.T) {
 
 func TestLMRBridgeLookupByUsername(t *testing.T) {
 	s := newLMRTestServer()
-	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Username: "gw-county", Enabled: true, Channel: LMRChannelMin}
+	s.lmrBridges["b1"] = &LMRBridge{
+		ID: "b1", Username: "gw-county", Enabled: true,
+		Channel: LMRChannelMin, OwnerAgencyID: "fire", Agencies: []string{"fire"},
+	}
 
-	if b := s.lmrBridgeByUsername("gw-county"); b == nil || b.ID != "b1" {
+	if b := s.lmrBridgeByUsername("fire", "gw-county"); b == nil || b.ID != "b1" {
 		t.Fatalf("lookup by username failed: %v", b)
 	}
-	if b := s.lmrBridgeByUsername("nobody"); b != nil {
+	if b := s.lmrBridgeByUsername("fire", "nobody"); b != nil {
 		t.Fatalf("unknown username resolved to %v", b)
 	}
 	// A disabled bridge still owns its gateway account, so the username stays
 	// taken. This asserted the opposite until 2026-09-11; see
 	// TestLMRUsernameHeldByDisabledBridge.
 	s.lmrBridges["b1"].Enabled = false
-	if b := s.lmrBridgeByUsername("gw-county"); b == nil {
+	if b := s.lmrBridgeByUsername("fire", "gw-county"); b == nil {
 		t.Fatalf("disabled bridge must still hold its username")
 	}
 }
@@ -344,14 +347,14 @@ func TestLMRUsernameHeldByDisabledBridge(t *testing.T) {
 		ID: "b1", Username: "gw-vhf", OwnerAgencyID: "fire",
 		Agencies: []string{"fire"}, Channel: LMRChannelMin, Enabled: false,
 	}
-	if s.lmrBridgeByUsername("gw-vhf") == nil {
+	if s.lmrBridgeByUsername("fire", "gw-vhf") == nil {
 		t.Fatal("a disabled bridge must still hold its gateway username")
 	}
 	s.lmrBridges["b1"].Enabled = true
-	if s.lmrBridgeByUsername("gw-vhf") == nil {
+	if s.lmrBridgeByUsername("fire", "gw-vhf") == nil {
 		t.Fatal("an enabled bridge must hold its username too")
 	}
-	if s.lmrBridgeByUsername("free-name") != nil {
+	if s.lmrBridgeByUsername("fire", "free-name") != nil {
 		t.Fatal("an unused username must be free")
 	}
 }
@@ -364,7 +367,49 @@ func TestLMRUsernameFreedAfterDelete(t *testing.T) {
 		Agencies: []string{"fire"}, Channel: LMRChannelMin, Enabled: true,
 	}
 	delete(s.lmrBridges, "b1")
-	if s.lmrBridgeByUsername("gw-vhf") != nil {
+	if s.lmrBridgeByUsername("fire", "gw-vhf") != nil {
 		t.Fatal("the username should be free once the bridge is gone")
+	}
+}
+
+// Gateway usernames are per-agency, exactly like the accounts behind them
+// (keyed userKey(agency, username)). A super-admin bridge named "test" in
+// default must NOT stop an agency from naming its own bridge "test" — the
+// lookup used to scan every bridge server-wide and did exactly that.
+func TestLMRUsernameIsSegregatedPerAgency(t *testing.T) {
+	s := newLMRTestServer()
+	s.lmrBridges["b1"] = &LMRBridge{
+		ID: "b1", Username: "test", OwnerAgencyID: "default",
+		Agencies: []string{"default"}, Channel: LMRChannelMin, Enabled: true,
+	}
+
+	if b := s.lmrBridgeByUsername("default", "test"); b == nil {
+		t.Fatal("the owning agency must see its own username as taken")
+	}
+	if b := s.lmrBridgeByUsername("fire", "test"); b != nil {
+		t.Fatalf("another agency must be free to use the same name, got %v", b.ID)
+	}
+
+	// Sharing does not transfer ownership: the account still lives in the
+	// owner's agency, so a recipient may still use the name itself.
+	s.lmrBridges["b1"].Agencies = []string{"default", "fire"}
+	if b := s.lmrBridgeByUsername("fire", "test"); b != nil {
+		t.Fatal("a sharing recipient must not inherit the username reservation")
+	}
+}
+
+// Pre-ownership bridges have no OwnerAgencyID and fall back to Agencies[0],
+// which is where their gateway account was created.
+func TestLMRUsernameLegacyBridgeUsesFirstAgency(t *testing.T) {
+	s := newLMRTestServer()
+	s.lmrBridges["b1"] = &LMRBridge{
+		ID: "b1", Username: "gw-legacy",
+		Agencies: []string{"fire", "ems"}, Channel: LMRChannelMin, Enabled: true,
+	}
+	if s.lmrBridgeByUsername("fire", "gw-legacy") == nil {
+		t.Fatal("legacy bridge must reserve its name under Agencies[0]")
+	}
+	if s.lmrBridgeByUsername("ems", "gw-legacy") != nil {
+		t.Fatal("legacy bridge must not reserve the name for other agencies")
 	}
 }

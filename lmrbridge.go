@@ -249,19 +249,28 @@ func (s *Server) lmrBridgeForChannel(channel int) *LMRBridge {
 	return nil
 }
 
-// lmrBridgeByUsername returns any bridge whose gateway account matches,
-// enabled or not.
+// lmrBridgeByUsername returns the bridge in agencyID whose gateway account
+// matches, enabled or not.
+//
+// Gateway accounts are keyed userKey(agency, username), so the same name in two
+// different agencies is two different accounts and must not collide. Searching
+// every bridge server-wide meant one agency's bridge named "test" blocked the
+// name for everyone, which is the opposite of the segregation the rest of the
+// feature provides. Pass the OWNING agency — the one the account will be
+// created under — not a sharing recipient.
+//
 // Caller must hold s.mu (read is enough).
-func (s *Server) lmrBridgeByUsername(username string) *LMRBridge {
-	if username == "" {
+func (s *Server) lmrBridgeByUsername(agencyID, username string) *LMRBridge {
+	if username == "" || agencyID == "" {
 		return nil
 	}
 	for _, b := range s.lmrBridges {
 		// Deliberately NOT filtered on Enabled: a disabled bridge still owns
-		// its gateway account, so its username is still taken. Filtering here
-		// let creation past this check only to fail later inside AddUser with
-		// "user already exists in agency", which does not explain the cause.
-		if b.Username == username {
+		// its gateway account, so its username is still taken within its own
+		// agency. Filtering here let creation past this check only to fail
+		// later inside AddUser with "user already exists in agency", which
+		// does not explain the cause.
+		if b.Username == username && b.ownerAgency() == agencyID {
 			return b
 		}
 	}
