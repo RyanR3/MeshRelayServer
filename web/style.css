@@ -2742,3 +2742,16 @@ body {
 }
 .ma-trust-btn:hover { border-color: #FF5722; color: #E6EDF3; }
 .ma-trust-on { border-color: #3FB950; color: #3FB950; }
+
+/* Directory search — shown only once the list is long enough to need it. */
+.ma-dir-search-row { margin-bottom: 10px; }
+.ma-dir-search {
+    width: 100%;
+    background: #0D1117;
+    border: 1px solid #30363D;
+    border-radius: 8px;
+    color: #E6EDF3;
+    font-size: 13px;
+    padding: 9px 12px;
+}
+.ma-dir-search:focus { outline: none; border-color: #FF5722; }

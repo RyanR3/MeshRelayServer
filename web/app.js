@@ -3201,16 +3201,27 @@ function showLmrBridgeQr(username, agencyId) {
 // at once; otherwise it waits for approval. Either side can leave a live patch.
 
 function fetchAgencyMutualAid() {
+    // An endpoint returning an error object instead of an array used to throw
+    // inside the shared .then(), which aborted the rest of the chain and left
+    // whole sections blank. Coerce to arrays, and render each section in its
+    // own try so one failure cannot take the others down.
+    const arr = v => Array.isArray(v) ? v : [];
     Promise.all([
         fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null),
         fetch('/api/mutual-aid/requests').then(r => r.json()).catch(() => []),
         fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
-        fetch('/api/mutual-aid').then(r => r.json()).catch(() => [])
+        fetch('/api/my-agency/mutual-aid').then(r => r.json()).catch(() => [])
     ]).then(([discovery, requests, directory, links]) => {
-        renderDiscovery(discovery);
-        renderMaRequests(requests || []);
-        renderMyPatches(links || [], discovery);
-        renderDirectory(directory || [], discovery);
+        const safe = (name, fn) => {
+            try { fn(); } catch (e) { console.error('Mutual aid: ' + name + ' failed', e); }
+        };
+        safe('discovery', () => renderDiscovery(discovery));
+        safe('requests', () => renderMaRequests(arr(requests)));
+        safe('patches', () => renderMyPatches(arr(links), discovery));
+        safe('directory', () => {
+            maDirectoryCache = arr(directory);
+            renderDirectory(maDirectoryCache, discovery);
+        });
     }).catch(err => console.error('Failed to load mutual aid:', err));
 }
 
@@ -3276,8 +3287,9 @@ function renderMaRequests(requests) {
 function renderMyPatches(links, discovery) {
     const wrap = document.getElementById('ma-my-patches');
     if (!wrap) return;
-    const mine = (links || []).filter(l =>
-        (l.agencies || []).includes(discovery ? discovery.agency_id : null));
+    // The endpoint returns only this agency's patches, so no client-side filter
+    // is needed — filtering on a possibly-null agency_id silently hid them all.
+    const mine = Array.isArray(links) ? links : [];
 
     if (!mine.length) {
         wrap.innerHTML = '<div class="ma-empty">No active patches.</div>';
@@ -3299,19 +3311,46 @@ function renderMyPatches(links, discovery) {
     }).join('');
 }
 
+let maDirectoryCache = [];
+
+// Filter the directory as the operator types. Kept client-side: the list is
+// already loaded, and names are all it contains.
+function filterDirectory() {
+    const box = document.getElementById('ma-dir-search');
+    const q = (box ? box.value : '').trim().toLowerCase();
+    const shown = q
+        ? maDirectoryCache.filter(a => (a.name || '').toLowerCase().includes(q)
+                                    || (a.id || '').toLowerCase().includes(q))
+        : maDirectoryCache;
+    renderDirectoryList(shown, q);
+}
+
 function renderDirectory(agencies, discovery) {
     const wrap = document.getElementById('ma-directory');
+    const search = document.getElementById('ma-dir-search-row');
     if (!wrap) return;
 
     if (!discovery || !discovery.discoverable) {
+        if (search) search.style.display = 'none';
         wrap.innerHTML = `<div class="ma-empty">
             Turn on <strong>Discoverable</strong> above to browse other agencies.
             Discovery is mutual &mdash; agencies that hide themselves are not listed.
         </div>`;
         return;
     }
+    if (search) search.style.display = agencies.length > 5 ? '' : 'none';
+    renderDirectoryList(agencies, '');
+}
+
+function renderDirectoryList(agencies, query) {
+    const wrap = document.getElementById('ma-directory');
+    if (!wrap) return;
+    const discovery = { discoverable: true }; // reached only when discoverable
+
     if (!agencies.length) {
-        wrap.innerHTML = '<div class="ma-empty">No other agencies are discoverable yet.</div>';
+        wrap.innerHTML = query
+            ? `<div class="ma-empty">No agency matches &ldquo;${escapeHtml(query)}&rdquo;.</div>`
+            : '<div class="ma-empty">No other agencies are discoverable yet.</div>';
         return;
     }
 

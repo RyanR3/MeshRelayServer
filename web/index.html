@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=12">
+    <link rel="stylesheet" href="style.css?v=13">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -479,6 +479,11 @@
 
                     <div class="ma-section">
                         <div class="ma-col-header"><span>Find Agencies</span></div>
+                        <div id="ma-dir-search-row" class="ma-dir-search-row" style="display:none;">
+                            <input type="text" id="ma-dir-search" class="ma-dir-search"
+                                   placeholder="Search agencies by name"
+                                   oninput="filterDirectory()">
+                        </div>
                         <div id="ma-directory"></div>
                     </div>
                 </div>
@@ -909,6 +914,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=20"></script>
+    <script src="app.js?v=21"></script>
 </body>
 </html>

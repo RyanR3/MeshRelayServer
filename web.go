@@ -107,6 +107,7 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleGetMyDiscovery)).Methods("GET")
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleUpdateMyDiscovery)).Methods("PUT")
 	api.HandleFunc("/agencies/discoverable", s.requireAdmin(s.handleGetDiscoverableAgencies)).Methods("GET")
+	api.HandleFunc("/my-agency/mutual-aid", s.requireAdmin(s.handleGetMyMutualAid)).Methods("GET")
 	api.HandleFunc("/mutual-aid/requests", s.requireAdmin(s.handleGetMutualAidRequests)).Methods("GET")
 	api.HandleFunc("/mutual-aid/requests", s.requireAdmin(s.handleCreateMutualAidRequest)).Methods("POST")
 	api.HandleFunc("/mutual-aid/requests/{id}/approve", s.requireAdmin(s.handleApproveMutualAidRequest)).Methods("POST")

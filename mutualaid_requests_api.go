@@ -474,3 +474,50 @@ func (s *Server) handleLeaveMutualAid(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
+
+// handleGetMyMutualAid returns the ACTIVE patches this agency belongs to.
+//
+// The super_admin /api/mutual-aid endpoint lists every link on the server and
+// is correctly restricted, so an agency admin calling it got an error object
+// where an array was expected. Agency admins need their own scoped view.
+func (s *Server) handleGetMyMutualAid(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	mine, isSuper := s.callerAgency(r)
+
+	s.mu.RLock()
+	out := make([]map[string]interface{}, 0)
+	for _, l := range s.mutualAidLinks {
+		if !l.Active {
+			continue
+		}
+		member := false
+		for _, a := range l.Agencies {
+			if a == mine {
+				member = true
+				break
+			}
+		}
+		if !member && !isSuper {
+			continue
+		}
+		names := make([]string, 0, len(l.Agencies))
+		for _, id := range l.Agencies {
+			if a, ok := s.agencies[id]; ok && a.Name != "" {
+				names = append(names, a.Name)
+			} else {
+				names = append(names, id)
+			}
+		}
+		out = append(out, map[string]interface{}{
+			"id":           l.ID,
+			"channel":      l.Channel,
+			"channel_name": l.ChannelName,
+			"agencies":     l.Agencies,
+			"agency_names": names,
+			"created_at":   l.CreatedAt,
+		})
+	}
+	s.mu.RUnlock()
+
+	json.NewEncoder(w).Encode(out)
+}
