@@ -870,6 +870,16 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
+	// Learn the client's current address from its audio, not only from its
+	// 10-second heartbeats. Production log, 2026-09-09 01:42:41 UTC: a gateway's
+	// path changed mid-transmission and for the next ~10 s the server kept
+	// relaying to the stale address — 50 pkt/s "to 1 client" that never
+	// arrived — until the next heartbeat refreshed it. Any authenticated packet
+	// is proof of the live address.
+	if addr != nil && (client.Addr == nil || client.Addr.String() != addr.String()) {
+		log.Printf("Client %s address changed %v -> %v (audio)", packet.Username, client.Addr, addr)
+		client.Addr = addr
+	}
 
 	// MCX Step 3: when floor control is enabled for this agency, only the current
 	// floor holder's audio is relayed. Non-holders are dropped (they must acquire
