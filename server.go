@@ -190,6 +190,7 @@ type Server struct {
 	users              map[string]*UserAccount      // "agencyID:username" -> account
 	agencies           map[string]*Agency           // agencyID -> agency
 	authenticatedAddrs map[string]string            // addr string -> agencyID
+	lastChannel        map[string]int               // userKey -> channel of the last JOIN, for re-registration
 	pendingChallenges  map[string][32]byte          // addr string -> nonce (Phase 4f challenge-response)
 	enrollmentTokens   map[string]*EnrollmentToken  // token string -> enrollment token
 	guestEvents        map[string]*GuestEvent       // eventID -> guest event
@@ -858,7 +859,7 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	}
 
 	s.mu.RLock()
-	client, clientKey := s.findClientByUsername(packet.Username)
+	client, clientKey := s.findClientForSender(packet.Username, addr)
 	s.mu.RUnlock()
 
 	if client == nil {
@@ -1191,14 +1192,19 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	}
 
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(packet.Username)
+	client, _ := s.findClientForSender(packet.Username, addr)
 	s.mu.RUnlock()
 
 	if client == nil {
-		// Client not registered (e.g. after server restart) — auto-register them
-		// by treating this as a join on channel 0
-		log.Printf("Heartbeat from unregistered client %s — auto-registering", packet.Username)
-		s.handleJoin(&JoinPacket{Username: packet.Username, Channel: 0}, addr)
+		// Client not registered (record expired, or the server restarted while
+		// the client stayed authenticated) — re-register it on the channel it
+		// was last on. A heartbeat carries only the username, so the old code
+		// put it on channel 0: the client believed it was still transmitting
+		// on its channel while the server relayed its audio to channel 0, and
+		// nothing on either side flagged it.
+		ch := s.lastChannelFor(packet.Username, addr)
+		log.Printf("Heartbeat from unregistered client %s — auto-registering on channel %d", packet.Username, ch)
+		s.handleJoin(&JoinPacket{Username: packet.Username, Channel: ch}, addr)
 		return
 	}
 
@@ -1287,6 +1293,10 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	// Check if client already exists
 	ck := userKey(agencyID, packet.Username)
+	if s.lastChannel == nil {
+		s.lastChannel = make(map[string]int)
+	}
+	s.lastChannel[ck] = packet.Channel
 	client, exists := s.clients[ck]
 	var oldChannel int
 	isChannelSwitch := false
@@ -1941,6 +1951,56 @@ func stripRosterLabel(name string) string {
 		return name[:i]
 	}
 	return name
+}
+
+// findClientForSender resolves the client record for a packet from addr.
+//
+// Client records are keyed per agency (userKey), but the old lookup matched on
+// USERNAME alone across the whole map — and Go map iteration is random, so the
+// same username in two agencies resolved to a different record from one packet
+// to the next, and its audio was relayed to whichever agency/channel that record
+// happened to be in. When the sender's address is authenticated we know its
+// agency, so the record is looked up directly; the username-only search is only
+// the fallback for unauthenticated (auth-disabled) servers.
+func (s *Server) findClientForSender(username string, addr *net.UDPAddr) (*Client, string) {
+	if addr != nil {
+		if agencyID := s.authenticatedAddrs[addr.String()]; agencyID != "" {
+			ck := userKey(agencyID, username)
+			if c := s.clients[ck]; c != nil {
+				return c, ck
+			}
+			if bare := stripRosterLabel(username); bare != username {
+				ck = userKey(agencyID, bare)
+				if c := s.clients[ck]; c != nil {
+					return c, ck
+				}
+			}
+		}
+	}
+	return s.findClientByUsername(username)
+}
+
+// lastChannelFor returns the channel a user last joined (per agency when the
+// sender is authenticated), or 0 when unknown.
+func (s *Server) lastChannelFor(username string, addr *net.UDPAddr) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lastChannel == nil {
+		return 0
+	}
+	if addr != nil {
+		if agencyID := s.authenticatedAddrs[addr.String()]; agencyID != "" {
+			if ch, ok := s.lastChannel[userKey(agencyID, username)]; ok {
+				return ch
+			}
+		}
+	}
+	if user := s.findUserByUsername(username); user != nil {
+		if ch, ok := s.lastChannel[userKey(user.AgencyID, username)]; ok {
+			return ch
+		}
+	}
+	return 0
 }
 
 func (s *Server) findClientByUsername(username string) (*Client, string) {
