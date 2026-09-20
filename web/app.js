@@ -29,7 +29,35 @@ function toggleSidebar() {
 
 // --- Page Navigation ---
 
+// --- Mobile drawer (phone widths only; see style.css "Mobile (phone) layout") ---
+function openDrawer(open) {
+    const sb = document.getElementById('sidebar');
+    const bd = document.getElementById('sidebar-backdrop');
+    if (!sb) return;
+    sb.classList.toggle('open', open);
+    if (bd) bd.classList.toggle('open', open);
+}
+document.addEventListener('DOMContentLoaded', () => {
+    // Give every data table its own horizontal scroll box so a wide table
+    // scrolls inside its card on a phone instead of widening the page.
+    document.querySelectorAll('table.data-table').forEach(t => {
+        if (t.parentElement.classList.contains('table-scroll')) return;
+        const w = document.createElement('div');
+        w.className = 'table-scroll';
+        t.parentNode.insertBefore(w, t);
+        w.appendChild(t);
+    });
+    const btn = document.getElementById('mobile-menu-btn');
+    const bd = document.getElementById('sidebar-backdrop');
+    if (btn) btn.addEventListener('click', () => openDrawer(!document.getElementById('sidebar').classList.contains('open')));
+    if (bd) bd.addEventListener('click', () => openDrawer(false));
+});
+
 function navigateTo(pageName) {
+    openDrawer(false);
+    const nav = document.querySelector('.nav-item[data-page="' + pageName + '"] .nav-label');
+    const title = document.getElementById('mobile-bar-title');
+    if (title) title.textContent = nav ? nav.textContent.trim() : 'MeshRelay';
     // Update nav items
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.toggle('active', item.dataset.page === pageName);
@@ -156,6 +184,8 @@ function updateConnectionStatus(connected) {
         indicator.classList.remove('connected');
         text.textContent = 'Disconnected';
     }
+    const mb = document.getElementById('mobile-bar-status');
+    if (mb) { mb.classList.toggle('connected', connected); mb.classList.toggle('disconnected', !connected); }
 }
 
 // Update all dashboard elements
