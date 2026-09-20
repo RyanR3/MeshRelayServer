@@ -1585,7 +1585,7 @@ body {
 .health-layout {
     display: flex;
     gap: 20px;
-    align-items: flex-start;
+    align-items: center;   /* ring sits centred on the list of checks */
 }
 
 .health-services {
@@ -2266,18 +2266,22 @@ body {
         grid-template-columns: 1fr;
     }
 
+    /* Checks on the left, ring on the right, at every width. The ring is
+       centred on the list rather than dropped underneath it. */
     .health-layout {
-        flex-direction: column;
+        flex-direction: row;
         align-items: center;
+        gap: 12px;
     }
 
+    .health-services { min-width: 0; }
+    .health-service-row { gap: 8px; }
+    .health-svc-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
     .health-ring-side {
-        border-top: 1px solid #1E2733;
-        padding-top: 16px;
-        width: 100%;
-        flex-direction: row;
-        justify-content: center;
-        gap: 16px;
+        flex: 0 0 auto;
+        padding-top: 0;
+        text-align: center;
     }
 
     .top-info-columns {
