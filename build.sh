@@ -45,12 +45,18 @@ if [ $? -eq 0 ]; then
     echo "Build successful! Version: $VERSION"
 
     echo ""
+    echo "Packaging web dashboard..."
+    # The dashboard ships as web.tar.gz (the updater extracts it beside the
+    # binary). It was hand-built before, which let a stale bundle reach a
+    # release; build it here from the current web/ every time.
+    tar -czf web.tar.gz --exclude "*.bak" --exclude ".DS_Store" web/
+
     echo "Generating SHA256SUMS..."
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum ptt-server ptt-server-linux ptt-server-linux-arm64 > SHA256SUMS
+        sha256sum ptt-server ptt-server-linux ptt-server-linux-arm64 web.tar.gz > SHA256SUMS
     else
         # macOS fallback (shasum -a 256), normalized to "<hash>  <file>" format
-        shasum -a 256 ptt-server ptt-server-linux ptt-server-linux-arm64 > SHA256SUMS
+        shasum -a 256 ptt-server ptt-server-linux ptt-server-linux-arm64 web.tar.gz > SHA256SUMS
     fi
     echo "  SHA256SUMS written:"
     cat SHA256SUMS
