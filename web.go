@@ -286,12 +286,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
+	req.AgencyID = strings.TrimSpace(req.AgencyID)
+
 	s.mu.RLock()
 	admin, exists := s.webAdmins[userKey(req.AgencyID, req.Username)]
+	if !exists {
+		// The login page's Agency ID and username are free text. Store keys
+		// are case-sensitive ("dev" vs "DEV"), which read as "wrong password"
+		// with no way to tell. Fall back to a case-insensitive match.
+		for k, a := range s.webAdmins {
+			if strings.EqualFold(k, userKey(req.AgencyID, req.Username)) {
+				admin, exists = a, true
+				break
+			}
+		}
+	}
 	s.mu.RUnlock()
 
 	if !exists || !checkPassword(req.Password, admin.PasswordHash) {
-		log.Printf("Failed web login attempt for user: %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
+		// Say WHICH half failed in the journal (never to the client): a
+		// missing account and a wrong password are different problems.
+		if !exists {
+			log.Printf("Failed web login: no dashboard account for %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
+		} else {
+			log.Printf("Failed web login: wrong password for %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"invalid username or password"}`))
