@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func newMARTestServer() *Server {
 	return &Server{
@@ -271,5 +276,41 @@ func TestAgencyRevisionIsStableAcrossCalls(t *testing.T) {
 		if s.agencyRevision("fire") != first {
 			t.Fatal("revision changed with no state change (map ordering?)")
 		}
+	}
+}
+
+// Discovery is mutual and the SERVER enforces it: an agency that has not made
+// itself discoverable gets an empty directory from /agencies/discoverable —
+// the same endpoint the Zello and LMR bridge pages use, which used to show
+// every discoverable agency to anyone (the Mutual Aid page only hid it
+// client-side).
+func TestDiscoverableDirectoryHiddenUntilSelfDiscoverable(t *testing.T) {
+	s := newMARTestServer()
+	s.webSessions = map[string]*WebSession{}
+	s.agencies["fire"] = &Agency{ID: "fire", Name: "Fire", Discoverable: true}
+	s.agencies["ems"] = &Agency{ID: "ems", Name: "EMS", Discoverable: true}
+	s.agencies["dpw"] = &Agency{ID: "dpw", Name: "DPW", Discoverable: false}
+
+	dir := func(agency, role string) []map[string]interface{} {
+		s.webSessions["tok-"+agency] = &WebSession{Username: "admin", Role: role, AgencyID: agency}
+		req := httptest.NewRequest("GET", "/api/agencies/discoverable", nil)
+		req.AddCookie(&http.Cookie{Name: "session", Value: "tok-" + agency})
+		rec := httptest.NewRecorder()
+		s.handleGetDiscoverableAgencies(rec, req)
+		var out []map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		return out
+	}
+
+	if got := dir("dpw", "agency_admin"); len(got) != 0 {
+		t.Fatalf("hidden agency must see nobody, saw %d", len(got))
+	}
+	if got := dir("fire", "agency_admin"); len(got) != 1 || got[0]["id"] != "ems" {
+		t.Fatalf("discoverable agency should see the one other discoverable agency, got %v", got)
+	}
+	if got := dir("", "super_admin"); len(got) != 2 {
+		t.Fatalf("super admin sees the whole directory, got %d", len(got))
 	}
 }

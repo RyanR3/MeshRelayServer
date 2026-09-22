@@ -126,11 +126,20 @@ func (s *Server) handleUpdateMyDiscovery(w http.ResponseWriter, r *http.Request)
 // NAMES ONLY: no users, channels or activity — see Agency.Discoverable.
 func (s *Server) handleGetDiscoverableAgencies(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	mine, _ := s.callerAgency(r)
+	mine, isSuper := s.callerAgency(r)
 
 	s.mu.RLock()
 	self := s.agencies[mine]
 	out := make([]map[string]interface{}, 0)
+	// Discovery is mutual: an agency that has not made itself discoverable
+	// sees nobody. This is enforced HERE, not in the page — the Mutual Aid
+	// page hid the list on its own while the Zello and LMR bridge pages,
+	// which use the same directory, showed it to everyone.
+	if !isSuper && (self == nil || !self.Discoverable) {
+		s.mu.RUnlock()
+		json.NewEncoder(w).Encode(out)
+		return
+	}
 	for _, a := range s.agencies {
 		if !a.Discoverable || a.ID == mine {
 			continue // your own agency is not a partner

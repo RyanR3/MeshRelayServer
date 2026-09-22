@@ -160,6 +160,13 @@ func (s *Server) handleShareZelloBridge(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusNotFound, "agency not found")
 		return
 	}
+	if !isSuper {
+		if me := s.agencies[mine]; me == nil || !me.Discoverable {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "make your agency discoverable before sharing a bridge"})
+			return
+		}
+	}
 
 	// A bridge with no channels mapped yet has nothing to grant: access is
 	// expressed per-mapping, so there is nowhere to record it. Say that plainly

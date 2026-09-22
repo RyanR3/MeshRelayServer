@@ -3654,6 +3654,7 @@ function maUpdateNavBadge() {
 // to grant.
 
 let zbDirectory = [];
+let zbDiscovery = null;
 let zbAgencyName = '';
 let zbBridges = [];
 
@@ -3666,6 +3667,7 @@ function fetchAgencyZelloBridges() {
         // from, for the locked Agency field in the create modal.
         fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null)
     ]).then(([bridges, directory, discovery]) => {
+        zbDiscovery = discovery;
         zbBridges = arr(bridges);
         zbDirectory = arr(directory);
         if (discovery && discovery.agency_name) zbAgencyName = discovery.agency_name;
@@ -3697,6 +3699,13 @@ function zbRenderDirectory(agencies, query) {
     if (count) count.textContent = zbDirectory.length;
     if (search) search.style.display = zbDirectory.length > 5 ? '' : 'none';
 
+    if (zbDiscovery && !zbDiscovery.discoverable) {
+        pool.innerHTML = `<div class="ma-empty">
+            Turn on <strong>Discoverable</strong> on the Mutual Aid page to share bridges with other agencies.
+            Discovery is mutual &mdash; agencies that hide themselves are not listed and cannot see you.
+        </div>`;
+        return;
+    }
     if (!agencies.length) {
         pool.innerHTML = query
             ? `<div class="ma-empty">No agency matches &ldquo;${escapeHtml(query)}&rdquo;.</div>`
@@ -3893,15 +3902,18 @@ function zbAddBridge() {
 // Same layout and grant model as the agency Zello view.
 
 let lmrDirectory = [];
+let lmrDiscovery = null;
 let lmrMyBridges = [];
 
 function fetchAgencyLmrBridges() {
     const arr = v => Array.isArray(v) ? v : [];
     Promise.all([
         fetch('/api/my-agency/lmr-bridges').then(r => r.json()).catch(() => []),
-        fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => [])
-    ]).then(([bridges, directory]) => {
+        fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
+        fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null)
+    ]).then(([bridges, directory, discovery]) => {
         lmrMyBridges = arr(bridges);
+        lmrDiscovery = discovery;
         lmrDirectory = arr(directory);
         const safe = (name, fn) => {
             try { fn(); } catch (e) { console.error('LMR: ' + name, e); }
@@ -3929,6 +3941,13 @@ function lmrRenderDirectory(agencies, query) {
     if (count) count.textContent = lmrDirectory.length;
     if (search) search.style.display = lmrDirectory.length > 5 ? '' : 'none';
 
+    if (lmrDiscovery && !lmrDiscovery.discoverable) {
+        pool.innerHTML = `<div class="ma-empty">
+            Turn on <strong>Discoverable</strong> on the Mutual Aid page to share bridges with other agencies.
+            Discovery is mutual &mdash; agencies that hide themselves are not listed and cannot see you.
+        </div>`;
+        return;
+    }
     if (!agencies.length) {
         pool.innerHTML = query
             ? `<div class="ma-empty">No agency matches &ldquo;${escapeHtml(query)}&rdquo;.</div>`

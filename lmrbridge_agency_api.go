@@ -236,6 +236,13 @@ func (s *Server) handleShareMyLMRBridge(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusNotFound, "agency not found")
 		return
 	}
+	if !isSuper {
+		if me := s.agencies[mine]; me == nil || !me.Discoverable {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "make your agency discoverable before sharing a bridge"})
+			return
+		}
+	}
 	b.Agencies = append(b.Agencies, req.AgencyID)
 	// The channel must exist in the new agency or its audio has nowhere to land.
 	s.ensureLMRChannel(req.AgencyID, b.Channel, b.displayName())
