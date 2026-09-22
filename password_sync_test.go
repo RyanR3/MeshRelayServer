@@ -74,3 +74,31 @@ func TestUpdatePasswordRejectsUnknownAccount(t *testing.T) {
 		t.Fatal("expected an error for an account in neither store")
 	}
 }
+
+// Re-saving a role must not touch the dashboard password. The users.json hash
+// can be a QR enrollment token (unknown to any person); copying it over the
+// bcrypt dashboard hash silently locked agency admins out of the dashboard
+// until a super admin reset the password.
+func TestUpdateUserRoleKeepsDashboardPassword(t *testing.T) {
+	s := newPwTestServer()
+	key := userKey("dev1", "Dev3")
+	s.users[key] = &UserAccount{Username: "Dev3", AgencyID: "dev1", Role: "admin",
+		PasswordHash: hashPassword("enrollment-token-nobody-knows")}
+	bcryptHash, _ := hashPasswordSecure("dashboard-pass")
+	s.webAdmins[key] = &WebAdmin{Username: "Dev3", AgencyID: "dev1", Role: "agency_admin", PasswordHash: bcryptHash}
+
+	if err := s.UpdateUserRole("dev1", "Dev3", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !checkPassword("dashboard-pass", s.webAdmins[key].PasswordHash) {
+		t.Fatal("dashboard password was overwritten by the PTT hash on a role save")
+	}
+	// Demote and re-promote: the entry is recreated from the PTT hash (all we
+	// have), which is the documented behaviour — but the demotion must remove it.
+	if err := s.UpdateUserRole("dev1", "Dev3", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := s.webAdmins[key]; still {
+		t.Fatal("demoted user still has a dashboard entry")
+	}
+}

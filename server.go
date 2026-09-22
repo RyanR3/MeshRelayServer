@@ -2384,22 +2384,41 @@ func (s *Server) UpdateUserRole(agencyID, username, newRole string) error {
 	oldRole := user.Role
 	user.Role = newRole
 
-	// Handle web admin entry changes
-	if newRole == "admin" {
-		s.webAdmins[key] = &WebAdmin{
-			Username:           username,
-			PasswordHash:       user.PasswordHash,
-			Role:               "agency_admin",
-			AgencyID:           user.AgencyID,
-			MustChangePassword: false,
+	// Handle web admin entry changes.
+	//
+	// NEVER rebuild an existing dashboard entry from the PTT hash. The two
+	// stores hold different things once an account has been used: the
+	// dashboard keeps the password the admin actually types (bcrypt), while
+	// users.json holds whatever the app authenticates with — after a QR
+	// enrollment that is the enrollment token, not a password anyone knows.
+	// Re-saving the role (even to the same role) used to copy that token hash
+	// over the dashboard password, so the admin could no longer log in until
+	// a super admin reset it. Keep the existing hash; only the role changes.
+	if newRole == "admin" || newRole == "super_admin" {
+		webRole := "agency_admin"
+		webAgency := user.AgencyID
+		if newRole == "super_admin" {
+			webRole = "super_admin"
+			webAgency = ""
 		}
-		s.saveWebAdmins()
-	} else if newRole == "super_admin" {
-		s.webAdmins[key] = &WebAdmin{
-			Username:           username,
-			PasswordHash:       user.PasswordHash,
-			Role:               "super_admin",
-			MustChangePassword: false,
+		if existing, ok := s.webAdmins[key]; ok {
+			existing.Role = webRole
+			existing.AgencyID = webAgency
+		} else {
+			// First dashboard entry for this account: the PTT hash is all we
+			// have. If it is an enrollment token the admin has no usable
+			// dashboard password until a super admin sets one — say so.
+			if s.hashIsEnrollmentToken(user.PasswordHash) {
+				log.Printf("WARNING: %s [%s] promoted to %s but its PTT password is a QR enrollment token — set a dashboard password for it",
+					username, agencyID, newRole)
+			}
+			s.webAdmins[key] = &WebAdmin{
+				Username:           username,
+				PasswordHash:       user.PasswordHash,
+				Role:               webRole,
+				AgencyID:           webAgency,
+				MustChangePassword: false,
+			}
 		}
 		s.saveWebAdmins()
 	} else if oldRole == "admin" || oldRole == "super_admin" {
@@ -2414,6 +2433,18 @@ func (s *Server) UpdateUserRole(agencyID, username, newRole string) error {
 
 	log.Printf("Updated role for user %s [%s]: %s -> %s", username, agencyID, oldRole, newRole)
 	return nil
+}
+
+// hashIsEnrollmentToken reports whether a users.json password hash is the
+// hash of an enrollment token (i.e. the account was bound by a QR login and
+// has no password a person knows). Caller holds s.mu.
+func (s *Server) hashIsEnrollmentToken(hash string) bool {
+	for _, et := range s.enrollmentTokens {
+		if et != nil && hashPassword(et.Token) == hash {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) RemoveUser(agencyID, username string) error {
