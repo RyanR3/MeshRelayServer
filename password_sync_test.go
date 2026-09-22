@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gorilla/mux"
+)
 
 func newPwTestServer() *Server {
 	return &Server{
@@ -100,5 +107,44 @@ func TestUpdateUserRoleKeepsDashboardPassword(t *testing.T) {
 	}
 	if _, still := s.webAdmins[key]; still {
 		t.Fatal("demoted user still has a dashboard entry")
+	}
+}
+
+// The Edit User dialog's password reset must reach web_admins.json. It used
+// to update the dashboard hash only in memory (the store was saved only on a
+// rename), so the reset worked until the next restart reloaded the old hash.
+func TestEditUserPasswordResetPersistsDashboardStore(t *testing.T) {
+	dir := t.TempDir()
+	s := newPwTestServer()
+	s.config.WebAdminsFile = dir + "/web_admins.json"
+	s.config.UsersFile = dir + "/users.json"
+	s.webSessions = map[string]*WebSession{"tok": {Username: "admin", Role: "super_admin"}}
+	s.activityLog = NewActivityLog(dir+"/activity.json", 100)
+	key := userKey("dev", "devadmin")
+	s.users[key] = &UserAccount{Username: "devadmin", AgencyID: "dev", Role: "admin", PasswordHash: hashPassword("wrong")}
+	s.agencies["dev"] = &Agency{ID: "dev", Name: "Dev"}
+	oldHash, _ := hashPasswordSecure("wrong")
+	s.webAdmins[key] = &WebAdmin{Username: "devadmin", AgencyID: "dev", Role: "agency_admin", PasswordHash: oldHash}
+	if err := s.saveWebAdmins(); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"password":"right-one"}`)
+	req := httptest.NewRequest("PUT", "/api/users/devadmin?agency=dev", body)
+	req = mux.SetURLVars(req, map[string]string{"username": "devadmin"})
+	req.AddCookie(&http.Cookie{Name: "session", Value: "tok"})
+	rec := httptest.NewRecorder()
+	s.handleUpdateUser(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("edit failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Simulate the restart: reload the store from disk.
+	fresh := newPwTestServer()
+	fresh.config.WebAdminsFile = s.config.WebAdminsFile
+	fresh.loadWebAdmins()
+	a := fresh.webAdmins[key]
+	if a == nil || !checkPassword("right-one", a.PasswordHash) {
+		t.Fatal("password reset did not survive a restart — web_admins.json was not saved")
 	}
 }

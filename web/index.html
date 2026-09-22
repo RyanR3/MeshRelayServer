@@ -741,7 +741,7 @@
             </select>
             <input type="text" id="newUserName" placeholder="Name">
             <input type="text" id="newUsername" placeholder="Username">
-            <input type="password" id="newPassword" placeholder="Password">
+            <input type="password" id="newPassword" placeholder="Password" autocomplete="new-password">
             <label class="modal-field-label">Role</label>
             <select id="newUserRole">
                 <option value="user">User</option>
@@ -791,7 +791,7 @@
             <select id="editAgency" class="super-admin-only">
                 <option value="">Select Agency</option>
             </select>
-            <input type="password" id="editNewPassword" placeholder="New Password (leave blank to keep current)">
+            <input type="password" id="editNewPassword" placeholder="New Password (leave blank to keep current)" autocomplete="new-password">
             <div class="modal-actions">
                 <button class="btn-primary" onclick="saveUserEdits()">Save</button>
                 <button class="btn-secondary" onclick="closeModal('editUserModal')">Cancel</button>

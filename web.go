@@ -1146,6 +1146,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update password
+	adminPasswordChanged := false
 	if req.Password != nil && *req.Password != "" {
 		user.PasswordHash = hashPassword(*req.Password)
 		// Also update web admin password if applicable
@@ -1155,6 +1156,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			} else {
 				admin.PasswordHash = hashPassword(*req.Password)
 			}
+			adminPasswordChanged = true
 		}
 	}
 
@@ -1196,7 +1198,18 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			admin.AgencyID = newAgency
 			delete(s.webAdmins, oldKey)
 			s.webAdmins[newKey] = admin
-			s.saveWebAdmins()
+			adminPasswordChanged = true // force the save below
+		}
+	}
+
+	// A dashboard password set here was only ever changed IN MEMORY: the
+	// store was saved only when the account was renamed. The reset worked
+	// until the next restart, which reloaded web_admins.json with the old
+	// hash — the admin "password stopped working" again (seen on the AWS
+	// server: reset at 19:00, update/restart at 19:07, locked out at 19:07:29).
+	if adminPasswordChanged {
+		if err := s.saveWebAdmins(); err != nil {
+			log.Printf("Edit user: failed to save web admins for %s: %v", oldKey, err)
 		}
 	}
 
