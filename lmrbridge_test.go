@@ -413,3 +413,42 @@ func TestLMRUsernameLegacyBridgeUsesFirstAgency(t *testing.T) {
 		t.Fatal("legacy bridge must not reserve the name for other agencies")
 	}
 }
+
+// A gateway login is told about ITS bridge only. Announcing every bridge in
+// the agency to a gateway made it adopt each in turn and re-join, and every
+// join re-announced the bridges: a join storm (2026-09-22, two bridges in one
+// agency). Phones still see all bridges.
+func TestGatewayLoginHearsOnlyItsOwnBridge(t *testing.T) {
+	s := newMARTestServer()
+	s.agencies["a"] = &Agency{ID: "a", Name: "A"}
+	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Name: "Pi bridge", Username: "pi", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 100, Enabled: true}
+	s.lmrBridges["b2"] = &LMRBridge{ID: "b2", Name: "Pixel Bridge", Username: "pixelgw", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 101, Enabled: true}
+
+	announced := func(username string) []int {
+		var out []int
+		var own *LMRBridge
+		for _, b := range s.lmrBridges {
+			if b.Username == username && b.ownerAgency() == "a" {
+				own = b
+			}
+		}
+		for _, b := range s.lmrBridges {
+			if own != nil && b != own {
+				continue
+			}
+			if b.Enabled && b.servesAgency("a") {
+				out = append(out, b.Channel)
+			}
+		}
+		return out
+	}
+	if got := announced("pixelgw"); len(got) != 1 || got[0] != 101 {
+		t.Fatalf("gateway pixelgw should hear only ch 101, got %v", got)
+	}
+	if got := announced("pi"); len(got) != 1 || got[0] != 100 {
+		t.Fatalf("gateway pi should hear only ch 100, got %v", got)
+	}
+	if got := announced("phoneuser"); len(got) != 2 {
+		t.Fatalf("a phone should hear both bridges, got %v", got)
+	}
+}

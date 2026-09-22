@@ -1401,7 +1401,22 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	// Announce every enabled LMR bridge serving this agency, so the radio
 	// channel shows up for the joining client the way mutual aid does.
+	//
+	// A GATEWAY login hears only its own bridge. A gateway adopts whatever
+	// bridge it is told about; with two bridges in one agency it adopted each
+	// in turn, and every JOIN re-triggered this announcement — a join storm
+	// (~400/s against scny, 2026-09-22). Phones still get all of them.
+	var ownBridge *LMRBridge
 	for _, b := range s.lmrBridges {
+		if b.Username == packet.Username && b.ownerAgency() == agencyID {
+			ownBridge = b
+			break
+		}
+	}
+	for _, b := range s.lmrBridges {
+		if ownBridge != nil && b != ownBridge {
+			continue
+		}
 		if b.Enabled && b.servesAgency(agencyID) {
 			pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
 				Channel:     b.Channel,
