@@ -157,17 +157,17 @@ func buildEmergencyAlert(channel int, user string, active bool) []byte {
 // ---- floor state machine ----
 
 const (
-	floorDeadManTimeout = 3 * time.Second  // release floor after this much audio silence
+	floorDeadManTimeout = 3 * time.Second   // release floor after this much audio silence
 	floorMaxQueue       = 5                 // per-channel queue depth
 	emergencyAutoExpire = 300 * time.Second // emergency auto-cancel
 	floorGraceMs        = 200               // preemption grace period
 )
 
 type floorHolder struct {
-	user       string
-	priority   uint8
-	lastAudio  time.Time
-	grantedAt  time.Time
+	user      string
+	priority  uint8
+	lastAudio time.Time
+	grantedAt time.Time
 }
 
 type queued struct {
@@ -290,6 +290,19 @@ func (fc *FloorController) dequeueUser(c *floorChannel, user string) {
 
 // Release frees the floor held by `user` (PTT release / disconnect). Grants the
 // next queued user, or broadcasts FLOOR_IDLE. Caller must NOT hold fc.mu.
+// ReleaseAgency drops every held floor and queue for an agency's channels —
+// used when floor control is switched off for the agency.
+func (fc *FloorController) ReleaseAgency(agencyID string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	prefix := agencyID + ":"
+	for key := range fc.channels {
+		if strings.HasPrefix(key, prefix) {
+			delete(fc.channels, key)
+		}
+	}
+}
+
 func (fc *FloorController) Release(key string, channel int, user string) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()

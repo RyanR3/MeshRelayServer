@@ -306,6 +306,7 @@
                             <th>Name</th>
                             <th>ID</th>
                             <th>Users</th>
+                            <th>Floor control</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -710,6 +711,34 @@
                         <input type="password" id="github-token-input" placeholder="ghp_xxxxxxxxxxxx" style="flex: 1; margin-bottom: 0;">
                         <button class="btn-primary" onclick="saveGitHubToken()">Save</button>
                         <button class="btn-secondary" onclick="clearGitHubToken()">Clear</button>
+                    </div>
+                </div>
+
+                <!-- Talk floor control (per agency) -->
+                <div class="panel admin-only" style="margin-bottom: 20px;">
+                    <h3>Talk Floor Control</h3>
+                    <div id="floor-control-status" class="status-message" style="display: none;"></div>
+                    <div class="settings-row super-admin-only" style="margin-bottom: 4px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Agency</div>
+                            <div class="settings-description">Super admins choose which agency to configure</div>
+                        </div>
+                        <select id="floor-control-agency" onchange="fetchFloorControl()" style="margin-bottom: 0; width: auto; min-width: 200px;"></select>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">One talker per channel</div>
+                            <div class="settings-description" id="floor-control-description">
+                                When on, a PTT press while someone else is talking is refused with a busy tone
+                                and queued until the channel is free. Command and emergency priority can still
+                                preempt. When off, everyone's audio is relayed and simultaneous talkers are heard
+                                over each other.
+                            </div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="floor-control-toggle" onchange="saveFloorControl()">
+                            <span class="toggle-slider"></span>
+                        </label>
                     </div>
                 </div>
 

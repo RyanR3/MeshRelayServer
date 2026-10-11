@@ -116,7 +116,85 @@ function navigateTo(pageName) {
         fetchAuthStatus();
         fetchVersionInfo();
         if (currentRole === 'super_admin') fetchGitHubTokenStatus();
+        if (currentRole === 'super_admin' || currentRole === 'agency_admin') initFloorControlPanel();
     }
+}
+
+// --- Talk floor control (Settings) -----------------------------------------
+// One-talker-per-channel arbitration is an agency setting. Agency admins see
+// their own agency; super admins pick one from the dropdown.
+
+function initFloorControlPanel() {
+    const sel = document.getElementById('floor-control-agency');
+    if (currentRole === 'super_admin' && sel) {
+        fetch('/api/agencies').then(r => r.json()).then(agencies => {
+            agenciesList = agencies || [];
+            const current = sel.value;
+            sel.innerHTML = agenciesList.map(a =>
+                `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('');
+            if (current && agenciesList.some(a => a.id === current)) sel.value = current;
+            fetchFloorControl();
+        }).catch(() => fetchFloorControl());
+    } else {
+        fetchFloorControl();
+    }
+}
+
+function floorControlAgencyQuery() {
+    const sel = document.getElementById('floor-control-agency');
+    return (currentRole === 'super_admin' && sel && sel.value) ? '?agency=' + encodeURIComponent(sel.value) : '';
+}
+
+function fetchFloorControl() {
+    const cb = document.getElementById('floor-control-toggle');
+    if (!cb) return;
+    fetch('/api/my-agency/floor-control' + floorControlAgencyQuery())
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('floor-control-status', data.error, 'error'); return; }
+            cb.checked = !!data.floor_control;
+            cb.disabled = !!data.from_config;
+            if (data.from_config) {
+                showStatus('floor-control-status',
+                    'Turned on by floor_control_agencies in the server config file; remove it there to control it here.', 'error');
+            }
+        })
+        .catch(err => showStatus('floor-control-status', 'Failed to load: ' + err.message, 'error'));
+}
+
+function saveFloorControl() {
+    const cb = document.getElementById('floor-control-toggle');
+    const sel = document.getElementById('floor-control-agency');
+    const body = { floor_control: cb.checked };
+    if (currentRole === 'super_admin' && sel && sel.value) body.agency_id = sel.value;
+    fetch('/api/my-agency/floor-control', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('floor-control-status', data.error, 'error'); cb.checked = !cb.checked; return; }
+        showStatus('floor-control-status',
+            cb.checked ? 'Floor control on: one talker per channel, others hear a busy tone'
+                       : 'Floor control off: open PTT', 'success');
+    })
+    .catch(err => { showStatus('floor-control-status', 'Failed to save: ' + err.message, 'error'); cb.checked = !cb.checked; });
+}
+
+// Agencies table toggle (super admin).
+function setAgencyFloorControl(agencyId, on, el) {
+    fetch('/api/my-agency/floor-control', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agency_id: agencyId, floor_control: on })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('agency-status', data.error, 'error'); if (el) el.checked = !on; return; }
+        showStatus('agency-status', `Floor control ${on ? 'on' : 'off'} for ${agencyId}`, 'success');
+    })
+    .catch(err => { showStatus('agency-status', 'Failed to save: ' + err.message, 'error'); if (el) el.checked = !on; });
 }
 
 // Connect to WebSocket
@@ -2415,6 +2493,13 @@ function renderAgenciesTable(agencies) {
                 <td><strong>${safeName}</strong></td>
                 <td><code>${safeId}</code></td>
                 <td>${agency.user_count || 0}</td>
+                <td>
+                    <label class="toggle-switch" title="One talker per channel">
+                        <input type="checkbox" ${agency.floor_control ? 'checked' : ''}
+                               onchange="setAgencyFloorControl('${safeId}', this.checked, this)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </td>
                 <td>
                     <div class="actions-cell">
                         ${!isDefault ? `<button class="btn-action delete" onclick="deleteAgency('${safeId}')">Delete</button>` : ''}

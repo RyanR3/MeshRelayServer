@@ -109,6 +109,8 @@ func (s *Server) StartWeb() error {
 	// the caller's own agency; super_admin sees everything.
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleGetMyDiscovery)).Methods("GET")
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleUpdateMyDiscovery)).Methods("PUT")
+	api.HandleFunc("/my-agency/floor-control", s.requireAdmin(s.handleGetFloorControl)).Methods("GET")
+	api.HandleFunc("/my-agency/floor-control", s.requireAdmin(s.handleUpdateFloorControl)).Methods("PUT")
 	api.HandleFunc("/agencies/discoverable", s.requireAdmin(s.handleGetDiscoverableAgencies)).Methods("GET")
 	api.HandleFunc("/my-agency/mutual-aid", s.requireAdmin(s.handleGetMyMutualAid)).Methods("GET")
 	api.HandleFunc("/mutual-aid/requests", s.requireAdmin(s.handleGetMutualAidRequests)).Methods("GET")
@@ -1523,13 +1525,14 @@ func (s *Server) handleGetAgencies(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		agencies = append(agencies, map[string]interface{}{
-			"id":           agency.ID,
-			"name":         agency.Name,
-			"created_at":   agency.CreatedAt,
-			"max_users":    agency.MaxUsers,
-			"max_channels": agency.MaxChannels,
-			"user_count":   userCount,
-			"admin":        adminUsername,
+			"id":            agency.ID,
+			"name":          agency.Name,
+			"created_at":    agency.CreatedAt,
+			"max_users":     agency.MaxUsers,
+			"max_channels":  agency.MaxChannels,
+			"user_count":    userCount,
+			"admin":         adminUsername,
+			"floor_control": agency.FloorControl,
 		})
 	}
 	json.NewEncoder(w).Encode(agencies)

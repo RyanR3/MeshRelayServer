@@ -80,6 +80,14 @@ type Agency struct {
 	// not what it may send. So a link auto-joins only when the RECEIVING side
 	// already trusts the sender, and "both agreed" means both added each other.
 	AutoAcceptFrom []string `json:"auto_accept_from,omitempty"`
+
+	// FloorControl turns on one-talker-per-channel arbitration for this agency
+	// (MCX floor control): a second PTT press while someone is talking is
+	// denied with a busy tone and queued, and only the floor holder's audio is
+	// relayed. Off = open PTT, where simultaneous talkers are heard mixed.
+	// Set from the dashboard; the legacy config list floor_control_agencies
+	// still works and is OR-ed with this flag.
+	FloorControl bool `json:"floor_control"`
 }
 
 // trustsAgency reports whether this agency auto-accepts requests from another.
@@ -204,6 +212,7 @@ type Server struct {
 	ssrcToUser         map[uint32]string            // RTP SSRC -> username (MCX Step 1)
 	ssrcMu             sync.RWMutex                 // guards ssrcToUser
 	floor              *FloorController             // MCX Step 3 floor control (per channel)
+	floorOn            sync.Map                     // agencyID -> true when floor control is on (lock-free for the audio path)
 	groupMgr           *GroupManager                // MCX Step 4 group types / ad-hoc
 	sipGateway         *SipGateway                  // MCX Step 5 SIP gateway (nil = disabled)
 	testFloorSink      func(*net.UDPAddr, []byte)   // test-only: capture floor packets
@@ -729,14 +738,38 @@ func (s *Server) BroadcastEmergency(channelKey, userMCXID string) error {
 	return nil
 }
 
-// floorEnabledForAgency reports whether floor control is on for an agency.
+// floorEnabledForAgency reports whether floor control is on for an agency:
+// the agency's dashboard setting, or the legacy config list. Read on every
+// audio packet, so it uses the lock-free map rather than s.agencies.
 func (s *Server) floorEnabledForAgency(agencyID string) bool {
+	if on, ok := s.floorOn.Load(agencyID); ok && on.(bool) {
+		return true
+	}
 	for _, a := range s.config.FloorControlAgencies {
 		if a == agencyID {
 			return true
 		}
 	}
 	return false
+}
+
+// setFloorControl turns floor control on or off for an agency and persists it.
+// Caller must NOT hold s.mu.
+func (s *Server) setFloorControl(agencyID string, on bool) error {
+	s.mu.Lock()
+	a := s.agencies[agencyID]
+	if a == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("agency not found")
+	}
+	a.FloorControl = on
+	s.mu.Unlock()
+	s.floorOn.Store(agencyID, on)
+	if !on && s.floor != nil {
+		// Nobody should stay "holder" of a channel that is now open.
+		s.floor.ReleaseAgency(agencyID)
+	}
+	return s.saveAgencies()
 }
 
 func (s *Server) StartPTT() error {
@@ -2692,6 +2725,9 @@ func (s *Server) loadAgencies() {
 
 	for _, agency := range agencies {
 		s.agencies[agency.ID] = agency
+		if agency.FloorControl {
+			s.floorOn.Store(agency.ID, true)
+		}
 	}
 	log.Printf("Loaded %d agencies", len(s.agencies))
 }
