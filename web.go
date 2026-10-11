@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -193,13 +195,21 @@ func (s *Server) StartWeb() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// TLS: if cert and key are configured, serve HTTPS
+	// TLS: if cert and key are configured, serve HTTPS. The certificate is
+	// re-read from disk when the files change, so a Let's Encrypt renewal
+	// takes effect without a restart (the dashboard went down on 2026-09-25
+	// serving a certificate that had been renewed a month earlier).
 	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+		reloader, err := newCertReloader(s.config.TLSCertFile, s.config.TLSKeyFile)
+		if err != nil {
+			return err
+		}
 		srv.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: reloader.get,
 		}
 		log.Printf("Web GUI server starting on https://localhost%s (TLS enabled)", addr)
-		return srv.ListenAndServeTLS(s.config.TLSCertFile, s.config.TLSKeyFile)
+		return srv.ListenAndServeTLS("", "")
 	}
 
 	// No TLS — warn if binding to non-loopback
@@ -2898,4 +2908,70 @@ func copyDir(src, dst string) error {
 
 		return copyFile(path, target)
 	})
+}
+
+// certReloader hands the TLS listener its certificate and re-reads the files
+// whenever their modification time changes, checking at most every 10 s. A
+// renewed certificate therefore goes live on the next connection; a broken
+// file is logged and the previous certificate stays in service.
+type certReloader struct {
+	certFile, keyFile string
+	mu                sync.Mutex
+	cert              *tls.Certificate
+	certMod, keyMod   time.Time
+	lastCheck         time.Time
+}
+
+func newCertReloader(certFile, keyFile string) (*certReloader, error) {
+	r := &certReloader{certFile: certFile, keyFile: keyFile}
+	cm, km, err := r.mtimes()
+	if err != nil {
+		return nil, fmt.Errorf("TLS certificate files: %w", err)
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading TLS certificate: %w", err)
+	}
+	r.cert, r.certMod, r.keyMod, r.lastCheck = &cert, cm, km, time.Now()
+	if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
+		log.Printf("TLS certificate loaded: %s, expires %s", leaf.Subject.CommonName, leaf.NotAfter.Format(time.RFC3339))
+	}
+	return r, nil
+}
+
+func (r *certReloader) mtimes() (time.Time, time.Time, error) {
+	ci, err := os.Stat(r.certFile)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	ki, err := os.Stat(r.keyFile)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return ci.ModTime(), ki.ModTime(), nil
+}
+
+func (r *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if time.Since(r.lastCheck) >= 10*time.Second {
+		r.lastCheck = time.Now()
+		cm, km, err := r.mtimes()
+		if err != nil {
+			log.Printf("TLS certificate check failed, keeping current certificate: %v", err)
+		} else if !cm.Equal(r.certMod) || !km.Equal(r.keyMod) {
+			cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
+			if err != nil {
+				log.Printf("TLS certificate changed on disk but failed to load, keeping current certificate: %v", err)
+			} else {
+				r.cert, r.certMod, r.keyMod = &cert, cm, km
+				if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
+					log.Printf("TLS certificate reloaded: %s, expires %s", leaf.Subject.CommonName, leaf.NotAfter.Format(time.RFC3339))
+				} else {
+					log.Printf("TLS certificate reloaded")
+				}
+			}
+		}
+	}
+	return r.cert, nil
 }
