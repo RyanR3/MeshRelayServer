@@ -28,10 +28,11 @@ func (s *Server) handleGetFloorControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"agency_id":     a.ID,
-		"agency_name":   a.Name,
-		"floor_control": s.floorEnabledForAgency(a.ID),
-		"from_config":   !a.FloorControl && s.floorEnabledForAgency(a.ID),
+		"agency_id":       a.ID,
+		"agency_name":     a.Name,
+		"floor_control":   s.floorEnabledForAgency(a.ID),
+		"queue_when_busy": s.floorQueueForAgency(a.ID),
+		"from_config":     !a.FloorControl && s.floorEnabledForAgency(a.ID),
 	})
 }
 
@@ -40,8 +41,9 @@ func (s *Server) handleUpdateFloorControl(w http.ResponseWriter, r *http.Request
 	agencyID, isSuper := s.callerAgency(r)
 
 	var req struct {
-		AgencyID     *string `json:"agency_id"` // super_admin only
-		FloorControl *bool   `json:"floor_control"`
+		AgencyID      *string `json:"agency_id"` // super_admin only
+		FloorControl  *bool   `json:"floor_control"`
+		QueueWhenBusy *bool   `json:"queue_when_busy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.FloorControl == nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request")
@@ -50,7 +52,8 @@ func (s *Server) handleUpdateFloorControl(w http.ResponseWriter, r *http.Request
 	if isSuper && req.AgencyID != nil && *req.AgencyID != "" {
 		agencyID = *req.AgencyID
 	}
-	if err := s.setFloorControl(agencyID, *req.FloorControl); err != nil {
+	queue := req.QueueWhenBusy != nil && *req.QueueWhenBusy && *req.FloorControl
+	if err := s.setFloorControl(agencyID, *req.FloorControl, queue); err != nil {
 		code := http.StatusInternalServerError
 		if err.Error() == "agency not found" {
 			code = http.StatusNotFound
@@ -58,10 +61,11 @@ func (s *Server) handleUpdateFloorControl(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, code, err.Error())
 		return
 	}
-	log.Printf("Floor control for agency %s: %v", agencyID, *req.FloorControl)
+	log.Printf("Floor control for agency %s: %v (queue when busy: %v)", agencyID, *req.FloorControl, queue)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":        "ok",
-		"agency_id":     agencyID,
-		"floor_control": *req.FloorControl,
+		"status":          "ok",
+		"agency_id":       agencyID,
+		"floor_control":   *req.FloorControl,
+		"queue_when_busy": queue,
 	})
 }

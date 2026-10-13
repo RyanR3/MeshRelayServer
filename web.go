@@ -1525,14 +1525,15 @@ func (s *Server) handleGetAgencies(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		agencies = append(agencies, map[string]interface{}{
-			"id":            agency.ID,
-			"name":          agency.Name,
-			"created_at":    agency.CreatedAt,
-			"max_users":     agency.MaxUsers,
-			"max_channels":  agency.MaxChannels,
-			"user_count":    userCount,
-			"admin":         adminUsername,
-			"floor_control": agency.FloorControl,
+			"id":              agency.ID,
+			"name":            agency.Name,
+			"created_at":      agency.CreatedAt,
+			"max_users":       agency.MaxUsers,
+			"max_channels":    agency.MaxChannels,
+			"user_count":      userCount,
+			"admin":           adminUsername,
+			"floor_control":   agency.FloorControl,
+			"queue_when_busy": agency.QueueWhenBusy,
 		})
 	}
 	json.NewEncoder(w).Encode(agencies)

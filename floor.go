@@ -168,12 +168,36 @@ type floorHolder struct {
 	priority  uint8
 	lastAudio time.Time
 	grantedAt time.Time
+	// playback is set while the server itself holds the floor to replay a
+	// recorded (queued) transmission on the user's behalf. cancel stops it.
+	playback bool
+	cancel   chan struct{}
 }
 
 type queued struct {
 	user     string
 	priority uint8
 }
+
+// deferredTx is a transmission accepted while the channel was busy (queue
+// mode): recorded frame by frame and replayed once the floor is free.
+type deferredTx struct {
+	user     string
+	priority uint8
+	frames   []deferredFrame
+	complete bool // sender has released PTT
+	started  time.Time
+}
+
+type deferredFrame struct {
+	packet    *AudioPacket
+	audioData []byte
+}
+
+const (
+	deferredMaxFrames = 3000 // ~60 s at 20 ms frames
+	deferredFrameMs   = 20   // replay pacing
+)
 
 // floorChannel is the floor state for one agency-scoped channel key.
 type floorChannel struct {
@@ -182,6 +206,10 @@ type floorChannel struct {
 	emergency bool
 	emergBy   string
 	emergAt   time.Time
+	// Queue mode: transmissions recorded while busy, in arrival order, and the
+	// ones still being recorded (sender has not released yet) by user.
+	deferred  []*deferredTx
+	recording map[string]*deferredTx
 }
 
 // FloorController arbitrates the talk floor per channel key ("agencyID:channel").
@@ -232,9 +260,37 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 	// Higher priority (lower number) preempts.
 	if effectivePriority < c.holder.priority {
 		old := c.holder.user
-		fc.server.sendFloorToUser(old, buildFloorPreempted(req.Channel, req.User, effectivePriority))
+		oldPri := c.holder.priority
+		fc.interruptPlayback(c)
+		if c.holder != nil {
+			fc.server.sendFloorToUser(old, buildFloorPreempted(req.Channel, req.User, effectivePriority))
+		}
 		fc.grant(key, req.Channel, req.User, effectivePriority)
-		log.Printf("Floor %s: %s (pri %d) PREEMPTED %s (pri %d)", key, req.User, effectivePriority, old, c.holderPriorityBefore(old))
+		log.Printf("Floor %s: %s (pri %d) PREEMPTED %s (pri %d)", key, req.User, effectivePriority, old, oldPri)
+		return
+	}
+
+	// Queue mode: accept the transmission, record it, replay it after the
+	// current talker. The client sees FLOOR_GRANTED with a queue position > 0
+	// and keeps sending; those frames land in RecordDeferred.
+	if fc.server.floorQueueForAgency(agencyFromKey(key)) {
+		if d := c.recording[req.User]; d != nil {
+			fc.server.sendFloorToUser(req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(fc.deferredPos(c, d))))
+			return
+		}
+		if len(c.deferred) >= floorMaxQueue {
+			fc.server.sendFloorToUser(req.User, buildFloorDenied(req.Channel, FloorDenyChannelFull, 0, c.holder.user))
+			return
+		}
+		d := &deferredTx{user: req.User, priority: effectivePriority, started: time.Now()}
+		c.deferred = append(c.deferred, d)
+		if c.recording == nil {
+			c.recording = map[string]*deferredTx{}
+		}
+		c.recording[req.User] = d
+		pos := fc.deferredPos(c, d)
+		fc.server.sendFloorToUser(req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(pos)))
+		log.Printf("Floor %s: %s queued for replay (#%d) behind %s", key, req.User, pos, c.holder.user)
 		return
 	}
 
@@ -288,37 +344,100 @@ func (fc *FloorController) dequeueUser(c *floorChannel, user string) {
 	c.queue = out
 }
 
-// Release frees the floor held by `user` (PTT release / disconnect). Grants the
-// next queued user, or broadcasts FLOOR_IDLE. Caller must NOT hold fc.mu.
-// ReleaseAgency drops every held floor and queue for an agency's channels —
-// used when floor control is switched off for the agency.
+// ReleaseAgency drops every held floor, queue and recording for an agency's
+// channels — used when floor control is switched off for the agency.
 func (fc *FloorController) ReleaseAgency(agencyID string) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	prefix := agencyID + ":"
-	for key := range fc.channels {
+	for key, c := range fc.channels {
 		if strings.HasPrefix(key, prefix) {
+			fc.interruptPlayback(c)
 			delete(fc.channels, key)
 		}
 	}
 }
 
+// Release frees the floor held by `user` (PTT release / disconnect). Grants the
+// next queued user, or broadcasts FLOOR_IDLE. Caller must NOT hold fc.mu.
 func (fc *FloorController) Release(key string, channel int, user string) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	c := fc.ch(key)
-	if c.holder == nil || c.holder.user != user {
-		// Not the holder — maybe queued; drop from queue.
+	if d := c.recording[user]; d != nil {
+		// Queue mode: the sender finished; the recording stays queued for replay.
+		d.complete = true
+		delete(c.recording, user)
+		return
+	}
+	if c.holder == nil || c.holder.user != user || c.holder.playback {
+		// Not the (live) holder — maybe queued; drop from queue.
 		fc.dequeueUser(c, user)
 		return
 	}
 	fc.releaseAndAdvance(key, channel, c)
 }
 
-// releaseAndAdvance clears the holder and grants the next in queue (or idle).
-// Caller holds fc.mu.
+// RecordDeferred stores a frame from a user who was granted a queued slot
+// (queue mode). Frames from anyone else are dropped. Caller must NOT hold fc.mu.
+func (fc *FloorController) RecordDeferred(key, user string, packet *AudioPacket, audioData []byte) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	c := fc.channels[key]
+	if c == nil {
+		return
+	}
+	d := c.recording[user]
+	if d == nil || len(d.frames) >= deferredMaxFrames {
+		return
+	}
+	d.frames = append(d.frames, deferredFrame{packet: packet, audioData: audioData})
+}
+
+// deferredPos is the 1-based position of a recording in the replay queue.
+func (fc *FloorController) deferredPos(c *floorChannel, d *deferredTx) int {
+	for i, x := range c.deferred {
+		if x == d {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// interruptPlayback stops a replay in progress and puts what is left of it
+// back at the front of the replay queue. Caller holds fc.mu.
+func (fc *FloorController) interruptPlayback(c *floorChannel) {
+	if c.holder == nil || !c.holder.playback {
+		return
+	}
+	if c.holder.cancel != nil {
+		close(c.holder.cancel)
+	}
+	c.holder = nil
+}
+
+// releaseAndAdvance clears the holder and gives the floor to the next waiting
+// party: a recorded transmission (replayed by the server), then a live queued
+// user, else idle. Caller holds fc.mu.
 func (fc *FloorController) releaseAndAdvance(key string, channel int, c *floorChannel) {
 	c.holder = nil
+	if len(c.deferred) > 0 {
+		d := c.deferred[0]
+		c.deferred = c.deferred[1:]
+		if len(d.frames) == 0 && d.complete {
+			// Nothing was recorded (released before any audio) — skip it.
+			fc.releaseAndAdvance(key, channel, c)
+			return
+		}
+		h := &floorHolder{user: d.user, priority: d.priority, lastAudio: time.Now(),
+			grantedAt: time.Now(), playback: true, cancel: make(chan struct{})}
+		c.holder = h
+		fc.server.broadcastFloorToChannel(key, buildFloorTaken(channel, d.user, d.priority))
+		log.Printf("Floor %s: replaying queued transmission from %s (%d frames%s)",
+			key, d.user, len(d.frames), map[bool]string{true: "", false: ", still recording"}[d.complete])
+		go fc.replay(key, channel, c, h, d)
+		return
+	}
 	if len(c.queue) > 0 {
 		next := c.queue[0]
 		c.queue = c.queue[1:]
@@ -326,6 +445,61 @@ func (fc *FloorController) releaseAndAdvance(key string, channel int, c *floorCh
 		return
 	}
 	fc.server.broadcastFloorToChannel(key, buildFloorIdle(channel))
+}
+
+// replay paces a recorded transmission out to the channel. It runs while h is
+// the channel's holder; preemption closes h.cancel and the remainder goes back
+// to the front of the queue.
+func (fc *FloorController) replay(key string, channel int, c *floorChannel, h *floorHolder, d *deferredTx) {
+	i := 0
+	waited := time.Duration(0)
+	for {
+		select {
+		case <-h.cancel:
+			fc.mu.Lock()
+			if i < len(d.frames) {
+				d.frames = d.frames[i:]
+				c.deferred = append([]*deferredTx{d}, c.deferred...)
+			}
+			fc.mu.Unlock()
+			return
+		default:
+		}
+		fc.mu.Lock()
+		if c.holder != h {
+			fc.mu.Unlock()
+			return
+		}
+		var f deferredFrame
+		have := i < len(d.frames)
+		done := !have && d.complete
+		if have {
+			f = d.frames[i]
+			i++
+			h.lastAudio = time.Now()
+			waited = 0
+		}
+		if !have && !done {
+			// Caught up with a sender who is still talking; wait for more, but
+			// not forever — the dead-man window ends a stalled recording.
+			waited += deferredFrameMs * time.Millisecond
+			if waited > floorDeadManTimeout {
+				d.complete = true
+				delete(c.recording, d.user)
+				done = true
+			}
+		}
+		if done {
+			fc.releaseAndAdvance(key, channel, c)
+			fc.mu.Unlock()
+			return
+		}
+		fc.mu.Unlock()
+		if have {
+			fc.server.relayDeferred(key, channel, d.user, f.packet, f.audioData)
+		}
+		time.Sleep(deferredFrameMs * time.Millisecond)
+	}
 }
 
 // NoteAudio marks that the holder is still transmitting (resets dead-man timer).
@@ -344,7 +518,8 @@ func (fc *FloorController) HasFloor(key, user string) bool {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	c := fc.channels[key]
-	return c != nil && c.holder != nil && c.holder.user == user
+	// A replay holds the floor for the server, not for the user's live mic.
+	return c != nil && c.holder != nil && c.holder.user == user && !c.holder.playback
 }
 
 // Emergency sets or cancels the emergency state on a channel. Setting emergency
@@ -358,7 +533,9 @@ func (fc *FloorController) Emergency(key string, channel int, user string, activ
 		c.emergency = true
 		c.emergBy = user
 		c.emergAt = time.Now()
-		// Preempt to the emergency user.
+		// Preempt to the emergency user (a replay in progress is paused and
+		// resumes after).
+		fc.interruptPlayback(c)
 		if c.holder != nil && c.holder.user != user {
 			fc.server.sendFloorToUser(c.holder.user, buildFloorPreempted(channel, user, PriorityEmergency))
 		}
@@ -395,7 +572,7 @@ func (fc *FloorController) Tick() {
 	defer fc.mu.Unlock()
 	now := time.Now()
 	for key, c := range fc.channels {
-		if c.holder != nil && now.Sub(c.holder.lastAudio) > floorDeadManTimeout {
+		if c.holder != nil && !c.holder.playback && now.Sub(c.holder.lastAudio) > floorDeadManTimeout {
 			// Dead-man: holder stopped sending audio.
 			ch := channelNumFromKey(key)
 			log.Printf("Floor %s: dead-man timeout, releasing %s", key, c.holder.user)
@@ -416,7 +593,11 @@ func (fc *FloorController) DropUser(user string) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	for key, c := range fc.channels {
-		if c.holder != nil && c.holder.user == user {
+		if d := c.recording[user]; d != nil {
+			d.complete = true
+			delete(c.recording, user)
+		}
+		if c.holder != nil && c.holder.user == user && !c.holder.playback {
 			ch := channelNumFromKey(key)
 			fc.releaseAndAdvance(key, ch, c)
 		} else {
@@ -446,6 +627,10 @@ func channelNumFromKey(key string) int {
 
 // sendFloorToUser sends a floor packet to a specific user's current address.
 func (s *Server) sendFloorToUser(username string, data []byte) {
+	if s.testFloorUserSink != nil {
+		s.testFloorUserSink(username, data)
+		return
+	}
 	s.mu.RLock()
 	client, _ := s.findClientByUsername(username)
 	s.mu.RUnlock()

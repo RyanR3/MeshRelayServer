@@ -88,6 +88,30 @@ type Agency struct {
 	// Set from the dashboard; the legacy config list floor_control_agencies
 	// still works and is OR-ed with this flag.
 	FloorControl bool `json:"floor_control"`
+
+	// QueueWhenBusy (with FloorControl on) replaces the busy tone with
+	// store-and-forward: a second talker's transmission is accepted, recorded
+	// on the server and replayed to the channel once the current talker is
+	// done, in the order received.
+	QueueWhenBusy bool `json:"queue_when_busy"`
+}
+
+// Floor modes kept in Server.floorOn (lock-free, read per audio packet).
+const (
+	floorModeOff   = 0
+	floorModeBusy  = 1 // one talker; others get a busy tone and a live queue
+	floorModeQueue = 2 // one talker; others are recorded and replayed after
+)
+
+func (a *Agency) floorMode() int {
+	switch {
+	case !a.FloorControl:
+		return floorModeOff
+	case a.QueueWhenBusy:
+		return floorModeQueue
+	default:
+		return floorModeBusy
+	}
 }
 
 // trustsAgency reports whether this agency auto-accepts requests from another.
@@ -192,30 +216,32 @@ type Server struct {
 	config             *Config
 	configFile         string
 	conn               *net.UDPConn
-	clients            map[string]*Client           // username -> client
-	channels           map[string]*Channel          // "agencyID:channelNum" -> channel
-	groups             map[string]*GroupPacket      // groupID -> group
-	users              map[string]*UserAccount      // "agencyID:username" -> account
-	agencies           map[string]*Agency           // agencyID -> agency
-	authenticatedAddrs map[string]string            // addr string -> agencyID
-	lastChannel        map[string]int               // userKey -> channel of the last JOIN, for re-registration
-	pendingChallenges  map[string][32]byte          // addr string -> nonce (Phase 4f challenge-response)
-	enrollmentTokens   map[string]*EnrollmentToken  // token string -> enrollment token
-	guestEvents        map[string]*GuestEvent       // eventID -> guest event
-	webAdmins          map[string]*WebAdmin         // "agencyID:username" -> admin account (web dashboard)
-	dispatchConns      map[string]*DispatchConn     // "agencyID:username" -> active dispatch WebSocket
-	webSessions        map[string]*WebSession       // session token -> session
-	mutualAidLinks     map[string]*MutualAidLink    // linkID -> link
-	lmrBridges         map[string]*LMRBridge        // bridgeID -> LMR/VHF radio bridge
-	mutualAidRequests  map[string]*MutualAidRequest // requestID -> agency-to-agency ask
-	zelloBridges       map[string]*ZelloBridge      // bridgeID -> Zello Work channel bridge
-	ssrcToUser         map[uint32]string            // RTP SSRC -> username (MCX Step 1)
-	ssrcMu             sync.RWMutex                 // guards ssrcToUser
-	floor              *FloorController             // MCX Step 3 floor control (per channel)
-	floorOn            sync.Map                     // agencyID -> true when floor control is on (lock-free for the audio path)
-	groupMgr           *GroupManager                // MCX Step 4 group types / ad-hoc
-	sipGateway         *SipGateway                  // MCX Step 5 SIP gateway (nil = disabled)
-	testFloorSink      func(*net.UDPAddr, []byte)   // test-only: capture floor packets
+	clients            map[string]*Client                                           // username -> client
+	channels           map[string]*Channel                                          // "agencyID:channelNum" -> channel
+	groups             map[string]*GroupPacket                                      // groupID -> group
+	users              map[string]*UserAccount                                      // "agencyID:username" -> account
+	agencies           map[string]*Agency                                           // agencyID -> agency
+	authenticatedAddrs map[string]string                                            // addr string -> agencyID
+	lastChannel        map[string]int                                               // userKey -> channel of the last JOIN, for re-registration
+	pendingChallenges  map[string][32]byte                                          // addr string -> nonce (Phase 4f challenge-response)
+	enrollmentTokens   map[string]*EnrollmentToken                                  // token string -> enrollment token
+	guestEvents        map[string]*GuestEvent                                       // eventID -> guest event
+	webAdmins          map[string]*WebAdmin                                         // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns      map[string]*DispatchConn                                     // "agencyID:username" -> active dispatch WebSocket
+	webSessions        map[string]*WebSession                                       // session token -> session
+	mutualAidLinks     map[string]*MutualAidLink                                    // linkID -> link
+	lmrBridges         map[string]*LMRBridge                                        // bridgeID -> LMR/VHF radio bridge
+	mutualAidRequests  map[string]*MutualAidRequest                                 // requestID -> agency-to-agency ask
+	zelloBridges       map[string]*ZelloBridge                                      // bridgeID -> Zello Work channel bridge
+	ssrcToUser         map[uint32]string                                            // RTP SSRC -> username (MCX Step 1)
+	ssrcMu             sync.RWMutex                                                 // guards ssrcToUser
+	floor              *FloorController                                             // MCX Step 3 floor control (per channel)
+	floorOn            sync.Map                                                     // agencyID -> floorMode* (lock-free for the audio path)
+	groupMgr           *GroupManager                                                // MCX Step 4 group types / ad-hoc
+	sipGateway         *SipGateway                                                  // MCX Step 5 SIP gateway (nil = disabled)
+	testFloorSink      func(*net.UDPAddr, []byte)                                   // test-only: capture floor packets
+	testRelaySink      func(key string, channel int, user string, audioData []byte) // test-only: capture replayed audio
+	testFloorUserSink  func(user string, data []byte)                               // test-only: capture per-user floor packets
 	mu                 sync.RWMutex
 	shutdown           chan struct{}
 	stats              *Stats
@@ -742,20 +768,38 @@ func (s *Server) BroadcastEmergency(channelKey, userMCXID string) error {
 // the agency's dashboard setting, or the legacy config list. Read on every
 // audio packet, so it uses the lock-free map rather than s.agencies.
 func (s *Server) floorEnabledForAgency(agencyID string) bool {
-	if on, ok := s.floorOn.Load(agencyID); ok && on.(bool) {
-		return true
+	return s.floorModeForAgency(agencyID) != floorModeOff
+}
+
+// floorQueueForAgency reports whether a busy channel records and replays a
+// second talker (queue mode) rather than refusing them.
+func (s *Server) floorQueueForAgency(agencyID string) bool {
+	return s.floorModeForAgency(agencyID) == floorModeQueue
+}
+
+func (s *Server) floorModeForAgency(agencyID string) int {
+	if m, ok := s.floorOn.Load(agencyID); ok && m.(int) != floorModeOff {
+		return m.(int)
 	}
 	for _, a := range s.config.FloorControlAgencies {
 		if a == agencyID {
-			return true
+			return floorModeBusy
 		}
 	}
-	return false
+	return floorModeOff
 }
 
-// setFloorControl turns floor control on or off for an agency and persists it.
+// agencyFromKey recovers the agency ID from a channel key ("agency:channel").
+func agencyFromKey(key string) string {
+	if i := strings.LastIndex(key, ":"); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// setFloorControl sets an agency's floor policy and persists it.
 // Caller must NOT hold s.mu.
-func (s *Server) setFloorControl(agencyID string, on bool) error {
+func (s *Server) setFloorControl(agencyID string, on bool, queue bool) error {
 	s.mu.Lock()
 	a := s.agencies[agencyID]
 	if a == nil {
@@ -763,9 +807,11 @@ func (s *Server) setFloorControl(agencyID string, on bool) error {
 		return fmt.Errorf("agency not found")
 	}
 	a.FloorControl = on
+	a.QueueWhenBusy = queue
+	mode := a.floorMode()
 	s.mu.Unlock()
-	s.floorOn.Store(agencyID, on)
-	if !on && s.floor != nil {
+	s.floorOn.Store(agencyID, mode)
+	if mode == floorModeOff && s.floor != nil {
 		// Nobody should stay "holder" of a channel that is now open.
 		s.floor.ReleaseAgency(agencyID)
 	}
@@ -914,34 +960,6 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		client.Addr = addr
 	}
 
-	// MCX Step 3: when floor control is enabled for this agency, only the current
-	// floor holder's audio is relayed. Non-holders are dropped (they must acquire
-	// the floor first). The holder's audio resets the dead-man timer. Floor
-	// control is skipped when disabled — open PTT as before.
-	if s.floorEnabledForAgency(client.AgencyID) {
-		fkey := channelKey(client.AgencyID, client.Channel)
-		if !s.floor.HasFloor(fkey, packet.Username) {
-			return // not the floor holder — drop
-		}
-		s.floor.NoteAudio(fkey, packet.Username)
-	}
-
-	// MCX Step 1: remember which user an RTP SSRC belongs to, so a future gateway
-	// (and diagnostics) can map RTP streams back to a MeshRelay identity without
-	// re-parsing the audio body.
-	if packet.RTP != nil {
-		s.ssrcMu.Lock()
-		s.ssrcToUser[packet.RTP.SSRC] = packet.Username
-		s.ssrcMu.Unlock()
-	}
-
-	// Get client's agency-scoped channel
-	key := channelKey(client.AgencyID, client.Channel)
-	channel := s.channels[key]
-	if channel == nil {
-		return
-	}
-
 	// Prepend packet type to the serialized data, preserving both the codec and
 	// the RTP framing. An RTP-aligned packet (0x13) is relayed as RTP with the
 	// sender's original RTP header intact, so receivers and any MCX gateway see
@@ -956,6 +974,61 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 			relayType = PacketTypeAudioOpus
 		}
 		audioData = append([]byte{relayType}, SerializeAudioPacket(packet)...)
+	}
+
+	// MCX Step 3: when floor control is enabled for this agency, only the current
+	// floor holder's audio is relayed. A non-holder is either recorded for replay
+	// (queue mode, if the server granted them a queued slot) or dropped. The
+	// holder's audio resets the dead-man timer. Floor control is skipped when
+	// disabled — open PTT as before.
+	if s.floorEnabledForAgency(client.AgencyID) {
+		fkey := channelKey(client.AgencyID, client.Channel)
+		if !s.floor.HasFloor(fkey, packet.Username) {
+			s.floor.RecordDeferred(fkey, packet.Username, packet, audioData)
+			return
+		}
+		s.floor.NoteAudio(fkey, packet.Username)
+	}
+
+	// MCX Step 1: remember which user an RTP SSRC belongs to, so a future gateway
+	// (and diagnostics) can map RTP streams back to a MeshRelay identity without
+	// re-parsing the audio body.
+	if packet.RTP != nil {
+		s.ssrcMu.Lock()
+		s.ssrcToUser[packet.RTP.SSRC] = packet.Username
+		s.ssrcMu.Unlock()
+	}
+
+	s.relayAudioData(client, packet, audioData)
+}
+
+// relayDeferred delivers one recorded frame of a queued transmission to the
+// channel as if the user had just sent it (floor replay, queue mode). The
+// user's live client may be gone by now, so the relay is addressed by agency
+// and channel rather than by connection.
+func (s *Server) relayDeferred(key string, channelNum int, user string, packet *AudioPacket, audioData []byte) {
+	if s.testRelaySink != nil {
+		s.testRelaySink(key, channelNum, user, audioData)
+		return
+	}
+	s.mu.RLock()
+	client, _ := s.findClientByUsername(user)
+	s.mu.RUnlock()
+	if client == nil {
+		client = &Client{Username: user, AgencyID: agencyFromKey(key), Channel: channelNum}
+	}
+	s.relayAudioData(client, packet, audioData)
+}
+
+// relayAudioData fans one relay-ready audio frame out to everyone who should
+// hear it: the sender's channel, always-listen monitors, ad-hoc group members,
+// mutual-aid partners, bridges and the dispatch console.
+func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData []byte) {
+	// Get client's agency-scoped channel
+	key := channelKey(client.AgencyID, client.Channel)
+	channel := s.channels[key]
+	if channel == nil {
+		return
 	}
 
 	// Channel-tagged variant (0x14) for MONITOR recipients only: without the
@@ -2725,8 +2798,8 @@ func (s *Server) loadAgencies() {
 
 	for _, agency := range agencies {
 		s.agencies[agency.ID] = agency
-		if agency.FloorControl {
-			s.floorOn.Store(agency.ID, true)
+		if m := agency.floorMode(); m != floorModeOff {
+			s.floorOn.Store(agency.ID, m)
 		}
 	}
 	log.Printf("Loaded %d agencies", len(s.agencies))

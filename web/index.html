@@ -306,7 +306,7 @@
                             <th>Name</th>
                             <th>ID</th>
                             <th>Users</th>
-                            <th>Floor control</th>
+                            <th>Busy channel</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -727,18 +727,20 @@
                     </div>
                     <div class="settings-row">
                         <div class="settings-info">
-                            <div class="settings-label">One talker per channel</div>
+                            <div class="settings-label">When someone is already talking</div>
                             <div class="settings-description" id="floor-control-description">
-                                When on, a PTT press while someone else is talking is refused with a busy tone
-                                and queued until the channel is free. Command and emergency priority can still
-                                preempt. When off, everyone's audio is relayed and simultaneous talkers are heard
-                                over each other.
+                                <strong>Open:</strong> everyone's audio is relayed and simultaneous talkers are heard over each other.<br>
+                                <strong>Busy tone:</strong> one talker per channel; a second press is refused with a busy tone until the channel is free.<br>
+                                <strong>Queue and replay:</strong> one talker per channel; a second press is accepted and recorded on the server,
+                                then played to the channel as soon as the current talker is done, in the order received.<br>
+                                Command and emergency priority can preempt in either one-talker mode.
                             </div>
                         </div>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="floor-control-toggle" onchange="saveFloorControl()">
-                            <span class="toggle-slider"></span>
-                        </label>
+                        <select id="floor-control-policy" onchange="saveFloorControl()" style="margin-bottom: 0; width: auto; min-width: 180px;">
+                            <option value="open">Open (mixed)</option>
+                            <option value="busy">Busy tone</option>
+                            <option value="queue">Queue and replay</option>
+                        </select>
                     </div>
                 </div>
 

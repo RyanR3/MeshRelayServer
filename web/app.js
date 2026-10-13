@@ -145,28 +145,42 @@ function floorControlAgencyQuery() {
     return (currentRole === 'super_admin' && sel && sel.value) ? '?agency=' + encodeURIComponent(sel.value) : '';
 }
 
+// Policy value <-> API fields.
+function floorPolicyOf(data) {
+    if (!data.floor_control) return 'open';
+    return data.queue_when_busy ? 'queue' : 'busy';
+}
+function floorPolicyBody(policy) {
+    return { floor_control: policy !== 'open', queue_when_busy: policy === 'queue' };
+}
+const FLOOR_POLICY_TEXT = {
+    open: 'Open PTT: simultaneous talkers are mixed together',
+    busy: 'Busy tone: one talker per channel, a second press is refused',
+    queue: 'Queue and replay: a second talker is recorded and played after the current one'
+};
+
 function fetchFloorControl() {
-    const cb = document.getElementById('floor-control-toggle');
-    if (!cb) return;
+    const sel = document.getElementById('floor-control-policy');
+    if (!sel) return;
     fetch('/api/my-agency/floor-control' + floorControlAgencyQuery())
         .then(r => r.json())
         .then(data => {
             if (data.error) { showStatus('floor-control-status', data.error, 'error'); return; }
-            cb.checked = !!data.floor_control;
-            cb.disabled = !!data.from_config;
+            sel.value = floorPolicyOf(data);
+            sel.disabled = !!data.from_config;
             if (data.from_config) {
                 showStatus('floor-control-status',
-                    'Turned on by floor_control_agencies in the server config file; remove it there to control it here.', 'error');
+                    'Set by floor_control_agencies in the server config file; remove it there to control it here.', 'error');
             }
         })
         .catch(err => showStatus('floor-control-status', 'Failed to load: ' + err.message, 'error'));
 }
 
 function saveFloorControl() {
-    const cb = document.getElementById('floor-control-toggle');
-    const sel = document.getElementById('floor-control-agency');
-    const body = { floor_control: cb.checked };
-    if (currentRole === 'super_admin' && sel && sel.value) body.agency_id = sel.value;
+    const sel = document.getElementById('floor-control-policy');
+    const agencySel = document.getElementById('floor-control-agency');
+    const body = floorPolicyBody(sel.value);
+    if (currentRole === 'super_admin' && agencySel && agencySel.value) body.agency_id = agencySel.value;
     fetch('/api/my-agency/floor-control', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -174,27 +188,27 @@ function saveFloorControl() {
     })
     .then(r => r.json())
     .then(data => {
-        if (data.error) { showStatus('floor-control-status', data.error, 'error'); cb.checked = !cb.checked; return; }
-        showStatus('floor-control-status',
-            cb.checked ? 'Floor control on: one talker per channel, others hear a busy tone'
-                       : 'Floor control off: open PTT', 'success');
+        if (data.error) { showStatus('floor-control-status', data.error, 'error'); fetchFloorControl(); return; }
+        showStatus('floor-control-status', FLOOR_POLICY_TEXT[sel.value], 'success');
     })
-    .catch(err => { showStatus('floor-control-status', 'Failed to save: ' + err.message, 'error'); cb.checked = !cb.checked; });
+    .catch(err => { showStatus('floor-control-status', 'Failed to save: ' + err.message, 'error'); fetchFloorControl(); });
 }
 
-// Agencies table toggle (super admin).
-function setAgencyFloorControl(agencyId, on, el) {
+// Agencies table policy select (super admin).
+function setAgencyFloorControl(agencyId, policy, el) {
+    const body = floorPolicyBody(policy);
+    body.agency_id = agencyId;
     fetch('/api/my-agency/floor-control', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agency_id: agencyId, floor_control: on })
+        body: JSON.stringify(body)
     })
     .then(r => r.json())
     .then(data => {
-        if (data.error) { showStatus('agency-status', data.error, 'error'); if (el) el.checked = !on; return; }
-        showStatus('agency-status', `Floor control ${on ? 'on' : 'off'} for ${agencyId}`, 'success');
+        if (data.error) { showStatus('agency-status', data.error, 'error'); fetchAgencies(); return; }
+        showStatus('agency-status', `${agencyId}: ${FLOOR_POLICY_TEXT[policy]}`, 'success');
     })
-    .catch(err => { showStatus('agency-status', 'Failed to save: ' + err.message, 'error'); if (el) el.checked = !on; });
+    .catch(err => { showStatus('agency-status', 'Failed to save: ' + err.message, 'error'); fetchAgencies(); });
 }
 
 // Connect to WebSocket
@@ -2488,17 +2502,18 @@ function renderAgenciesTable(agencies) {
         const safeName = escapeHtml(agency.name);
         const safeId = escapeHtml(agency.id);
         const isDefault = agency.id === 'default';
+        const policy = floorPolicyOf(agency);
         return `
             <tr>
                 <td><strong>${safeName}</strong></td>
                 <td><code>${safeId}</code></td>
                 <td>${agency.user_count || 0}</td>
                 <td>
-                    <label class="toggle-switch" title="One talker per channel">
-                        <input type="checkbox" ${agency.floor_control ? 'checked' : ''}
-                               onchange="setAgencyFloorControl('${safeId}', this.checked, this)">
-                        <span class="toggle-slider"></span>
-                    </label>
+                    <select onchange="setAgencyFloorControl('${safeId}', this.value, this)" style="margin-bottom: 0; width: auto;">
+                        <option value="open" ${policy === 'open' ? 'selected' : ''}>Open</option>
+                        <option value="busy" ${policy === 'busy' ? 'selected' : ''}>Busy tone</option>
+                        <option value="queue" ${policy === 'queue' ? 'selected' : ''}>Queue and replay</option>
+                    </select>
                 </td>
                 <td>
                     <div class="actions-cell">
