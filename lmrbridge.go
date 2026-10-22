@@ -314,9 +314,14 @@ func (s *Server) notifyLMRChannel(agencies []string, channel int, name string, a
 	var addrs []*net.UDPAddr
 	s.mu.RLock()
 	for _, c := range s.clients {
-		if set[c.AgencyID] {
-			addrs = append(addrs, c.Addr)
+		if !set[c.AgencyID] {
+			continue
 		}
+		// A gateway login hears only its OWN bridge's channel.
+		if own := s.ownLMRBridge(c); own != nil && own.Channel != channel {
+			continue
+		}
+		addrs = append(addrs, c.Addr)
 	}
 	s.mu.RUnlock()
 

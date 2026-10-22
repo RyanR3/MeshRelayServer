@@ -446,3 +446,20 @@ func TestGatewayLoginHearsOnlyItsOwnBridge(t *testing.T) {
 		t.Fatalf("a phone should hear the patch, both Zello channels and both bridges, got %v", got)
 	}
 }
+
+// Runtime announcements (Zello bridge up, mutual-aid patch created, another
+// LMR bridge enabled) must also skip a gateway login, not just the join path.
+func TestGatewayLoginDetection(t *testing.T) {
+	s := newMARTestServer()
+	s.agencies["a"] = &Agency{ID: "a", Name: "A"}
+	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Username: "pi", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 100, Enabled: true}
+	if !s.isGatewayLogin(&Client{Username: "pi", AgencyID: "a"}) {
+		t.Fatal("pi in agency a is the gateway of b1")
+	}
+	if s.isGatewayLogin(&Client{Username: "pi", AgencyID: "other"}) {
+		t.Fatal("same username in another agency is not a gateway")
+	}
+	if s.isGatewayLogin(&Client{Username: "phone", AgencyID: "a"}) {
+		t.Fatal("a phone is not a gateway")
+	}
+}

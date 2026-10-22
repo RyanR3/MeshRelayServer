@@ -1011,7 +1011,7 @@ func (s *Server) announceChannelRemoval(agencyID string, meshChannel int, name s
 	s.mu.RLock()
 	var addrs []*net.UDPAddr
 	for _, c := range s.clients {
-		if c.AgencyID == agencyID {
+		if c.AgencyID == agencyID && !s.isGatewayLogin(c) {
 			addrs = append(addrs, c.Addr)
 		}
 	}
@@ -1042,7 +1042,8 @@ func (s *Server) notifyZelloBridgeChannels(b *ZelloBridge, active bool) {
 			s.mu.RLock()
 			var addrs []*net.UDPAddr
 			for _, c := range s.clients {
-				if c.AgencyID == agency {
+				// Never to a gateway login: it would adopt the Zello channel.
+				if c.AgencyID == agency && !s.isGatewayLogin(c) {
 					addrs = append(addrs, c.Addr)
 				}
 			}

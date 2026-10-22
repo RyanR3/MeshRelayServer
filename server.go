@@ -3082,6 +3082,9 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 		if !agencySet[client.AgencyID] {
 			continue
 		}
+		if s.isGatewayLogin(client) {
+			continue // a gateway hears only its own LMR bridge
+		}
 		targets = append(targets, target{client.Username, client.AgencyID, client.Addr})
 	}
 	s.mu.RUnlock()
@@ -3507,4 +3510,22 @@ func (s *Server) joinAnnouncements(agencyID, username string, joinedChannel int)
 		}
 	}
 	return out
+}
+
+// isGatewayLogin reports whether a connected client is the gateway user of an
+// LMR bridge it owns. Such a client adopts any channel it is announced, so the
+// runtime announcements (a Zello bridge coming up, a mutual-aid patch being
+// created, another LMR bridge) must skip it — only its own bridge may reach it.
+// Caller holds s.mu (read).
+func (s *Server) isGatewayLogin(c *Client) bool {
+	return s.ownLMRBridge(c) != nil
+}
+
+func (s *Server) ownLMRBridge(c *Client) *LMRBridge {
+	for _, b := range s.lmrBridges {
+		if b.Username == c.Username && b.ownerAgency() == c.AgencyID {
+			return b
+		}
+	}
+	return nil
 }
