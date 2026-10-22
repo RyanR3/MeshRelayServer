@@ -242,6 +242,8 @@ type Server struct {
 	testFloorSink      func(*net.UDPAddr, []byte)                                   // test-only: capture floor packets
 	testRelaySink      func(key string, channel int, user string, audioData []byte) // test-only: capture replayed audio
 	testFloorUserSink  func(user string, data []byte)                               // test-only: capture per-user floor packets
+	autoFloorMu        sync.Mutex
+	autoFloorLast      map[string]time.Time // gateway username -> last automatic floor request
 	mu                 sync.RWMutex
 	shutdown           chan struct{}
 	stats              *Stats
@@ -983,7 +985,7 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	// disabled — open PTT as before.
 	if s.floorEnabledForAgency(client.AgencyID) {
 		fkey := channelKey(client.AgencyID, client.Channel)
-		if !s.floor.HasFloor(fkey, packet.Username) {
+		if !s.floor.HasFloor(fkey, packet.Username) && !s.autoFloorForGateway(client, fkey) {
 			s.floor.RecordDeferred(fkey, packet.Username, packet, audioData)
 			return
 		}
@@ -3528,4 +3530,43 @@ func (s *Server) ownLMRBridge(c *Client) *LMRBridge {
 		}
 	}
 	return nil
+}
+
+// autoFloorForGateway asks for the floor on behalf of an LMR bridge gateway
+// whose radio just started sending audio. A radio cannot press PTT the way a
+// phone does: the gateway streams whatever the radio receives and never sends
+// a FLOOR_REQUEST, so with floor control on, every radio transmission was
+// dropped as "not the holder" (2026-10-22, scny). The request goes through the
+// normal arbiter — an idle channel grants it, a busy one applies the agency's
+// policy (busy: dropped, queue: recorded and replayed) — and the dead-man
+// timer releases it when the radio goes quiet. Throttled to one request per
+// second per gateway so a refused radio does not hammer the arbiter.
+// Returns true when the gateway now holds the floor.
+func (s *Server) autoFloorForGateway(client *Client, fkey string) bool {
+	s.mu.RLock()
+	own := s.ownLMRBridge(client)
+	s.mu.RUnlock()
+	if own == nil || s.floor == nil {
+		return false
+	}
+	s.autoFloorMu.Lock()
+	if s.autoFloorLast == nil {
+		s.autoFloorLast = map[string]time.Time{}
+	}
+	last := s.autoFloorLast[client.Username]
+	if time.Since(last) < time.Second {
+		s.autoFloorMu.Unlock()
+		return false
+	}
+	s.autoFloorLast[client.Username] = time.Now()
+	s.autoFloorMu.Unlock()
+
+	acct := s.findUserByUsername(client.Username)
+	pri := acct.effectivePriority()
+	s.floor.Request(fkey, &FloorRequest{Channel: client.Channel, User: client.Username, Priority: pri}, pri)
+	granted := s.floor.HasFloor(fkey, client.Username)
+	if granted {
+		log.Printf("Floor %s: auto-granted to gateway %s (radio audio)", fkey, client.Username)
+	}
+	return granted
 }

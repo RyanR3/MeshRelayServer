@@ -134,3 +134,35 @@ func TestFloorQueueRecordsAndReplays(t *testing.T) {
 		t.Fatalf("floor should be idle after replay, got %v", st)
 	}
 }
+
+// A radio bridge never sends FLOOR_REQUEST; with floor control on, its audio
+// must still get the floor automatically (idle channel) while a phone that
+// never asked is still dropped.
+func TestGatewayAudioAutoFloor(t *testing.T) {
+	s := newMARTestServer()
+	s.config = &Config{AgenciesFile: filepath.Join(t.TempDir(), "agencies.json")}
+	s.agencies["a"] = &Agency{ID: "a", Name: "A"}
+	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Username: "pi", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 102, Enabled: true}
+	s.floor = NewFloorController(s)
+	s.testFloorUserSink = func(user string, data []byte) {}
+	if err := s.setFloorControl("a", true, false); err != nil {
+		t.Fatal(err)
+	}
+	key := channelKey("a", 102)
+	gw := &Client{Username: "pi", AgencyID: "a", Channel: 102}
+	if !s.autoFloorForGateway(gw, key) || !s.floor.HasFloor(key, "pi") {
+		t.Fatal("gateway audio on an idle channel should be granted the floor automatically")
+	}
+	phone := &Client{Username: "phone", AgencyID: "a", Channel: 102}
+	if s.autoFloorForGateway(phone, key) {
+		t.Fatal("a phone that never requested the floor must not be auto-granted")
+	}
+	// Busy channel (live talker): after the throttle window the gateway asks
+	// again and busy mode refuses it.
+	s.floor.Release(key, 102, "pi")
+	s.floor.Request(key, &FloorRequest{Channel: 102, User: "alice", Priority: 3}, 3)
+	time.Sleep(1100 * time.Millisecond)
+	if s.autoFloorForGateway(gw, key) {
+		t.Fatal("gateway must not take the floor from a live talker in busy mode")
+	}
+}
