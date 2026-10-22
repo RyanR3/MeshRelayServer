@@ -287,6 +287,7 @@ func (s *Server) handleToggleLMRBridge(w http.ResponseWriter, r *http.Request) {
 	enabled := b.Enabled
 	agencies := append([]string(nil), b.Agencies...)
 	channel, name := b.Channel, b.displayName()
+	s.refreshPausedGateways()
 	s.mu.Unlock()
 
 	go s.notifyLMRChannel(agencies, channel, name, enabled)

@@ -132,6 +132,7 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/my-agency/lmr-bridges", s.requireAdmin(s.handleGetMyLMRBridges)).Methods("GET")
 	api.HandleFunc("/my-agency/lmr-bridges", s.requireAdmin(s.handleCreateMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}", s.requireAdmin(s.handleDeleteMyLMRBridge)).Methods("DELETE")
+	api.HandleFunc("/my-agency/lmr-bridges/{id}/toggle", s.requireAdmin(s.handleToggleMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/share", s.requireAdmin(s.handleShareMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/unshare", s.requireAdmin(s.handleUnshareMyLMRBridge)).Methods("POST")
 

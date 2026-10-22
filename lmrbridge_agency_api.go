@@ -404,3 +404,41 @@ func (s *Server) handleDeleteMyLMRBridge(w http.ResponseWriter, r *http.Request)
 	log.Printf("LMR: agency %s deleted bridge %s (ch %d, user %s)", mine, id, channel, username)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
+
+// handleToggleMyLMRBridge pauses or resumes a bridge the caller's agency owns.
+// Paused = disabled: the channel is withdrawn from phones, the gateway is told
+// (it inhibits its transmitter), and the server relays nothing to the gateway,
+// so the radio cannot be keyed even if the bridge host has gone wrong. This is
+// the remote kill switch for an unattended bridge.
+func (s *Server) handleToggleMyLMRBridge(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+	mine, isSuper := s.callerAgency(r)
+
+	s.mu.Lock()
+	b := s.lmrBridges[id]
+	if b == nil {
+		s.mu.Unlock()
+		writeJSONError(w, http.StatusNotFound, "bridge not found")
+		return
+	}
+	if !b.ownedBy(mine) && !isSuper {
+		s.mu.Unlock()
+		writeJSONError(w, http.StatusForbidden, "only the owning agency can pause this bridge")
+		return
+	}
+	b.Enabled = !b.Enabled
+	enabled := b.Enabled
+	agencies := append([]string(nil), b.Agencies...)
+	channel, name := b.Channel, b.displayName()
+	s.refreshPausedGateways()
+	s.mu.Unlock()
+
+	go s.notifyLMRChannel(agencies, channel, name, enabled)
+	if err := s.saveLMRBridges(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
+		return
+	}
+	log.Printf("LMR: bridge %s %s by agency %s", id, map[bool]string{true: "resumed", false: "PAUSED"}[enabled], mine)
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "enabled": enabled})
+}

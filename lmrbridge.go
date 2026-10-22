@@ -174,6 +174,7 @@ func (s *Server) loadLMRBridges() {
 		}
 	}
 	log.Printf("LMR: loaded %d bridge(s)", len(s.lmrBridges))
+	s.refreshPausedGateways()
 }
 
 // saveLMRBridges writes bridges to disk. Caller must NOT hold s.mu.

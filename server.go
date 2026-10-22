@@ -245,6 +245,7 @@ type Server struct {
 	testFloorUserSink      func(user string, data []byte)                               // test-only: capture per-user floor packets
 	autoFloorMu            sync.Mutex
 	autoFloorLast          map[string]time.Time // gateway username -> last automatic floor request
+	pausedGateways         sync.Map             // userKey of a disabled LMR bridge\'s gateway: relay nothing to it (lock-free, read per packet)
 	mu                     sync.RWMutex
 	shutdown               chan struct{}
 	stats                  *Stats
@@ -1053,7 +1054,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 	channel.mu.RLock()
 	relayCount := 0
 	for _, otherClient := range channel.Clients {
-		if otherClient.Username != client.Username {
+		if otherClient.Username != client.Username && !s.gatewayPaused(otherClient) {
 			s.sendPacket(audioData, otherClient.Addr)
 			sentTo[otherClient.Addr.String()] = true
 			relayCount++
@@ -1066,7 +1067,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 	// heard regardless of the client's active channel.
 	s.mu.RLock()
 	for _, mc := range s.clients {
-		if mc.AgencyID != client.AgencyID || mc.Username == client.Username {
+		if mc.AgencyID != client.AgencyID || mc.Username == client.Username || s.gatewayPaused(mc) {
 			continue
 		}
 		if sentTo[mc.Addr.String()] {
@@ -1101,7 +1102,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 				continue
 			}
 			mc, _ := s.findClientByUsername(u)
-			if mc == nil || sentTo[mc.Addr.String()] {
+			if mc == nil || sentTo[mc.Addr.String()] || s.gatewayPaused(mc) {
 				continue
 			}
 			s.sendPacket(audioData, mc.Addr)
@@ -1123,7 +1124,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 			partnerChannel.mu.RLock()
 			partnerCount := 0
 			for _, otherClient := range partnerChannel.Clients {
-				if sentTo[otherClient.Addr.String()] {
+				if sentTo[otherClient.Addr.String()] || s.gatewayPaused(otherClient) {
 					continue // already received it
 				}
 				s.sendPacket(audioData, otherClient.Addr)
@@ -3639,4 +3640,28 @@ func (s *Server) autoFloorForGateway(client *Client, fkey string) bool {
 		log.Printf("Floor %s: auto-granted to gateway %s (radio audio)", fkey, client.Username)
 	}
 	return granted
+}
+
+// gatewayPaused reports whether a client is the gateway of an LMR bridge that
+// is currently disabled on the dashboard. Nothing is relayed to such a client,
+// so the radio behind it cannot be keyed — the remote kill switch for a
+// bridge that sits unattended on a public-safety channel. Lock-free; the
+// set is maintained by refreshPausedGateways.
+func (s *Server) gatewayPaused(c *Client) bool {
+	if c == nil {
+		return false
+	}
+	_, paused := s.pausedGateways.Load(userKey(c.AgencyID, c.Username))
+	return paused
+}
+
+// refreshPausedGateways rebuilds the paused set from the bridge list. Caller
+// holds s.mu (read or write).
+func (s *Server) refreshPausedGateways() {
+	s.pausedGateways.Range(func(k, _ interface{}) bool { s.pausedGateways.Delete(k); return true })
+	for _, b := range s.lmrBridges {
+		if !b.Enabled && b.Username != "" {
+			s.pausedGateways.Store(userKey(b.ownerAgency(), b.Username), true)
+		}
+	}
 }

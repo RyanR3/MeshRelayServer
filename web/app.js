@@ -4005,6 +4005,20 @@ let lmrDirectory = [];
 let lmrDiscovery = null;
 let lmrMyBridges = [];
 
+// Pause / resume a bridge: paused = the server sends the gateway nothing and
+// the gateway inhibits its transmitter, so the radio cannot be keyed from here.
+function lmrToggle(id, resume) {
+    if (!resume && !confirm('Pause this bridge? The radio will stop transmitting immediately and the channel is withdrawn from phones until you resume.')) return;
+    fetch('/api/my-agency/lmr-bridges/' + id + '/toggle', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('lmr-status', d.error, 'error'); return; }
+            showStatus('lmr-status', d.enabled ? 'Bridge resumed' : 'Bridge paused — the radio will not transmit', d.enabled ? 'success' : 'error');
+            fetchAgencyLmrBridges();
+        })
+        .catch(e => showStatus('lmr-status', 'Failed: ' + e.message, 'error'));
+}
+
 function fetchAgencyLmrBridges() {
     const arr = v => Array.isArray(v) ? v : [];
     Promise.all([
@@ -4099,12 +4113,19 @@ function lmrRenderAgencyBridges() {
             `<span class="ma-chip">${escapeHtml(a.name)}<button class="ma-chip-x"
                 onclick="lmrUnshare('${safeId}','${escapeAttr(a.id)}')"
                 title="Revoke access">&times;</button></span>`).join('');
-        return `<div class="ma-patch-card">
+        const paused = b.enabled === false;
+        return `<div class="ma-patch-card${paused ? ' lmr-paused' : ''}">
             <div class="ma-patch-card-head">
                 <span class="ma-patch-title">
                     <span class="lmr-dot ${dot}" title="${b.online ? 'Gateway connected' : 'Gateway offline'}"></span>
                     ${escapeHtml(b.channel_name || b.name || 'LMR Bridge')}
+                    ${paused ? '<span class="ma-chip" style="margin-left:8px;background:#7a1f1f;color:#fff">PAUSED — radio will not transmit</span>' : ''}
                 </span>
+                <button class="btn-action${paused ? '' : ' delete'}" style="margin-right:8px"
+                        onclick="lmrToggle('${safeId}', ${paused ? 'true' : 'false'})"
+                        title="${paused ? 'Resume: the gateway may transmit again' : 'Pause: stop all audio to the gateway so the radio cannot be keyed'}">
+                    ${paused ? 'Resume' : 'Pause'}
+                </button>
                 <button class="ma-patch-remove" onclick="lmrDelete('${safeId}','${escapeAttr(b.channel_name || b.name)}')"
                         title="Delete this bridge">&times;</button>
             </div>
