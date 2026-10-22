@@ -166,3 +166,34 @@ func TestGatewayAudioAutoFloor(t *testing.T) {
 		t.Fatal("gateway must not take the floor from a live talker in busy mode")
 	}
 }
+
+// A returning client is put back on its last channel, and a bridge gateway
+// with no history lands on its own bridge's channel rather than channel 0.
+func TestLastChannelGatewayFallbackAndPersistence(t *testing.T) {
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(old)
+
+	s := newMARTestServer()
+	s.config = &Config{AgenciesFile: filepath.Join(dir, "agencies.json")}
+	s.users = map[string]*UserAccount{userKey("a", "pi"): {Username: "pi", AgencyID: "a"}}
+	s.agencies["a"] = &Agency{ID: "a", Name: "A"}
+	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Username: "pi", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 102, Enabled: true}
+	if ch := s.lastChannelFor("pi", nil); ch != 102 {
+		t.Fatalf("gateway with no history should land on its bridge channel 102, got %d", ch)
+	}
+
+	s.mu.Lock()
+	s.lastChannel = map[string]int{userKey("a", "pi"): 105}
+	s.scheduleSaveLastChannels()
+	s.mu.Unlock()
+	time.Sleep(2500 * time.Millisecond)
+
+	s2 := newMARTestServer()
+	s2.users = s.users
+	s2.loadLastChannels()
+	if ch := s2.lastChannelFor("pi", nil); ch != 105 {
+		t.Fatalf("last channel should survive a restart, got %d", ch)
+	}
+}

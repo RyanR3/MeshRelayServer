@@ -213,44 +213,45 @@ type GuestEvent struct {
 }
 
 type Server struct {
-	config             *Config
-	configFile         string
-	conn               *net.UDPConn
-	clients            map[string]*Client                                           // username -> client
-	channels           map[string]*Channel                                          // "agencyID:channelNum" -> channel
-	groups             map[string]*GroupPacket                                      // groupID -> group
-	users              map[string]*UserAccount                                      // "agencyID:username" -> account
-	agencies           map[string]*Agency                                           // agencyID -> agency
-	authenticatedAddrs map[string]string                                            // addr string -> agencyID
-	lastChannel        map[string]int                                               // userKey -> channel of the last JOIN, for re-registration
-	pendingChallenges  map[string][32]byte                                          // addr string -> nonce (Phase 4f challenge-response)
-	enrollmentTokens   map[string]*EnrollmentToken                                  // token string -> enrollment token
-	guestEvents        map[string]*GuestEvent                                       // eventID -> guest event
-	webAdmins          map[string]*WebAdmin                                         // "agencyID:username" -> admin account (web dashboard)
-	dispatchConns      map[string]*DispatchConn                                     // "agencyID:username" -> active dispatch WebSocket
-	webSessions        map[string]*WebSession                                       // session token -> session
-	mutualAidLinks     map[string]*MutualAidLink                                    // linkID -> link
-	lmrBridges         map[string]*LMRBridge                                        // bridgeID -> LMR/VHF radio bridge
-	mutualAidRequests  map[string]*MutualAidRequest                                 // requestID -> agency-to-agency ask
-	zelloBridges       map[string]*ZelloBridge                                      // bridgeID -> Zello Work channel bridge
-	ssrcToUser         map[uint32]string                                            // RTP SSRC -> username (MCX Step 1)
-	ssrcMu             sync.RWMutex                                                 // guards ssrcToUser
-	floor              *FloorController                                             // MCX Step 3 floor control (per channel)
-	floorOn            sync.Map                                                     // agencyID -> floorMode* (lock-free for the audio path)
-	groupMgr           *GroupManager                                                // MCX Step 4 group types / ad-hoc
-	sipGateway         *SipGateway                                                  // MCX Step 5 SIP gateway (nil = disabled)
-	testFloorSink      func(*net.UDPAddr, []byte)                                   // test-only: capture floor packets
-	testRelaySink      func(key string, channel int, user string, audioData []byte) // test-only: capture replayed audio
-	testFloorUserSink  func(user string, data []byte)                               // test-only: capture per-user floor packets
-	autoFloorMu        sync.Mutex
-	autoFloorLast      map[string]time.Time // gateway username -> last automatic floor request
-	mu                 sync.RWMutex
-	shutdown           chan struct{}
-	stats              *Stats
-	updateStatus       *UpdateStatus
-	activityLog        *ActivityLog
-	networkTimeSeries  *NetworkTimeSeries
-	wsConnCount        int64 // atomic counter for active WebSocket connections
+	config                 *Config
+	configFile             string
+	conn                   *net.UDPConn
+	clients                map[string]*Client      // username -> client
+	channels               map[string]*Channel     // "agencyID:channelNum" -> channel
+	groups                 map[string]*GroupPacket // groupID -> group
+	users                  map[string]*UserAccount // "agencyID:username" -> account
+	agencies               map[string]*Agency      // agencyID -> agency
+	authenticatedAddrs     map[string]string       // addr string -> agencyID
+	lastChannel            map[string]int          // userKey -> channel of the last JOIN, for re-registration
+	lastChannelSavePending bool
+	pendingChallenges      map[string][32]byte                                          // addr string -> nonce (Phase 4f challenge-response)
+	enrollmentTokens       map[string]*EnrollmentToken                                  // token string -> enrollment token
+	guestEvents            map[string]*GuestEvent                                       // eventID -> guest event
+	webAdmins              map[string]*WebAdmin                                         // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns          map[string]*DispatchConn                                     // "agencyID:username" -> active dispatch WebSocket
+	webSessions            map[string]*WebSession                                       // session token -> session
+	mutualAidLinks         map[string]*MutualAidLink                                    // linkID -> link
+	lmrBridges             map[string]*LMRBridge                                        // bridgeID -> LMR/VHF radio bridge
+	mutualAidRequests      map[string]*MutualAidRequest                                 // requestID -> agency-to-agency ask
+	zelloBridges           map[string]*ZelloBridge                                      // bridgeID -> Zello Work channel bridge
+	ssrcToUser             map[uint32]string                                            // RTP SSRC -> username (MCX Step 1)
+	ssrcMu                 sync.RWMutex                                                 // guards ssrcToUser
+	floor                  *FloorController                                             // MCX Step 3 floor control (per channel)
+	floorOn                sync.Map                                                     // agencyID -> floorMode* (lock-free for the audio path)
+	groupMgr               *GroupManager                                                // MCX Step 4 group types / ad-hoc
+	sipGateway             *SipGateway                                                  // MCX Step 5 SIP gateway (nil = disabled)
+	testFloorSink          func(*net.UDPAddr, []byte)                                   // test-only: capture floor packets
+	testRelaySink          func(key string, channel int, user string, audioData []byte) // test-only: capture replayed audio
+	testFloorUserSink      func(user string, data []byte)                               // test-only: capture per-user floor packets
+	autoFloorMu            sync.Mutex
+	autoFloorLast          map[string]time.Time // gateway username -> last automatic floor request
+	mu                     sync.RWMutex
+	shutdown               chan struct{}
+	stats                  *Stats
+	updateStatus           *UpdateStatus
+	activityLog            *ActivityLog
+	networkTimeSeries      *NetworkTimeSeries
+	wsConnCount            int64 // atomic counter for active WebSocket connections
 }
 
 type Stats struct {
@@ -671,6 +672,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.networkTimeSeries = NewNetworkTimeSeries()
 
 	s.loadAgencies()
+	s.loadLastChannels()
 	s.loadUsers()
 	s.loadWebAdmins()
 	s.loadMutualAid()
@@ -1414,7 +1416,10 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	if s.lastChannel == nil {
 		s.lastChannel = make(map[string]int)
 	}
-	s.lastChannel[ck] = packet.Channel
+	if s.lastChannel[ck] != packet.Channel {
+		s.lastChannel[ck] = packet.Channel
+		s.scheduleSaveLastChannels()
+	}
 	client, exists := s.clients[ck]
 	var oldChannel int
 	isChannelSwitch := false
@@ -2051,9 +2056,6 @@ func (s *Server) findClientForSender(username string, addr *net.UDPAddr) (*Clien
 func (s *Server) lastChannelFor(username string, addr *net.UDPAddr) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.lastChannel == nil {
-		return 0
-	}
 	if addr != nil {
 		if agencyID := s.authenticatedAddrs[addr.String()]; agencyID != "" {
 			if ch, ok := s.lastChannel[userKey(agencyID, username)]; ok {
@@ -2065,8 +2067,76 @@ func (s *Server) lastChannelFor(username string, addr *net.UDPAddr) int {
 		if ch, ok := s.lastChannel[userKey(user.AgencyID, username)]; ok {
 			return ch
 		}
+		// A bridge gateway belongs on its bridge's channel, always.
+		if own := s.ownLMRBridge(&Client{Username: username, AgencyID: user.AgencyID}); own != nil {
+			return own.Channel
+		}
 	}
 	return 0
+}
+
+// --- last-channel persistence --------------------------------------------
+//
+// The channel each user last joined is kept across restarts. Without it, a
+// client that never noticed the restart (UDP: its heartbeats were simply
+// answered again) was auto-registered on channel 0 and its audio went nowhere
+// — the Pi bridge carried radio traffic to channel 0 for ten minutes after
+// the v4.2.10 update (scny, 2026-10-22 21:16 UTC).
+
+func (s *Server) lastChannelsFile() string {
+	return "last_channels.json"
+}
+
+func (s *Server) loadLastChannels() {
+	data, err := os.ReadFile(s.lastChannelsFile())
+	if err != nil {
+		return
+	}
+	m := map[string]int{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		log.Printf("last_channels.json unreadable: %v", err)
+		return
+	}
+	s.mu.Lock()
+	if s.lastChannel == nil {
+		s.lastChannel = make(map[string]int)
+	}
+	for k, v := range m {
+		s.lastChannel[k] = v
+	}
+	s.mu.Unlock()
+	log.Printf("Loaded last channels for %d users", len(m))
+}
+
+// scheduleSaveLastChannels writes the map shortly after a change, coalescing
+// bursts. Caller holds s.mu (write).
+func (s *Server) scheduleSaveLastChannels() {
+	if s.lastChannelSavePending {
+		return
+	}
+	s.lastChannelSavePending = true
+	snapshotFn := func() map[string]int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.lastChannelSavePending = false
+		m := make(map[string]int, len(s.lastChannel))
+		for k, v := range s.lastChannel {
+			m[k] = v
+		}
+		return m
+	}
+	go func() {
+		time.Sleep(2 * time.Second)
+		m := snapshotFn()
+		data, err := json.MarshalIndent(m, "", "  ")
+		if err != nil {
+			return
+		}
+		tmp := s.lastChannelsFile() + ".tmp"
+		if err := os.WriteFile(tmp, data, 0644); err == nil {
+			os.Rename(tmp, s.lastChannelsFile())
+		}
+	}()
 }
 
 func (s *Server) findClientByUsername(username string) (*Client, string) {
