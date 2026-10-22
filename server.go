@@ -1460,77 +1460,10 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
 	}
 
-	// Collect mutual aid channel notifications to send after releasing the lock
-	isMutualAidJoin := false
-	for _, link := range s.mutualAidLinks {
-		if link.Active && link.Channel == packet.Channel {
-			isMutualAidJoin = true
-			break
-		}
-	}
-	if !isMutualAidJoin {
-		for _, link := range s.mutualAidLinks {
-			if !link.Active {
-				continue
-			}
-			for _, a := range link.Agencies {
-				if a == agencyID {
-					pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
-						Channel:     link.Channel,
-						ChannelName: link.ChannelName,
-						Active:      true,
-					})
-					toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent mutual aid channel %d (%s) to newly joined client %s [%s]", link.Channel, link.ChannelName, packet.Username, agencyID)})
-					break
-				}
-			}
-		}
-	}
-
-	// Announce all mapped channels of any active Zello bridge for this agency to
-	// the joining client, so bridged channels appear as selectable named channels.
-	for _, b := range s.zelloBridges {
-		if b.Enabled && b.AgencyID == agencyID && b.announced {
-			for _, m := range b.effectiveMappings() {
-				if m.ZelloChannel == "" {
-					continue
-				}
-				pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
-					Channel:     m.MeshChannel,
-					ChannelName: m.ZelloChannel,
-					Active:      true,
-				})
-				toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent Zello bridge channel %d (%s) to newly joined %s [%s]", m.MeshChannel, m.ZelloChannel, packet.Username, agencyID)})
-			}
-		}
-	}
-
-	// Announce every enabled LMR bridge serving this agency, so the radio
-	// channel shows up for the joining client the way mutual aid does.
-	//
-	// A GATEWAY login hears only its own bridge. A gateway adopts whatever
-	// bridge it is told about; with two bridges in one agency it adopted each
-	// in turn, and every JOIN re-triggered this announcement — a join storm
-	// (~400/s against scny, 2026-09-22). Phones still get all of them.
-	var ownBridge *LMRBridge
-	for _, b := range s.lmrBridges {
-		if b.Username == packet.Username && b.ownerAgency() == agencyID {
-			ownBridge = b
-			break
-		}
-	}
-	for _, b := range s.lmrBridges {
-		if ownBridge != nil && b != ownBridge {
-			continue
-		}
-		if b.Enabled && b.servesAgency(agencyID) {
-			pkt := SerializeChannelSwitch(&ChannelSwitchPacket{
-				Channel:     b.Channel,
-				ChannelName: b.displayName(),
-				Active:      true,
-			})
-			toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent LMR bridge channel %d (%s) to newly joined %s [%s]", b.Channel, b.displayName(), packet.Username, agencyID)})
-		}
+	// Channels to announce to the joining client (mutual aid, Zello, LMR).
+	for _, a := range s.joinAnnouncements(agencyID, packet.Username, packet.Channel) {
+		pkt := SerializeChannelSwitch(&ChannelSwitchPacket{Channel: a.channel, ChannelName: a.name, Active: true})
+		toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent %s channel %d (%s) to newly joined %s [%s]", a.kind, a.channel, a.name, packet.Username, agencyID)})
 	}
 
 	s.mu.Unlock()
@@ -3495,4 +3428,83 @@ func (s *Server) cleanupExpiredGuestEvents() {
 		s.DeleteGuestEvent(id)
 	}
 	s.mu.Lock()
+}
+
+// channelAnnouncement is one named channel a joining client is told about.
+type channelAnnouncement struct {
+	channel int
+	name    string
+	kind    string // "mutual aid", "Zello bridge", "LMR bridge"
+}
+
+// joinAnnouncements lists the bridged / shared channels to announce to a client
+// that just joined. Caller holds s.mu.
+//
+// A GATEWAY login (the username of an LMR bridge it owns) hears ONLY its own
+// bridge. A gateway adopts whatever channel it is told about, and every JOIN
+// re-triggers this announcement, so anything else — a second LMR bridge
+// (join storm, 2026-09-22), Zello bridge channels or a mutual-aid patch
+// (2026-10-22: a Pi bridge flipped onto two live police Zello channels) — would
+// pull the radio onto a channel it was never meant to bridge. Phones still
+// hear everything.
+func (s *Server) joinAnnouncements(agencyID, username string, joinedChannel int) []channelAnnouncement {
+	var out []channelAnnouncement
+
+	var ownBridge *LMRBridge
+	for _, b := range s.lmrBridges {
+		if b.Username == username && b.ownerAgency() == agencyID {
+			ownBridge = b
+			break
+		}
+	}
+	if ownBridge != nil {
+		if ownBridge.Enabled && ownBridge.servesAgency(agencyID) {
+			out = append(out, channelAnnouncement{ownBridge.Channel, ownBridge.displayName(), "LMR bridge"})
+		}
+		return out
+	}
+
+	// Mutual aid: every active link this agency is part of, unless the client
+	// joined the link's channel itself.
+	isMutualAidJoin := false
+	for _, link := range s.mutualAidLinks {
+		if link.Active && link.Channel == joinedChannel {
+			isMutualAidJoin = true
+			break
+		}
+	}
+	if !isMutualAidJoin {
+		for _, link := range s.mutualAidLinks {
+			if !link.Active {
+				continue
+			}
+			for _, a := range link.Agencies {
+				if a == agencyID {
+					out = append(out, channelAnnouncement{link.Channel, link.ChannelName, "mutual aid"})
+					break
+				}
+			}
+		}
+	}
+
+	// All mapped channels of any active Zello bridge for this agency, so
+	// bridged channels appear as selectable named channels.
+	for _, b := range s.zelloBridges {
+		if b.Enabled && b.AgencyID == agencyID && b.announced {
+			for _, m := range b.effectiveMappings() {
+				if m.ZelloChannel == "" {
+					continue
+				}
+				out = append(out, channelAnnouncement{m.MeshChannel, m.ZelloChannel, "Zello bridge"})
+			}
+		}
+	}
+
+	// Every enabled LMR bridge serving this agency.
+	for _, b := range s.lmrBridges {
+		if b.Enabled && b.servesAgency(agencyID) {
+			out = append(out, channelAnnouncement{b.Channel, b.displayName(), "LMR bridge"})
+		}
+	}
+	return out
 }

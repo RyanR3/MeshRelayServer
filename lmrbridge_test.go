@@ -423,32 +423,26 @@ func TestGatewayLoginHearsOnlyItsOwnBridge(t *testing.T) {
 	s.agencies["a"] = &Agency{ID: "a", Name: "A"}
 	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Name: "Pi bridge", Username: "pi", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 100, Enabled: true}
 	s.lmrBridges["b2"] = &LMRBridge{ID: "b2", Name: "Pixel Bridge", Username: "pixelgw", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 101, Enabled: true}
+	// The agency also has a Zello bridge on two live channels and a mutual-aid
+	// patch — a gateway must never be told about those (it would adopt them).
+	s.zelloBridges["z"] = &ZelloBridge{ID: "z", Enabled: true, AgencyID: "a", announced: true,
+		Mappings: []ZelloMapping{{ZelloChannel: "SC911", MeshChannel: 150}, {ZelloChannel: "SO-NEW", MeshChannel: 151}}}
+	s.mutualAidLinks["m"] = &MutualAidLink{ID: "m", Active: true, Channel: 98, ChannelName: "Rh test", Agencies: []string{"a", "b"}}
 
-	announced := func(username string) []int {
+	channels := func(username string) []int {
 		var out []int
-		var own *LMRBridge
-		for _, b := range s.lmrBridges {
-			if b.Username == username && b.ownerAgency() == "a" {
-				own = b
-			}
-		}
-		for _, b := range s.lmrBridges {
-			if own != nil && b != own {
-				continue
-			}
-			if b.Enabled && b.servesAgency("a") {
-				out = append(out, b.Channel)
-			}
+		for _, a := range s.joinAnnouncements("a", username, 0) {
+			out = append(out, a.channel)
 		}
 		return out
 	}
-	if got := announced("pixelgw"); len(got) != 1 || got[0] != 101 {
+	if got := channels("pixelgw"); len(got) != 1 || got[0] != 101 {
 		t.Fatalf("gateway pixelgw should hear only ch 101, got %v", got)
 	}
-	if got := announced("pi"); len(got) != 1 || got[0] != 100 {
+	if got := channels("pi"); len(got) != 1 || got[0] != 100 {
 		t.Fatalf("gateway pi should hear only ch 100, got %v", got)
 	}
-	if got := announced("phoneuser"); len(got) != 2 {
-		t.Fatalf("a phone should hear both bridges, got %v", got)
+	if got := channels("phoneuser"); len(got) != 5 {
+		t.Fatalf("a phone should hear the patch, both Zello channels and both bridges, got %v", got)
 	}
 }
