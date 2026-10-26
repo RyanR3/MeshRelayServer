@@ -1277,8 +1277,31 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 		return
 	}
 
-	// Prepend packet type to the serialized data
-	textData := append([]byte{PacketTypeText}, SerializeTextPacket(packet)...)
+	// SerializeTextPacket already starts with the type byte. This used to
+	// prepend a second one, so every phone parsed a garbage sender length and
+	// dropped the message: text over the server never arrived.
+	textData := SerializeTextPacket(packet)
+
+	// A private message goes to its recipient only. It used to be relayed to
+	// everyone on the sender's channel (and mutual-aid partners), and clients
+	// did not filter, so other members saw it as if it were sent to them.
+	if packet.Recipient != "" {
+		s.mu.RLock()
+		rc, _ := s.findClientByUsername(packet.Recipient)
+		allowed := rc != nil && (rc.AgencyID == client.AgencyID || s.hasMutualAidLink(client.AgencyID, rc.AgencyID))
+		var raddr *net.UDPAddr
+		if allowed {
+			raddr = rc.Addr
+		}
+		s.mu.RUnlock()
+		if raddr != nil {
+			s.sendPacket(textData, raddr)
+			log.Printf("Relayed private text message from %s [%s] to %s", packet.Sender, client.AgencyID, packet.Recipient)
+		} else {
+			log.Printf("Private text from %s to %s not delivered (recipient offline or other agency)", packet.Sender, packet.Recipient)
+		}
+		return
+	}
 
 	// Broadcast message to all clients in the same channel
 	channel.mu.RLock()
