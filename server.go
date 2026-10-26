@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,10 @@ type Client struct {
 	Channel       int
 	LastHeartbeat time.Time
 	ConnectedAt   time.Time
+	// LowPower: the client asked for the low-power stream (HeartbeatFlagLowPower).
+	LowPower bool
+	// lastPing: when the server last sent this low-power client a keepalive.
+	lastPing time.Time
 	// MonitoredChannels: extra channels this client always LISTENS to (mutual-aid
 	// / Zello monitor toggle), in addition to its active Channel.
 	MonitoredChannels []int
@@ -213,6 +218,10 @@ type GuestEvent struct {
 }
 
 type Server struct {
+	// rosterSent: last roster sent per agency to low-power clients.
+	rosterMu   sync.Mutex
+	rosterSent map[string]rosterState
+
 	config                 *Config
 	configFile             string
 	conn                   *net.UDPConn
@@ -1349,6 +1358,14 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		ch := s.lastChannelFor(packet.Username, addr)
 		log.Printf("Heartbeat from unregistered client %s — auto-registering on channel %d", packet.Username, ch)
 		s.handleJoin(&JoinPacket{Username: packet.Username, Channel: ch}, addr)
+		if packet.Flags&HeartbeatFlagLowPower != 0 {
+			s.mu.Lock()
+			if c, _ := s.findClientForSender(packet.Username, addr); c != nil {
+				c.LowPower = true
+			}
+			s.mu.Unlock()
+			s.sendPacket(CreateHeartbeatPacketFlags(packet.Username, HeartbeatFlagLowPower), addr)
+		}
 		return
 	}
 
@@ -1357,6 +1374,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 
 	// Update client's last heartbeat
 	client.LastHeartbeat = time.Now()
+	client.LowPower = packet.Flags&HeartbeatFlagLowPower != 0
 
 	// Get client's agency-scoped channel
 	key := channelKey(client.AgencyID, client.Channel)
@@ -1377,12 +1395,20 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	// received in 3.5 intervals" liveness check false-trips → disconnect →
 	// reconnect loop (and a repeating disconnect tone). Echoing the heartbeat
 	// keeps lastServerPacketTime fresh for every client, alone or not.
-	s.sendPacket(heartbeatData, addr)
+	// A low-power client gets the flag back, which tells it this server
+	// supports the low-power stream.
+	if client.LowPower {
+		s.sendPacket(CreateHeartbeatPacketFlags(packet.Username, HeartbeatFlagLowPower), addr)
+	} else {
+		s.sendPacket(heartbeatData, addr)
+	}
 
-	// Relay heartbeat to all other clients in the same channel (not to sender)
+	// Relay heartbeat to all other clients in the same channel (not to sender).
+	// Low-power clients take presence from the roster instead: relaying every
+	// heartbeat to them kept their phone's cellular radio from ever idling.
 	relayCount := 0
 	for _, otherClient := range channel.Clients {
-		if otherClient.Username != packet.Username {
+		if otherClient.Username != packet.Username && !otherClient.LowPower {
 			s.sendPacket(heartbeatData, otherClient.Addr)
 			relayCount++
 		}
@@ -1395,6 +1421,9 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
 			partnerChannel.mu.RLock()
 			for _, otherClient := range partnerChannel.Clients {
+				if otherClient.LowPower {
+					continue
+				}
 				s.sendPacket(heartbeatData, otherClient.Addr)
 				relayCount++
 			}
@@ -1638,7 +1667,41 @@ func (s *Server) mutualAidAgenciesLocked(agencyID string) map[string]bool {
 	return out
 }
 
+// Heartbeat timing. Legacy clients heartbeat every 10 s. Low-power clients
+// answer a server ping sent once they have been quiet for lowPowerPingAfter
+// (15-25 s with the 10 s checker), so their NAT mapping is refreshed well
+// inside common 30 s carrier UDP timeouts.
+const (
+	heartbeatTimeout         = 30 * time.Second
+	lowPowerHeartbeatTimeout = 75 * time.Second
+	lowPowerPingAfter        = 15 * time.Second
+	lowPowerRosterRefresh    = 5 * time.Minute
+)
+
+// broadcastRoster sends the roster to every client of the agency (a join,
+// leave or link change).
 func (s *Server) broadcastRoster(agencyID string) {
+	s.sendRoster(agencyID, true)
+}
+
+// broadcastAllRostersPeriodic is the 10 s safety-net refresh: legacy clients
+// get it every time (their presence expires after 30 s without it); low-power
+// clients only when the list changed or lowPowerRosterRefresh has passed.
+func (s *Server) broadcastAllRostersPeriodic() {
+	s.mu.RLock()
+	agencies := make(map[string]bool)
+	for _, c := range s.clients {
+		if c.AgencyID != "" {
+			agencies[c.AgencyID] = true
+		}
+	}
+	s.mu.RUnlock()
+	for agencyID := range agencies {
+		s.sendRoster(agencyID, false)
+	}
+}
+
+func (s *Server) sendRoster(agencyID string, all bool) {
 	if agencyID == "" {
 		return
 	}
@@ -1650,6 +1713,7 @@ func (s *Server) broadcastRoster(agencyID string) {
 	visible := s.mutualAidAgenciesLocked(agencyID)
 	names := make([]string, 0, len(s.clients))
 	addrs := make([]*net.UDPAddr, 0, len(s.clients))
+	lowPower := make([]bool, 0, len(s.clients))
 	for _, c := range s.clients {
 		if !visible[c.AgencyID] {
 			continue
@@ -1669,6 +1733,7 @@ func (s *Server) broadcastRoster(agencyID string) {
 		// their own roster built from their side of the link.
 		if c.AgencyID == agencyID {
 			addrs = append(addrs, c.Addr)
+			lowPower = append(lowPower, c.LowPower)
 		}
 	}
 	s.mu.RUnlock()
@@ -1676,26 +1741,33 @@ func (s *Server) broadcastRoster(agencyID string) {
 	if len(addrs) == 0 {
 		return
 	}
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	sig := strings.Join(sorted, "\n")
+	s.rosterMu.Lock()
+	if s.rosterSent == nil {
+		s.rosterSent = make(map[string]rosterState)
+	}
+	prev := s.rosterSent[agencyID]
+	toLowPower := all || prev.sig != sig || time.Since(prev.at) >= lowPowerRosterRefresh
+	if toLowPower {
+		s.rosterSent[agencyID] = rosterState{sig: sig, at: time.Now()}
+	}
+	s.rosterMu.Unlock()
+
 	packet := SerializeRosterPacket(names)
-	for _, a := range addrs {
+	for i, a := range addrs {
+		if lowPower[i] && !toLowPower {
+			continue
+		}
 		s.sendPacket(packet, a)
 	}
 }
 
-// broadcastAllRosters pushes a roster to every agency that has clients. Used by
-// the periodic ticker as a safety net for missed join/leave events.
-func (s *Server) broadcastAllRosters() {
-	s.mu.RLock()
-	agencies := make(map[string]bool)
-	for _, c := range s.clients {
-		if c.AgencyID != "" {
-			agencies[c.AgencyID] = true
-		}
-	}
-	s.mu.RUnlock()
-	for agencyID := range agencies {
-		s.broadcastRoster(agencyID)
-	}
+// rosterState is the last roster sent to an agency's low-power clients.
+type rosterState struct {
+	sig string
+	at  time.Time
 }
 
 func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
@@ -1763,7 +1835,9 @@ func (s *Server) heartbeatChecker() {
 			s.checkHeartbeats()
 			// Periodic roster refresh: pushes the authoritative online list to
 			// all agencies (safety net for any missed join/leave/timeout event).
-			s.broadcastAllRosters()
+			// Low-power clients only get it when it changed (or every
+			// lowPowerRosterRefresh), not every tick.
+			s.broadcastAllRostersPeriodic()
 		}
 	}
 }
@@ -1772,22 +1846,37 @@ func (s *Server) checkHeartbeats() {
 	s.mu.Lock()
 
 	now := time.Now()
-	timeout := 30 * time.Second
 
 	var toRemove []*Client
+	var toPing []*Client
 	for _, client := range s.clients {
-		if now.Sub(client.LastHeartbeat) > timeout {
+		timeout := heartbeatTimeout
+		if client.LowPower {
+			timeout = lowPowerHeartbeatTimeout
+		}
+		silent := now.Sub(client.LastHeartbeat)
+		if silent > timeout {
 			toRemove = append(toRemove, client)
+		} else if client.LowPower && silent > lowPowerPingAfter && now.Sub(client.lastPing) >= lowPowerPingAfter {
+			client.lastPing = now
+			toPing = append(toPing, client)
 		}
 	}
 
 	for _, client := range toRemove {
-		log.Printf("Client %s timed out (no heartbeat for %v)", client.Username, timeout)
+		log.Printf("Client %s timed out (no heartbeat for %v)", client.Username, now.Sub(client.LastHeartbeat).Round(time.Second))
 		s.removeClient(client)
 	}
 	s.mu.Unlock()
 
-	// The periodic broadcastAllRosters() in heartbeatChecker will push the
+	// Keepalive for low-power clients: a phone that lets its CPU sleep cannot
+	// run a heartbeat timer, so the server pings it and the incoming packet
+	// wakes it to answer. The answer also keeps the client's NAT mapping open.
+	for _, client := range toPing {
+		s.sendPacket(CreateHeartbeatPacketFlags(client.Username, HeartbeatFlagLowPower), client.Addr)
+	}
+
+	// The periodic broadcastAllRostersPeriodic() in heartbeatChecker will push the
 	// updated list; no per-agency broadcast needed here.
 }
 

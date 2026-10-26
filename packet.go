@@ -214,7 +214,16 @@ type TextMessagePacket struct {
 // HeartbeatPacket represents a client heartbeat
 type HeartbeatPacket struct {
 	Username string
+	// Flags is an optional byte after the username. Older clients do not send
+	// it (and older servers ignore it). Bit 0 = HeartbeatFlagLowPower.
+	Flags byte
 }
+
+// HeartbeatFlagLowPower: the client wants the low-power stream — no relayed
+// heartbeats, the roster only when it changes, and a server keepalive ping it
+// answers instead of a fast heartbeat timer (so the phone can sleep between
+// packets). The server echoes the flag back to confirm.
+const HeartbeatFlagLowPower byte = 0x01
 
 // JoinPacket represents a channel join request
 type JoinPacket struct {
@@ -555,9 +564,11 @@ func ParseHeartbeatPacket(data []byte) (*HeartbeatPacket, error) {
 		return nil, err
 	}
 
-	return &HeartbeatPacket{
-		Username: string(usernameBytes),
-	}, nil
+	hb := &HeartbeatPacket{Username: string(usernameBytes)}
+	if f, err := buf.ReadByte(); err == nil {
+		hb.Flags = f
+	}
+	return hb, nil
 }
 
 // ParseJoinPacket parses a channel join packet
@@ -685,6 +696,13 @@ func CreateHeartbeatPacket(username string) ([]byte, error) {
 	buf.WriteString(username)
 
 	return buf.Bytes(), nil
+}
+
+// CreateHeartbeatPacketFlags is CreateHeartbeatPacket with the trailing flags
+// byte, sent only to clients that sent the flag themselves.
+func CreateHeartbeatPacketFlags(username string, flags byte) []byte {
+	b, _ := CreateHeartbeatPacket(username)
+	return append(b, flags)
 }
 
 // CreateDirectAudioPacket creates a direct audio packet for group voice
