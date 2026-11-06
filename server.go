@@ -1582,6 +1582,10 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 	}
 	s.mu.Unlock()
 
+	if clientToRemove != nil {
+		s.clientRemovedCleanup(clientToRemove)
+	}
+
 	// Push an updated roster so everyone in the agency sees the departure.
 	if leftAgency != "" {
 		s.broadcastRoster(leftAgency)
@@ -1607,6 +1611,16 @@ func (s *Server) removeClient(client *Client) {
 
 	// Remove from clients map
 	delete(s.clients, ck)
+	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
+	s.activityLog.Add("client_disconnect", client.Username, fmt.Sprintf("Left channel %d", client.Channel), client.AgencyID)
+}
+
+// clientRemovedCleanup finishes a removeClient. Call it AFTER releasing s.mu:
+// handing the floor on and dissolving an ad-hoc group both take s.mu to reach
+// the channel's clients, and sync.RWMutex is not reentrant. Run under the lock
+// they froze the whole server (AWS, 2026-11-06 04:27 UTC: the last member left
+// an ad-hoc group; logins, audio and heartbeats all hung until a restart).
+func (s *Server) clientRemovedCleanup(client *Client) {
 	// MCX Step 3: release any floor/queue this user held (prevents a stuck floor).
 	if s.floor != nil {
 		s.floor.DropUser(client.Username)
@@ -1615,8 +1629,6 @@ func (s *Server) removeClient(client *Client) {
 	if s.groupMgr != nil {
 		s.adhocMemberLeft(client.AgencyID, client.Channel, client.Username)
 	}
-	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
-	s.activityLog.Add("client_disconnect", client.Username, fmt.Sprintf("Left channel %d", client.Channel), client.AgencyID)
 }
 
 // broadcastRoster sends the authoritative list of connected usernames in an
@@ -1868,6 +1880,10 @@ func (s *Server) checkHeartbeats() {
 		s.removeClient(client)
 	}
 	s.mu.Unlock()
+
+	for _, client := range toRemove {
+		s.clientRemovedCleanup(client)
+	}
 
 	// Keepalive for low-power clients: a phone that lets its CPU sleep cannot
 	// run a heartbeat timer, so the server pings it and the incoming packet
