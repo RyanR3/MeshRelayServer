@@ -878,8 +878,13 @@ func (s *Server) StartPTT() error {
 			s.stats.BytesReceived += uint64(n)
 			s.stats.mu.Unlock()
 
-			// Process packet in goroutine
-			go s.handlePacket(buffer[:n], addr)
+			// Process packet in goroutine, on its own copy: the next
+			// ReadFromUDP reuses buffer, and overwrote packets still being
+			// parsed ("Error parsing packet ... unexpected EOF", lost or
+			// garbled audio — constant at video-call packet rates).
+			pkt := make([]byte, n)
+			copy(pkt, buffer[:n])
+			go s.handlePacket(pkt, addr)
 		}
 	}
 }
