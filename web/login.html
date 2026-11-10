@@ -134,7 +134,7 @@
                     btn.textContent = 'Sign In';
                     return;
                 }
-                window.location.href = data.role === 'dispatch' ? '/dispatch' : '/';
+                window.location.href = data.role === 'dispatch' ? '/command' : '/';
             })
             .catch(() => {
                 errorEl.textContent = 'Connection error';
@@ -159,7 +159,7 @@
         .then(r => r.ok ? r.json() : null)
         .then(data => {
             if (data && data.status === 'ok') {
-                window.location.href = data.role === 'dispatch' ? '/dispatch' : '/';
+                window.location.href = data.role === 'dispatch' ? '/command' : '/';
             }
         })
         .catch(() => {});
