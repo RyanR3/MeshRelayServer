@@ -23,3 +23,12 @@ pttserver
 
 ptt-server-arm64
 ptt-server-linux-arm64
+
+# TAK Server connections — client certificates and private keys. NEVER commit.
+tak_connections.json
+
+# Radio traffic recordings
+recordings/
+
+# Other runtime state
+guest_events.json

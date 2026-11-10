@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
@@ -111,6 +110,16 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleUpdateMyDiscovery)).Methods("PUT")
 	api.HandleFunc("/my-agency/floor-control", s.requireAdmin(s.handleGetFloorControl)).Methods("GET")
 	api.HandleFunc("/my-agency/floor-control", s.requireAdmin(s.handleUpdateFloorControl)).Methods("PUT")
+	api.HandleFunc("/recordings", s.requireDispatchOrAdmin(s.handleListRecordings)).Methods("GET")
+	api.HandleFunc("/recordings/{id}/audio", s.requireDispatchOrAdmin(s.handleRecordingAudio)).Methods("GET")
+	api.HandleFunc("/my-agency/tak/groups", s.requireAdmin(s.handleGetTakGroups)).Methods("GET")
+	api.HandleFunc("/my-agency/tak/groups", s.requireAdmin(s.handleUpdateTakGroups)).Methods("PUT")
+	api.HandleFunc("/my-agency/tak", s.requireAdmin(s.handleGetTak)).Methods("GET")
+	api.HandleFunc("/my-agency/tak", s.requireAdmin(s.handleUpdateTak)).Methods("PUT")
+	api.HandleFunc("/my-agency/recording", s.requireAdmin(s.handleGetRecordingSetting)).Methods("GET")
+	api.HandleFunc("/my-agency/recording", s.requireAdmin(s.handleUpdateRecordingSetting)).Methods("PUT")
+	api.HandleFunc("/my-agency/guest-invites", s.requireAdmin(s.handleGetGuestInvites)).Methods("GET")
+	api.HandleFunc("/my-agency/guest-invites", s.requireAdmin(s.handleUpdateGuestInvites)).Methods("PUT")
 	api.HandleFunc("/agencies/discoverable", s.requireAdmin(s.handleGetDiscoverableAgencies)).Methods("GET")
 	api.HandleFunc("/my-agency/mutual-aid", s.requireAdmin(s.handleGetMyMutualAid)).Methods("GET")
 	api.HandleFunc("/mutual-aid/requests", s.requireAdmin(s.handleGetMutualAidRequests)).Methods("GET")
@@ -2169,10 +2178,14 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 	defer conn.Close()
 
 	key := userKey(session.AgencyID, session.Username)
-	dc := &DispatchConn{Send: make(chan []byte, 64)}
+	dc := &DispatchConn{Send: make(chan []byte, 256), Text: make(chan []byte, 256)}
 
-	// Register virtual PTT client for this dispatch user (channel 0 by default)
-	fakeAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+	// Register virtual PTT client for this dispatch user (channel 0 by
+	// default). Its loopback address routes packets sent "to" it (floor
+	// grants, emergency alerts) over this WebSocket — dispatch_audio.go.
+	fakeAddr := newDispatchAddr()
+	dispatchByAddr.Store(fakeAddr.String(), dc)
+	defer dispatchByAddr.Delete(fakeAddr.String())
 	virtualClient := &Client{
 		Username:      session.Username,
 		AgencyID:      session.AgencyID,
@@ -2194,6 +2207,7 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 		// On a quick refresh the new connection registers under the same key
 		// before this old connection's cleanup runs; deleting blindly would
 		// deregister the live connection and silently break audio fan-out.
+		s.dispatchPTT(key, &dc.tx, false) // never leave a held floor behind
 		s.mu.Lock()
 		if s.dispatchConns[key] == dc {
 			delete(s.dispatchConns, key)
@@ -2216,6 +2230,11 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 
 	// Send initial client list
 	s.sendDispatchUpdate(conn, session.AgencyID)
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	conn.WriteJSON(map[string]interface{}{"type": "messages", "list": s.messageHistory(session.AgencyID)})
+	for _, e := range activeEmergencies(session.AgencyID) {
+		conn.WriteJSON(e)
+	}
 
 	// Read pump — handles inbound binary audio + JSON channel switch
 	go func() {
@@ -2227,30 +2246,93 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			if msgType == websocket.BinaryMessage {
-				// PCM audio from dispatch browser → relay to PTT clients on current channel
-				s.mu.RLock()
-				dispClient := s.clients[key]
-				s.mu.RUnlock()
-				if dispClient != nil {
-					pkt := &AudioPacket{
-						Username:  session.Username,
-						AudioData: data,
-					}
-					s.handleDispatchAudio(pkt, dispClient)
+				// Opus from the console's microphone (dispatch_audio.go).
+				// Older consoles sent raw PCM with no marker; ignore that.
+				if len(data) > 1 && data[0] == dispatchFrameAudioIn {
+					s.dispatchAudioIn(key, &dc.tx, data[1:])
 				}
 			} else if msgType == websocket.TextMessage {
-				// JSON control message (e.g., channel switch)
 				var msg struct {
-					Type    string `json:"type"`
-					Channel int    `json:"channel"`
+					Type    string         `json:"type"`
+					Channel int            `json:"channel"`
+					Agency  string         `json:"agency"`
+					AllCall bool           `json:"allcall"`
+					Down    bool           `json:"down"`
+					Keys    []string       `json:"keys"`
+					User    string         `json:"user"`
+					Code    uint8          `json:"code"`
+					Text    string         `json:"text"`
+					Unit    *messageTarget `json:"unit"`
+					ToChan  string         `json:"to_channel"`
+					ToAll   string         `json:"to_agency"`
+					IDs     []string       `json:"ids"`
+					Tak     *struct {
+						Agency string `json:"agency"`
+						UID    string `json:"uid"`
+					} `json:"tak"`
 				}
-				if err := json.Unmarshal(data, &msg); err == nil && msg.Type == "channel" {
+				if err := json.Unmarshal(data, &msg); err != nil {
+					continue
+				}
+				switch msg.Type {
+				case "channel":
+					// Changing channel mid-transmission ends the transmission.
+					s.dispatchPTT(key, &dc.tx, false)
 					s.mu.Lock()
 					if c, ok := s.clients[key]; ok {
 						c.Channel = msg.Channel
+						c.DispatchAllCall = msg.AllCall
+						if c.AgencyID == "" { // super admin: which agency's channel
+							if _, known := s.agencies[msg.Agency]; known {
+								c.DispatchTxAgency = msg.Agency
+							} else {
+								c.DispatchTxAgency = ""
+							}
+						}
 					}
 					s.mu.Unlock()
-					log.Printf("Dispatch %s switched to channel %d", session.Username, msg.Channel)
+					log.Printf("Dispatch %s switched to channel %d [%s]", session.Username, msg.Channel, msg.Agency)
+				case "ptt":
+					s.dispatchPTT(key, &dc.tx, msg.Down)
+				case "status":
+					s.mu.RLock()
+					c := s.clients[key]
+					s.mu.RUnlock()
+					if c != nil {
+						s.consoleSetStatus(c, msg.Agency, msg.User, msg.Code)
+					}
+				case "message":
+					s.mu.RLock()
+					c := s.clients[key]
+					s.mu.RUnlock()
+					if c != nil && msg.Tak != nil {
+						s.consoleSendTakMessage(c, msg.Tak.Agency, msg.Tak.UID, msg.Text)
+					} else if c != nil {
+						s.consoleSendMessage(c, msg.Text, msg.Unit, msg.ToChan, msg.ToAll)
+					}
+				case "read":
+					s.mu.RLock()
+					c := s.clients[key]
+					s.mu.RUnlock()
+					if c != nil && len(msg.IDs) <= 300 {
+						s.consoleMarkRead(c, msg.IDs)
+					}
+				case "monitor":
+					mon := map[string]bool{}
+					for _, k := range msg.Keys {
+						a := agencyFromKey(k)
+						if session.AgencyID != "" && a != session.AgencyID {
+							continue // a console only monitors its own agency
+						}
+						if len(mon) < 64 {
+							mon[k] = true
+						}
+					}
+					s.mu.Lock()
+					if c, ok := s.clients[key]; ok {
+						c.DispatchMonitor = mon
+					}
+					s.mu.Unlock()
 				}
 			}
 		}
@@ -2271,7 +2353,25 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 			if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 				return
 			}
+		case text := <-dc.Text:
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteMessage(websocket.TextMessage, text); err != nil {
+				return
+			}
 		case <-ticker.C:
+			// The console's placeholder client never sends UDP heartbeats, so
+			// the heartbeat sweep dropped it after the timeout and the console
+			// went deaf about a minute in. Keep it alive while connected.
+			s.mu.Lock()
+			if s.dispatchConns[key] == dc {
+				if c, ok := s.clients[key]; ok {
+					c.LastHeartbeat = time.Now()
+				} else {
+					virtualClient.LastHeartbeat = time.Now()
+					s.clients[key] = virtualClient
+				}
+			}
+			s.mu.Unlock()
 			if err := s.sendDispatchUpdate(conn, session.AgencyID); err != nil {
 				return
 			}
@@ -2286,53 +2386,18 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 
 // sendDispatchUpdate sends a JSON client-list update to a dispatch browser connection.
 func (s *Server) sendDispatchUpdate(conn *websocket.Conn, agencyID string) error {
+	agencies, channels := s.dispatchDirectory(agencyID)
 	msg := WebSocketMessage{
 		Type: "update",
 		Data: map[string]interface{}{
-			"clients": s.GetClients(agencyID),
+			"clients":   s.GetClients(agencyID),
+			"agencies":  agencies,
+			"channels":  channels,
+			"tak_units": s.takUnitsFor(agencyID),
 		},
 	}
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteJSON(msg)
-}
-
-// handleDispatchAudio relays audio received from the dispatch browser to PTT clients
-// on the same agency+channel, skipping the normal UDP auth checks since dispatch
-// is already authenticated via WebSocket session.
-func (s *Server) handleDispatchAudio(packet *AudioPacket, dispClient *Client) {
-	audioData := append([]byte{PacketTypeAudio}, SerializeAudioPacket(packet)...)
-
-	// Collect the target channels. A super_admin dispatch user (empty
-	// AgencyID) transmits to every agency's matching channel number; an
-	// agency-scoped dispatch user transmits only to its own agency channel.
-	s.mu.RLock()
-	var targets []*Channel
-	if dispClient.AgencyID == "" {
-		for key, ch := range s.channels {
-			parts := strings.SplitN(key, ":", 2)
-			if len(parts) == 2 && parts[1] == strconv.Itoa(dispClient.Channel) {
-				targets = append(targets, ch)
-			}
-		}
-	} else if ch := s.channels[channelKey(dispClient.AgencyID, dispClient.Channel)]; ch != nil {
-		targets = append(targets, ch)
-	}
-	s.mu.RUnlock()
-
-	sent := 0
-	for _, channel := range targets {
-		channel.mu.RLock()
-		for _, otherClient := range channel.Clients {
-			if otherClient.Username != dispClient.Username {
-				s.sendPacket(audioData, otherClient.Addr)
-				sent++
-			}
-		}
-		channel.mu.RUnlock()
-	}
-
-	log.Printf("Dispatch audio from %s [%s] on channel %d to %d clients (%d bytes)",
-		packet.Username, dispClient.AgencyID, dispClient.Channel, sent, len(packet.AudioData))
 }
 
 // --- Update Management ---

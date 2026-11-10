@@ -200,7 +200,7 @@
                                 <div class="top-info-count" id="top-clients-count">0</div>
                                 <div class="top-info-description">No connected clients</div>
                                 <div class="top-info-subdesc">Client connections will appear here</div>
-                                <a class="top-info-link" onclick="navigateTo('users')">View Clients</a>
+                                <a class="top-info-link" onclick="showOnlineClientsModal()">View Clients</a>
                             </div>
                         </div>
                     </div>
@@ -329,6 +329,13 @@
                             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                             <input type="text" id="users-search" class="search-input" placeholder="Search users, email, agency..." oninput="filterUsersTable()">
                         </div>
+                        <select id="users-group" class="agency-filter" onchange="setUsersGroup(this.value)" title="Group users">
+                            <option value="none">Group: None</option>
+                            <option value="status">Group: Online / Offline</option>
+                            <option value="agency">Group: Agency</option>
+                            <option value="role">Group: Role</option>
+                            <option value="guest">Group: Members / Guests</option>
+                        </select>
                         <select id="users-agency-filter" class="agency-filter super-admin-only" onchange="fetchUsers()">
                             <option value="">All Agencies</option>
                         </select>
@@ -344,28 +351,28 @@
                     <div class="users-main">
                         <!-- Users Stat Cards -->
                         <div class="users-stats-grid">
-                            <div class="users-stat-card">
+                            <div class="users-stat-card" data-filter="all" onclick="setUsersFilter('all')" title="Click to filter">
                                 <div class="users-stat-icon icon-total"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
                                 <div class="users-stat-content">
                                     <div class="users-stat-value" id="users-total">0</div>
                                     <div class="users-stat-label">Total Users</div>
                                 </div>
                             </div>
-                            <div class="users-stat-card">
+                            <div class="users-stat-card" data-filter="online" onclick="setUsersFilter('online')" title="Click to filter">
                                 <div class="users-stat-icon icon-online"><svg viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
                                 <div class="users-stat-content">
                                     <div class="users-stat-value" id="users-online">0</div>
                                     <div class="users-stat-label">Online</div>
                                 </div>
                             </div>
-                            <div class="users-stat-card">
+                            <div class="users-stat-card" data-filter="offline" onclick="setUsersFilter('offline')" title="Click to filter">
                                 <div class="users-stat-icon icon-offline"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div>
                                 <div class="users-stat-content">
                                     <div class="users-stat-value" id="users-offline">0</div>
                                     <div class="users-stat-label">Offline</div>
                                 </div>
                             </div>
-                            <div class="users-stat-card">
+                            <div class="users-stat-card" data-filter="new" onclick="setUsersFilter('new')" title="Click to filter">
                                 <div class="users-stat-icon icon-new"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg></div>
                                 <div class="users-stat-content">
                                     <div class="users-stat-value" id="users-new">0</div>
@@ -376,16 +383,18 @@
 
                         <div id="user-status" class="status-message" style="display: none;"></div>
 
-                        <table class="data-table" id="users-data-table">
+                        <div class="users-table-wrap">
+                        <table class="data-table users-table" id="users-data-table">
                             <thead>
                                 <tr>
-                                    <th style="width: 50px;"></th>
-                                    <th>Name</th>
-                                    <th>Username</th>
-                                    <th style="width: 60px;">Status</th>
-                                    <th class="super-admin-only">Agency</th>
-                                    <th>Role</th>
-                                    <th>Created</th>
+                                    <th style="width: 44px;"></th>
+                                    <th data-sort="name" onclick="sortUsersBy('name')">Name <span class="sort-arrow"></span></th>
+                                    <th data-sort="username" onclick="sortUsersBy('username')">Username <span class="sort-arrow"></span></th>
+                                    <th data-sort="status" onclick="sortUsersBy('status')">Status <span class="sort-arrow"></span></th>
+                                    <th class="super-admin-only" data-sort="agency" onclick="sortUsersBy('agency')">Agency <span class="sort-arrow"></span></th>
+                                    <th data-sort="role" onclick="sortUsersBy('role')">Role <span class="sort-arrow"></span></th>
+                                    <th data-sort="last_login" onclick="sortUsersBy('last_login')">Last Login <span class="sort-arrow"></span></th>
+                                    <th data-sort="created" onclick="sortUsersBy('created')">Created <span class="sort-arrow"></span></th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
@@ -393,6 +402,7 @@
                                 <!-- Populated by JavaScript -->
                             </tbody>
                         </table>
+                        </div>
                         <div id="users-empty" class="empty-state" style="display: none;">
                             <div class="empty-state-icon">&#x1F510;</div>
                             <div>No user accounts</div>
@@ -744,6 +754,114 @@
                     </div>
                 </div>
 
+                <!-- Guest invites from the app (per agency) -->
+                <div class="panel admin-only" style="margin-bottom: 20px;">
+                    <h3>Guest Invites</h3>
+                    <div id="guest-invites-status" class="status-message" style="display: none;"></div>
+                    <div class="settings-row super-admin-only" style="margin-bottom: 4px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Agency</div>
+                            <div class="settings-description">Super admins choose which agency to configure</div>
+                        </div>
+                        <select id="guest-invites-agency" onchange="fetchGuestInvites()" style="margin-bottom: 0; width: auto; min-width: 200px;"></select>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">Members can invite guests from the app</div>
+                            <div class="settings-description">
+                                A signed-in member shows a QR code in MeshRelay; whoever scans it joins this agency as a guest
+                                user for the time the member chose (up to 7 days), then the account is deleted automatically.
+                                Guests appear in the Users list, where you can delete them early.
+                                <span id="guest-invites-count"></span>
+                            </div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="guest-invites-toggle" onchange="saveGuestInvites()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- TAK Server connection (per agency) -->
+                <div class="panel admin-only" style="margin-bottom: 20px;">
+                    <h3>TAK Server</h3>
+                    <div id="tak-status-msg" class="status-message" style="display: none;"></div>
+                    <div class="settings-row super-admin-only" style="margin-bottom: 4px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Agency</div>
+                            <div class="settings-description">Super admins choose which agency to configure</div>
+                        </div>
+                        <select id="tak-agency" onchange="fetchTak()" style="margin-bottom: 0; width: auto; min-width: 200px;"></select>
+                    </div>
+                    <div class="settings-description" style="margin: 4px 0 12px;">
+                        Connects this agency's dispatch console to its TAK Server: TAK users appear on the console map,
+                        TAK users can chat with dispatch (it shows up in TAK as a contact), and emergencies go both ways.
+                        The server enrolls for a client certificate with the TAK username and password — the password is not stored.
+                    </div>
+                    <div class="tak-grid">
+                        <label>Server address<input type="text" id="tak-host" placeholder="tak.example.org or 10.0.0.5"></label>
+                        <label>Streaming port<input type="number" id="tak-stream-port" placeholder="8089"></label>
+                        <label>Enrollment port<input type="number" id="tak-enroll-port" placeholder="8446"></label>
+                        <label>API port<input type="number" id="tak-api-port" placeholder="8443"></label>
+                        <label>TAK username<input type="text" id="tak-username" autocomplete="off"></label>
+                        <label>TAK password<input type="password" id="tak-password" autocomplete="new-password" placeholder="needed to enroll"></label>
+                        <label>Name in TAK<input type="text" id="tak-callsign" placeholder="MeshRelay Dispatch"></label>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">Connected</div>
+                            <div class="settings-description" id="tak-state">Not configured</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="tak-enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div style="display:flex; gap:8px; margin-top:10px;">
+                        <button class="btn-primary" onclick="saveTak()" id="tak-save-btn">Save &amp; Connect</button>
+                        <button class="btn-secondary" onclick="removeTak()">Remove</button>
+                    </div>
+                    <div id="tak-groups-section" style="display:none; margin-top:18px; border-top:1px solid #1E2733; padding-top:14px;">
+                        <div class="settings-label">TAK channels (groups)</div>
+                        <div class="settings-description" style="margin-bottom:8px;">
+                            Which TAK groups dispatch is part of — like the Channels list in ATAK. Dispatch sees and
+                            reaches the TAK users in the groups ticked here. Applied again every time the connection comes back.
+                        </div>
+                        <div id="tak-groups-list" class="tak-groups"></div>
+                        <div style="display:flex; gap:8px; margin-top:10px;">
+                            <button class="btn-secondary" onclick="loadTakGroups()">Reload from TAK</button>
+                            <button class="btn-primary" onclick="saveTakGroups()" id="tak-groups-save">Save channels</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Radio traffic recording (per agency) -->
+                <div class="panel admin-only" style="margin-bottom: 20px;">
+                    <h3>Radio Recording</h3>
+                    <div id="recording-status" class="status-message" style="display: none;"></div>
+                    <div class="settings-row super-admin-only" style="margin-bottom: 4px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Agency</div>
+                            <div class="settings-description">Super admins choose which agency to configure</div>
+                        </div>
+                        <select id="recording-agency" onchange="fetchRecordingSetting()" style="margin-bottom: 0; width: auto; min-width: 200px;"></select>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">Record radio traffic</div>
+                            <div class="settings-description">
+                                Every transmission on this agency's channels is saved on the server and can be searched and
+                                replayed from the dispatch console. Recordings are deleted after <span id="recording-retention">30</span> days
+                                (<code>recording_retention_days</code> in the server config).
+                            </div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="recording-toggle" onchange="saveRecordingSetting()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+
                 <!-- Authentication -->
                 <div class="panel">
                     <h3>Authentication</h3>
@@ -831,6 +949,19 @@
     </div>
 
     <!-- QR Code Modal -->
+    <!-- Online clients (dashboard "View Clients") -->
+    <div id="onlineClientsModal" class="modal">
+        <div class="modal-content" style="max-width: 560px;">
+            <h2>Online Clients <span id="online-clients-count" style="color:#8B949E;font-weight:400;"></span></h2>
+            <p class="modal-subtitle">Connected right now. Updates live.</p>
+            <div id="online-clients-list" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;"></div>
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="closeModal('onlineClientsModal'); navigateTo('users')">Open Users</button>
+                <button class="btn-secondary" onclick="closeModal('onlineClientsModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
     <div id="qrCodeModal" class="modal">
         <div class="modal-content">
             <h2 id="qrCodeTitle">QR Code Login</h2>

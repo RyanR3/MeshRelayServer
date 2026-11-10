@@ -1,80 +1,106 @@
-// MeshRelay Dispatch Console
+// MeshRelay Command — dispatch console
+//
+// Layout: channels/units (left), map + radio log (center), transmit /
+// emergencies / now talking (right). Server messages: see dispatch_audio.go
+// (audio, floor) and dispatch_command.go (directory, locations, talk activity,
+// emergencies) in the server source.
 
 let ws = null;
 let wsReconnectTimer = null;
-let currentChannel = 0;
-let currentAgency = '';
+let currentAgency = '';         // '' = super admin (every agency)
 let currentUsername = '';
 let volumeLevel = 1.0;
-
-// WebRTC mic state
-let micStream = null;
-let audioCtxOut = null;
-let micProcessor = null;
-let isPTT = false;
-
-// Audio playback context
-let audioCtxIn = null;
-let playGain = null;        // persistent gain node for incoming audio
-let nextPlayTime = 0;       // scheduling cursor on the audio timeline (seconds)
-
-// Visualizer
 let vizCtx = null;
 let vizAnimId = null;
-let vizAnalyser = null;
 
-// All connected clients (unfiltered)
-let allClients = [];
+let directory = { agencies: [], channels: [] };
+let units = [];                 // field units (consoles filtered out)
+let takUnits = [];              // TAK users from the agency's TAK Server (tak.go)
+let txKey = loadPref('cmd.tx', '');            // "agency:channel" we transmit on
+const monitored = new Set(loadPref('cmd.monitor', []));
+const collapsedAgencies = new Set(loadPref('cmd.collapsed', []));
+const channelNames = loadPref('cmd.names', {});
+
+const talkState = new Map();    // "agency|channel|user" -> { agency, channel, user, start, last, entry }
+const radioLog = [];            // newest first
+const emergencies = new Map();  // "agency|user" -> { agency, channel, user, at, active, acked, lat, lon }
+const MAX_LOG = 300, KEEP_AUDIO = 40, TALK_GAP_MS = 1500;
+
+// ─── Prefs / helpers ───────────────────────────────────────────────────────
+
+function loadPref(key, fallback) {
+    try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (_) { return fallback; }
+}
+function savePref(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
+
+const chKey = (agency, ch) => `${agency}:${ch}`;
+const splitKey = (k) => { const i = k.lastIndexOf(':'); const tail = k.slice(i + 1); return [k.slice(0, i), tail === 'all' ? 'all' : parseInt(tail, 10)]; };
+const isAllCall = (k) => !!k && k.endsWith(':all');
+function txAgency() { return txKey ? splitKey(txKey)[0] : currentAgency; }
+
+function agencyName(id) {
+    const a = directory.agencies.find(x => x.id === id);
+    return a ? a.name : id;
+}
+const AGENCY_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#EC4899', '#14B8A6', '#A78BFA', '#F97316', '#84CC16', '#06B6D4', '#EAB308'];
+function agencyColor(id) {
+    const i = directory.agencies.findIndex(x => x.id === id);
+    if (i >= 0) return AGENCY_COLORS[i % AGENCY_COLORS.length];
+    let h = 0; for (const c of id || '') h = (h * 31 + c.charCodeAt(0)) | 0;
+    return AGENCY_COLORS[Math.abs(h) % AGENCY_COLORS.length];
+}
+function channelInfo(agency, ch) {
+    return directory.channels.find(c => c.agency === agency && c.channel === ch);
+}
+function channelLabel(agency, ch) {
+    if (ch === 'all') return 'All Call';
+    if (typeof ch === 'number' && ch < 0) return 'TAK';
+    const custom = channelNames[chKey(agency, ch)];
+    if (custom) return custom;
+    const c = channelInfo(agency, ch);
+    if (c) return c.name;
+    return ch < 50 ? `Talkgroup ${ch + 1}` : `Channel ${ch}`;
+}
+function unitLabel(agency, user) {
+    return (!currentAgency && directory.agencies.length > 1) ? `${user} (${agencyName(agency)})` : user;
+}
+function fmtTime(t) { return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function fmtDur(ms) { const s = Math.max(1, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; }
+function ago(t) {
+    const s = Math.round((Date.now() - t) / 1000);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    return `${Math.round(s / 3600)}h ago`;
+}
 
 // ─── Startup ───────────────────────────────────────────────────────────────
 
 window.addEventListener('DOMContentLoaded', () => {
     vizCtx = document.getElementById('audio-visualizer').getContext('2d');
-    initViz();
+    clearViz();
+    initMap();
+    const p = loadPref('cmd.ui', {});
+    document.getElementById('map-follow').checked = !!p.follow;
+    document.getElementById('map-labels').checked = p.labels !== false;
+    document.getElementById('channels-active-only').checked = loadPref('cmd.inUse', true);
+    tickClock(); setInterval(tickClock, 1000);
+    setInterval(sweepTalk, 300);
+    setInterval(() => { renderUnits(); renderMarkers(); renderEmergencies(); }, 15000);
     checkSession();
     unlockAudioOnGesture();
 });
 
-let audioUnlocked = false;
+function saveUiPrefs() {
+    savePref('cmd.ui', {
+        follow: document.getElementById('map-follow').checked,
+        labels: document.getElementById('map-labels').checked,
+    });
+}
 
-// Browsers block audio playback until the user interacts with the page.
-// We create + resume the playback AudioContext inside a real gesture handler.
-// A visible banner guarantees the operator provides that gesture; we also
-// listen passively so any click/keypress unlocks audio.
-function unlockAudioOnGesture() {
-    const unlock = () => {
-        try {
-            if (!audioCtxIn || audioCtxIn.state === 'closed') {
-                audioCtxIn = new AudioContext({ sampleRate: 32000 });
-            }
-            if (audioCtxIn.state === 'suspended') {
-                audioCtxIn.resume().then(markUnlocked).catch(() => {});
-            } else {
-                markUnlocked();
-            }
-        } catch (_) {}
-    };
-    function markUnlocked() {
-        if (audioCtxIn && audioCtxIn.state === 'running') {
-            audioUnlocked = true;
-            const banner = document.getElementById('audio-unlock-banner');
-            if (banner) banner.style.display = 'none';
-            document.removeEventListener('click', unlock);
-            document.removeEventListener('keydown', unlock);
-            document.removeEventListener('touchstart', unlock);
-            console.log('[dispatch] audio unlocked');
-        }
-    }
-    document.addEventListener('click', unlock);
-    document.addEventListener('keydown', unlock);
-    document.addEventListener('touchstart', unlock);
-
-    // Show the banner until audio is confirmed unlocked.
-    const banner = document.getElementById('audio-unlock-banner');
-    if (banner) {
-        banner.style.display = 'flex';
-        banner.onclick = unlock;
-    }
+function tickClock() {
+    const d = new Date();
+    document.getElementById('clock-local').textContent = d.toLocaleTimeString([], { hour12: false });
+    document.getElementById('clock-date').textContent = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
 async function checkSession() {
@@ -87,9 +113,9 @@ async function checkSession() {
         }
         currentAgency = data.agency_id || '';
         currentUsername = data.username || '';
-        document.getElementById('dispatch-agency-label').textContent = currentAgency || 'All Agencies';
+        document.getElementById('dispatch-agency-label').textContent = currentAgency ? '' : 'All agencies';
         document.getElementById('dispatch-user-label').textContent = currentUsername;
-        updateChannelDisplay();
+        if (currentAgency && txKey && splitKey(txKey)[0] !== currentAgency) txKey = '';
         connectDispatchWS();
         requestMic();
     } catch (e) {
@@ -97,209 +123,936 @@ async function checkSession() {
     }
 }
 
-// ─── WebSocket ──────────────────────────────────────────────────────────────
+// ─── WebSocket ─────────────────────────────────────────────────────────────
 
 function connectDispatchWS() {
-    // Guard against duplicate sockets. If one is already OPEN or still
-    // CONNECTING, don't open another — two live sockets both receive the
-    // fanned-out audio and play it twice ("doubling up").
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-
-    // Fully detach any old socket before replacing it so its handlers can't
-    // fire against the new connection.
-    if (ws) {
-        try { ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null; ws.close(); } catch (_) {}
-    }
+    if (ws) { try { ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null; ws.close(); } catch (_) {} }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/ws/dispatch`);
     ws.binaryType = 'arraybuffer';
-
     setWsStatus('connecting');
 
     ws.onopen = () => {
-        console.log('[dispatch] WebSocket OPEN');
         setWsStatus('connected');
         if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-        // Sync current channel to server
-        sendChannelSwitch(currentChannel);
+        sendTuning();
     };
-
-    ws.onclose = (ev) => {
-        console.warn('[dispatch] WebSocket CLOSED code=' + ev.code + ' reason=' + ev.reason + ' wasClean=' + ev.wasClean);
+    ws.onclose = () => {
         setWsStatus('error');
-        // Only one pending reconnect at a time, so timers can't stack and
-        // spawn multiple sockets.
+        stopPTT();
         if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
         wsReconnectTimer = setTimeout(connectDispatchWS, 3000);
     };
-
-    ws.onerror = (ev) => {
-        console.error('[dispatch] WebSocket ERROR', ev);
-        setWsStatus('error');
-    };
-
+    ws.onerror = () => setWsStatus('error');
     ws.onmessage = (e) => {
         if (e.data instanceof ArrayBuffer) {
-            // Incoming PTT audio from field units
-            console.log('[dispatch] audio frame ' + e.data.byteLength + ' bytes');
-            playIncomingAudio(e.data);
-        } else {
-            try {
-                const msg = JSON.parse(e.data);
-                if (msg.type === 'update') {
-                    const clients = (msg.data.clients || []).filter(c => !c.username.startsWith('dispatch-'));
-                    allClients = clients;
-                    renderClientList(clients);
-                }
-            } catch (_) {}
+            if (!e.data.byteLength) return;
+            const t = new Uint8Array(e.data, 0, 1)[0];
+            if (t === FRAME_AUDIO_OUT) onAudioFrame(e.data);
+            else onControlPacket(e.data);
+            return;
         }
+        let msg;
+        try { msg = JSON.parse(e.data); } catch (_) { return; }
+        if (msg.type === 'update') onUpdate(msg.data || {});
+        else if (msg.type === 'talk') noteTalk(msg.agency, msg.channel, msg.user, false);
+        else if (msg.type === 'emergency') handleEmergency(msg);
+        else if (msg.type === 'status') onStatus(msg);
+        else if (msg.type === 'message') onMessage(msg, true);
+        else if (msg.type === 'messages') { messages.length = 0; (msg.list || []).forEach(m => onMessage(m, false)); markVisibleMessagesRead(); renderMessages(); }
+        else if (msg.type === 'message_read') onMessageRead(msg.id);
+        else if (msg.type === 'recording') onRecording(msg);
     };
 }
 
 function setWsStatus(state) {
     const el = document.getElementById('dispatch-ws-status');
     el.className = 'ws-status ws-' + state;
-    el.textContent = state === 'connected' ? 'Connected' : state === 'connecting' ? 'Connecting...' : 'Disconnected';
+    el.textContent = state === 'connected' ? 'Connected' : state === 'connecting' ? 'Connecting…' : 'Disconnected';
 }
 
-function sendChannelSwitch(ch) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'channel', channel: ch }));
+function sendTuning() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (txKey) {
+        const [agency, channel] = splitKey(txKey);
+        if (channel === 'all') ws.send(JSON.stringify({ type: 'channel', channel: 0, agency, allcall: true }));
+        else ws.send(JSON.stringify({ type: 'channel', channel, agency }));
     }
+    ws.send(JSON.stringify({ type: 'monitor', keys: [...monitored] }));
 }
 
-// ─── Client List ────────────────────────────────────────────────────────────
+function onUpdate(data) {
+    directory = { agencies: data.agencies || [], channels: data.channels || [] };
+    units = (data.clients || []).filter(c => !c.console);
+    takUnits = data.tak_units || [];
+    if (!txKey && directory.channels.length) {
+        const first = directory.channels.find(c => !currentAgency || c.agency === currentAgency) || directory.channels[0];
+        selectTx(first.agency, first.channel);
+    }
+    if (!currentAgency) document.getElementById('dispatch-agency-label').textContent = `All agencies (${directory.agencies.length})`;
+    else document.getElementById('dispatch-agency-label').textContent = agencyName(currentAgency);
+    renderChannels(); renderUnits(); renderMarkers(); renderTxPanel(); renderHeader(); renderMsgTargets();
+}
 
-function renderClientList(clients) {
-    const list = document.getElementById('units-list');
-    const countEl = document.getElementById('unit-count');
-    const chCountEl = document.getElementById('channel-unit-count');
+// ─── Channels ──────────────────────────────────────────────────────────────
 
-    // Count units on current channel
-    const onChannel = clients.filter(c => c.channel === currentChannel).length;
-    chCountEl.textContent = `${onChannel} unit${onChannel !== 1 ? 's' : ''} on this channel`;
+function selectTx(agency, channel) {
+    const key = chKey(agency, channel);
+    if (currentAgency && agency !== currentAgency) return;
+    if (key === txKey) return;
+    stopPTT();
+    txKey = key;
+    savePref('cmd.tx', txKey);
+    sendTuning();
+    renderChannels(); renderTxPanel();
+}
 
-    // Apply search + channel filter
-    const search = document.getElementById('unit-search').value.toLowerCase();
-    const chFilter = document.getElementById('unit-channel-filter').value;
-    let filtered = clients;
-    if (search) filtered = filtered.filter(c => c.username.toLowerCase().includes(search));
-    if (chFilter !== '') filtered = filtered.filter(c => String(c.channel) === chFilter);
+function toggleMonitor(agency, channel, ev) {
+    if (ev) ev.stopPropagation();
+    const key = chKey(agency, channel);
+    if (monitored.has(key)) monitored.delete(key); else monitored.add(key);
+    savePref('cmd.monitor', [...monitored]);
+    sendTuning();
+    renderChannels();
+}
 
-    countEl.textContent = `${clients.length} online`;
+function toggleAgency(id) {
+    if (collapsedAgencies.has(id)) collapsedAgencies.delete(id); else collapsedAgencies.add(id);
+    savePref('cmd.collapsed', [...collapsedAgencies]);
+    renderChannels();
+}
 
-    // Update channel filter options
-    const chSel = document.getElementById('unit-channel-filter');
-    const prevChVal = chSel.value;
-    const usedChannels = [...new Set(clients.map(c => c.channel))].sort((a, b) => a - b);
-    chSel.innerHTML = '<option value="">All Channels</option>';
-    usedChannels.forEach(ch => {
-        const opt = document.createElement('option');
-        opt.value = String(ch);
-        opt.textContent = `Channel ${ch}`;
-        if (String(ch) === prevChVal) opt.selected = true;
-        chSel.appendChild(opt);
-    });
+function renameChannel(agency, channel, ev) {
+    if (ev) ev.stopPropagation();
+    const key = chKey(agency, channel);
+    const name = prompt('Label for this channel on this console (blank = default):', channelNames[key] || channelLabel(agency, channel));
+    if (name === null) return;
+    if (name.trim()) channelNames[key] = name.trim(); else delete channelNames[key];
+    savePref('cmd.names', channelNames);
+    renderChannels(); renderTxPanel(); renderLog();
+}
 
-    if (filtered.length === 0) {
-        list.innerHTML = '<div class="units-empty">No units connected</div>';
+function talkersOn(agency, channel) {
+    const out = [];
+    for (const t of talkState.values()) if (t.agency === agency && t.channel === channel) out.push(t.user);
+    return out;
+}
+
+function renderChannels() {
+    const tree = document.getElementById('channel-tree');
+    if (!tree) return;
+    const q = (document.getElementById('channel-search').value || '').toLowerCase();
+    const activeOnly = document.getElementById('channels-active-only').checked;
+    let html = '';
+    for (const a of directory.agencies) {
+        const rows = directory.channels.filter(c => c.agency === a.id).filter(c => {
+            const key = chKey(c.agency, c.channel);
+            const label = channelLabel(c.agency, c.channel).toLowerCase();
+            if (q && !label.includes(q) && !a.name.toLowerCase().includes(q)) return false;
+            if (activeOnly && !(c.units > 0 || talkersOn(c.agency, c.channel).length || key === txKey || monitored.has(key))) return false;
+            return true;
+        });
+        if (!rows.length && (q || !activeOnly)) continue;   // keep the agency (and All Call) when merely quiet
+        const total = rows.reduce((n, c) => n + c.units, 0);
+        const collapsed = collapsedAgencies.has(a.id) && !q;
+        html += `<div class="agency-group">
+            <div class="agency-head" onclick="toggleAgency('${escAttr(a.id)}')">
+                <span>${collapsed ? '▸' : '▾'}</span><span class="agency-swatch" style="background:${agencyColor(a.id)}"></span>
+                ${escHtml(a.name)}<span class="count">${total} on</span></div>`;
+        if (!collapsed) {
+            const allKey = chKey(a.id, 'all');
+            html += `<div class="ch-row allcall${allKey === txKey ? ' tx' : ''}" onclick="selectTx('${escAttr(a.id)}', 'all')" title="Transmit on every talkgroup of ${escAttr(a.name)}">
+                <div class="ch-name">📢 All Call${allKey === txKey ? '<span class="ch-tx-tag">TX</span>' : ''}</div><span></span><span></span>
+                <div class="ch-sub">Every talkgroup at once</div></div>`;
+            if (!rows.length) html += '<div class="list-hint" style="padding:6px 8px">No channels in use — untick "In use" to see all.</div>';
+            for (const c of rows) {
+                const key = chKey(c.agency, c.channel);
+                const talking = talkersOn(c.agency, c.channel);
+                const kind = c.kind !== 'talkgroup' ? `<span class="ch-kind">${escHtml(c.kind.replace('_', ' '))}</span>` : '';
+                const sub = talking.length
+                    ? `<span class="talker">● ${escHtml(talking.join(', '))}</span>`
+                    : `${c.units} unit${c.units === 1 ? '' : 's'}${monitored.has(key) ? ' · monitoring' : ''}`;
+                html += `<div class="ch-row${key === txKey ? ' tx' : ''}${talking.length ? ' talking' : ''}"
+                        onclick="selectTx('${escAttr(c.agency)}', ${c.channel})" title="Click to transmit here · double-click to rename"
+                        ondblclick="renameChannel('${escAttr(c.agency)}', ${c.channel}, event)">
+                    <div class="ch-name">${escHtml(channelLabel(c.agency, c.channel))}${kind}${key === txKey ? '<span class="ch-tx-tag">TX</span>' : ''}</div>
+                    <span class="ch-units">${c.units}</span>
+                    <button class="ch-mon${monitored.has(key) ? ' on' : ''}" title="Monitor (listen)" onclick="toggleMonitor('${escAttr(c.agency)}', ${c.channel}, event)">🔈</button>
+                    <div class="ch-sub">${sub}</div>
+                </div>`;
+            }
+        }
+        html += '</div>';
+    }
+    tree.innerHTML = html || '<div class="empty-small">No channels</div>';
+}
+
+function renderTxPanel() {
+    const name = document.getElementById('tx-channel-name');
+    const meta = document.getElementById('tx-channel-meta');
+    if (!txKey) { name.textContent = '—'; meta.textContent = 'Pick a channel'; return; }
+    const [agency, ch] = splitKey(txKey);
+    if (ch === 'all') {
+        const tgs = directory.channels.filter(c => c.agency === agency && c.kind === 'talkgroup');
+        name.textContent = '📢 All Call';
+        meta.textContent = `${agencyName(agency)} · ${tgs.length} talkgroups · ${tgs.reduce((n, c) => n + c.units, 0)} units`;
         return;
     }
+    const info = channelInfo(agency, ch);
+    name.textContent = channelLabel(agency, ch);
+    meta.textContent = `${agencyName(agency)} · ${info ? info.units : 0} unit${info && info.units === 1 ? '' : 's'}`;
+}
 
-    list.innerHTML = filtered.map(c => {
-        const initial = c.username.charAt(0).toUpperCase();
-        const color = avatarColor(c.username);
-        return `<div class="unit-row">
-            <div class="unit-avatar" style="background:${color};">${initial}</div>
-            <div class="unit-info">
-                <div class="unit-name">${escHtml(c.username)}</div>
-                <div class="unit-meta">${escHtml(c.agency_id || '')}</div>
-            </div>
-            <span class="unit-channel">CH ${c.channel}</span>
+// ─── Units ─────────────────────────────────────────────────────────────────
+
+const unitKey = (u) => `${u.agency_id}|${u.username}`;
+function isTalking(agency, user) {
+    for (const t of talkState.values()) if (t.agency === agency && t.user === user) return true;
+    return false;
+}
+function locAge(u) { return u.location ? Date.now() - Date.parse(u.location.at) : Infinity; }
+
+function renderUnits() {
+    const list = document.getElementById('units-list');
+    if (!list) return;
+    document.getElementById('units-tab-count').textContent = units.length;
+    const q = (document.getElementById('unit-search').value || '').toLowerCase();
+    const sort = document.getElementById('unit-sort').value;
+    let rows = units.filter(u => !q || u.username.toLowerCase().includes(q) || (u.account || '').toLowerCase().includes(q)
+        || channelLabel(u.agency_id, u.channel).toLowerCase().includes(q));
+    rows.sort((a, b) => sort === 'status' ? ((a.status ? a.status.code : 99) - (b.status ? b.status.code : 99)) || a.username.localeCompare(b.username)
+        : sort === 'channel' ? (a.agency_id + a.channel).localeCompare(b.agency_id + b.channel, undefined, { numeric: true })
+        : sort === 'recent' ? locAge(a) - locAge(b)
+        : a.username.localeCompare(b.username, undefined, { sensitivity: 'base' }));
+    const tak = takUnits.filter(t => !q || t.callsign.toLowerCase().includes(q) || (t.group || '').toLowerCase().includes(q))
+        .sort((a, b) => a.callsign.localeCompare(b.callsign, undefined, { sensitivity: 'base' }));
+    const takHtml = tak.length ? `<div class="units-section">TAK users (${tak.length})</div>` + tak.map(t => `
+        <div class="unit-row${t.stale ? ' stale-row' : ''}" onclick="focusUnit('tak|${escAttr(t.uid)}')">
+            <div class="unit-avatar tak-avatar" style="background:${takTeamColor(t.group)}">${escHtml(t.callsign.charAt(0).toUpperCase())}</div>
+            <div style="min-width:0"><div class="unit-name">${escHtml(t.callsign)} <span class="tak-tag">TAK</span></div>
+                <div class="unit-meta">${escHtml([t.group, t.role].filter(Boolean).join(' · ') || 'TAK user')}${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''}</div></div>
+            <div class="unit-right">${t.battery ? `<span class="${t.battery <= 20 ? 'batt-low' : ''}">${t.battery}%</span> · ` : ''}${ago(Date.parse(t.at))}</div>
+        </div>`).join('') : '';
+    document.getElementById('units-tab-count').textContent = units.length + takUnits.length;
+    if (!rows.length && !tak.length) { list.innerHTML = '<div class="empty-small">No units online</div>'; return; }
+    list.innerHTML = (rows.length && tak.length ? '<div class="units-section">MeshRelay</div>' : '') + rows.map(u => {
+        const loc = u.location;
+        const batt = loc && loc.battery !== undefined ? `<span class="${loc.battery <= 20 ? 'batt-low' : ''}">${loc.battery}%</span> · ` : '';
+        const right = loc ? `${batt}${ago(Date.parse(loc.at))}` : '<span class="nofix">no position</span>';
+        const signedIn = u.account && u.account !== u.username ? ` · ${escHtml(u.account)}` : '';
+        const st = u.status ? `<span class="status-pill"><i style="background:${statusColor(u.status.code)}"></i>${escHtml(u.status.name)}</span> ` : '';
+        return `<div class="unit-row${isTalking(u.agency_id, u.username) ? ' talking' : ''}" onclick="focusUnit('${escAttr(unitKey(u))}')">
+            <div class="unit-avatar" style="background:${agencyColor(u.agency_id)}">${escHtml(u.username.charAt(0).toUpperCase())}</div>
+            <div style="min-width:0"><div class="unit-name">${escHtml(u.username)} ${st}</div>
+                <div class="unit-meta">${escHtml(channelLabel(u.agency_id, u.channel))}${!currentAgency ? ' · ' + escHtml(agencyName(u.agency_id)) : ''}${signedIn}</div></div>
+            <div class="unit-right">${right}</div>
         </div>`;
+    }).join('') + takHtml;
+}
+
+function showLeftTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.getElementById('tab-channels').style.display = name === 'channels' ? 'flex' : 'none';
+    document.getElementById('tab-units').style.display = name === 'units' ? 'flex' : 'none';
+}
+
+// ─── Map ───────────────────────────────────────────────────────────────────
+
+let map = null;
+const markers = new Map();      // unitKey -> { marker, cls, label }
+let fittedOnce = false;
+
+function initMap() {
+    if (typeof L === 'undefined') return;
+    const view = loadPref('cmd.view', null);
+    map = L.map('map', { zoomControl: true, attributionControl: true })
+        .setView(view ? [view.lat, view.lon] : [39.5, -98.35], view ? view.zoom : 4);
+    const layers = {
+        // Esri's dark canvas + its label layer: no API key needed.
+        'Dark': L.layerGroup([
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+                { maxZoom: 16, attribution: 'Tiles &copy; Esri, HERE, Garmin, &copy; OpenStreetMap contributors' }),
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+                { maxZoom: 16 }),
+        ]),
+        'Streets': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }),
+        'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            { maxZoom: 19, attribution: 'Imagery &copy; Esri' }),
+        'Topo': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+            { maxZoom: 17, attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap' }),
+    };
+    const base = loadPref('cmd.layer', 'Dark');
+    (layers[base] || layers.Dark).addTo(map);
+    L.control.layers(layers, null, { position: 'topleft' }).addTo(map);
+    map.on('baselayerchange', e => savePref('cmd.layer', e.name));
+    map.on('moveend', () => { const c = map.getCenter(); savePref('cmd.view', { lat: c.lat, lon: c.lng, zoom: map.getZoom() }); });
+    if (view) fittedOnce = true;
+}
+
+function markerClass(u) {
+    let cls = 'unit-marker';
+    if (locAge(u) > 5 * 60000) cls += ' stale';
+    if (isTalking(u.agency_id, u.username)) cls += ' talking';
+    const em = emergencies.get(`${u.agency_id}|${u.username}`);
+    if (em && em.active) cls += ' emergency';
+    return cls;
+}
+
+function renderMarkers(force) {
+    if (!map) return;
+    const showLabels = document.getElementById('map-labels').checked;
+    const seen = new Set();
+    let located = 0;
+    for (const u of units) {
+        if (!u.location) continue;
+        located++;
+        const key = unitKey(u);
+        seen.add(key);
+        const pos = [u.location.lat, u.location.lon];
+        const cls = markerClass(u);
+        const label = showLabels ? u.username : '';
+        let m = markers.get(key);
+        if (!m) {
+            const marker = L.marker(pos, { icon: unitIcon(u, cls, label), keyboard: false });
+            marker.bindPopup(() => unitPopup(key), { maxWidth: 260 });
+            marker.addTo(map);
+            m = { marker, cls, label };
+            markers.set(key, m);
+        } else {
+            m.marker.setLatLng(pos);
+            if (force || m.cls !== cls || m.label !== label) {
+                m.marker.setIcon(unitIcon(u, cls, label));
+                m.cls = cls; m.label = label;
+            }
+        }
+        m.marker.setZIndexOffset(cls.includes('emergency') ? 2000 : cls.includes('talking') ? 1000 : 0);
+    }
+    for (const t of takUnits) {
+        if (t.lat === undefined) continue;
+        located++;
+        const key = 'tak|' + t.uid;
+        seen.add(key);
+        let cls = 'unit-marker tak-marker' + (t.stale ? ' stale' : '');
+        const em = emergencies.get(`${t.agency}|${t.callsign} (TAK)`);
+        if (em && em.active) cls += ' emergency';
+        const label = showLabels ? t.callsign : '';
+        let m = markers.get(key);
+        const icon = () => L.divIcon({ className: '', iconSize: [0, 0],
+            html: `<div class="${cls}"><div class="unit-dot tak-dot" style="background:${takTeamColor(t.group)}"></div>${label ? `<div class="unit-label">${escHtml(label)} <span class="tak-tag">TAK</span></div>` : ''}</div>` });
+        if (!m) {
+            const marker = L.marker([t.lat, t.lon], { icon: icon(), keyboard: false });
+            marker.bindPopup(() => takPopup(t.uid), { maxWidth: 260 });
+            marker.addTo(map);
+            m = { marker, cls, label };
+            markers.set(key, m);
+        } else {
+            m.marker.setLatLng([t.lat, t.lon]);
+            if (force || m.cls !== cls || m.label !== label) { m.marker.setIcon(icon()); m.cls = cls; m.label = label; }
+        }
+    }
+    for (const [key, m] of markers) {
+        if (!seen.has(key)) { m.marker.remove(); markers.delete(key); }
+    }
+    document.getElementById('map-empty').style.display = located ? 'none' : 'block';
+    if (!fittedOnce && located) { fittedOnce = true; fitAllUnits(); }
+}
+
+function unitIcon(u, cls, label) {
+    return L.divIcon({
+        className: '', iconSize: [0, 0],
+        html: `<div class="${cls}"><div class="unit-dot" style="background:${agencyColor(u.agency_id)}"></div>${label ? `<div class="unit-label">${escHtml(label)}</div>` : ''}</div>`,
+    });
+}
+
+function unitPopup(key) {
+    const u = units.find(x => unitKey(x) === key);
+    if (!u) return 'Offline';
+    const l = u.location || {};
+    const rows = [
+        `${escHtml(channelLabel(u.agency_id, u.channel))} · ${escHtml(agencyName(u.agency_id))}`,
+        u.account && u.account !== u.username ? `Signed in as ${escHtml(u.account)}` : '',
+        l.at ? `Position ${ago(Date.parse(l.at))}${l.acc ? ` · ±${Math.round(l.acc)} m` : ''}` : '',
+        l.speed ? `Moving ${Math.round(l.speed * 2.237)} mph, heading ${Math.round(l.heading || 0)}°` : '',
+        l.battery !== undefined ? `Battery ${l.battery}%` : '',
+        l.lat ? `${l.lat.toFixed(5)}, ${l.lon.toFixed(5)}` : '',
+    ].filter(Boolean).map(r => `<div class="popup-row">${r}</div>`).join('');
+    const a = escAttr(u.agency_id), ch = u.channel, un = escAttr(u.username);
+    const code = u.status ? u.status.code : 0;
+    const opts = STATUS_NAMES.map((n, i) => `<option value="${i}"${i === code ? ' selected' : ''}>${n}</option>`).join('');
+    return `<div class="popup-title">${escHtml(u.username)}</div>${rows}
+        <div class="popup-status">Status <select onchange="setUnitStatus('${a}', '${un}', this.value)">${opts}</select></div>
+        <div class="popup-actions">
+            <button onclick="selectTx('${a}', ${ch})">Talk on channel</button>
+            <button onclick="toggleMonitor('${a}', ${ch})">${monitored.has(chKey(u.agency_id, ch)) ? 'Stop monitoring' : 'Monitor'}</button>
+            <button onclick="messageUnit('${a}', '${un}')">Message</button>
+        </div>`;
+}
+
+function fitAllUnits() {
+    if (!map || !markers.size) return;
+    const pts = [...markers.values()].map(m => m.marker.getLatLng());
+    if (pts.length === 1) map.setView(pts[0], 15);
+    else map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 16 });
+}
+
+function focusUnit(key) {
+    if (key.endsWith(' (TAK)')) {   // an emergency/message name: find the TAK user's marker
+        const [agency, name] = [key.slice(0, key.indexOf('|')), key.slice(key.indexOf('|') + 1, -6)];
+        const t = takUnits.find(x => x.agency === agency && x.callsign === name);
+        if (t) key = 'tak|' + t.uid;
+    }
+    const m = markers.get(key);
+    if (m && map) {
+        map.setView(m.marker.getLatLng(), Math.max(map.getZoom(), 15));
+        m.marker.openPopup();
+    } else {
+        const u = units.find(x => unitKey(x) === key);
+        if (u) flashMessage(`${u.username} has not shared a position.`);
+    }
+}
+
+function flashMessage(text) {
+    const el = document.getElementById('map-empty');
+    el.textContent = text;
+    el.style.display = 'block';
+    setTimeout(() => { el.textContent = 'No unit positions yet. Units appear when their app shares its location with dispatch (Settings → Share location with dispatch).'; renderMarkers(); }, 3000);
+}
+
+// ─── Talk activity + radio log ─────────────────────────────────────────────
+
+let renderQueued = false;
+function queueRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    setTimeout(() => {
+        renderQueued = false;
+        renderLog(); renderTalking(); renderChannels(); renderMarkers(); renderHeader();
+    }, 200);
+}
+
+// Someone is talking (a "talk" event from the server, or an audio frame we
+// hear). A gap of more than TALK_GAP_MS starts a new log entry.
+function noteTalk(agency, channel, user, heard) {
+    // Our own all-call comes back as talk on every talkgroup: one entry.
+    if (user === currentUsername && isAllCall(txKey) && splitKey(txKey)[0] === agency && channel !== 'all') {
+        const c = channelInfo(agency, channel);
+        if (!c || c.kind === 'talkgroup') channel = 'all';
+    }
+    const key = `${agency}|${channel}|${user}`;
+    const now = Date.now();
+    let t = talkState.get(key);
+    if (!t) {
+        const entry = { agency, channel, user, start: now, end: now, heard: false, pcm: [], pcmLen: 0 };
+        radioLog.unshift(entry);
+        if (radioLog.length > MAX_LOG) radioLog.length = MAX_LOG;
+        radioLog.forEach((e, i) => { if (i >= KEEP_AUDIO && e.pcm.length) { e.pcm = []; e.pcmLen = 0; } });
+        t = { agency, channel, user, start: now, last: now, entry };
+        talkState.set(key, t);
+        if (document.getElementById('map-follow').checked) {
+            const m = markers.get(`${agency}|${user}`);
+            if (m && map) map.panTo(m.marker.getLatLng());
+        }
+    }
+    t.last = now;
+    t.entry.end = now;
+    if (heard) t.entry.heard = true;
+    queueRender();
+}
+
+function recordAudio(agency, channel, user, samples) {
+    const t = talkState.get(`${agency}|${channel}|${user}`);
+    if (!t || t.entry.pcmLen > 120 * audioCtx.sampleRate) return;   // cap 2 min per entry
+    t.entry.pcm.push(samples.slice());
+    t.entry.pcmLen += samples.length;
+}
+
+function sweepTalk() {
+    const now = Date.now();
+    let changed = false;
+    for (const [k, t] of talkState) {
+        if (now - t.last > TALK_GAP_MS) { talkState.delete(k); changed = true; }
+    }
+    if (changed) queueRender();
+    else if (talkState.size) renderTalking();
+}
+
+function renderLog() {
+    const body = document.getElementById('log-body');
+    const filter = document.getElementById('log-filter').value;
+    const rows = radioLog.filter(e => filter !== 'heard' || e.heard).slice(0, 150);
+    document.getElementById('log-empty').style.display = rows.length ? 'none' : 'block';
+    body.innerHTML = rows.map((e, i) => {
+        const live = [...talkState.values()].some(t => t.entry === e);
+        const idx = radioLog.indexOf(e);
+        const replay = (e.pcmLen || e.recId) ? `<button class="replay-btn" onclick="replay(${idx})">▶ Replay</button>` : '';
+        const ch = `${escHtml(channelLabel(e.agency, e.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(e.agency)) : ''}`;
+        const what = e.note ? escHtml(e.note) : e.emergency ? (e.active ? '🚨 EMERGENCY' : 'Emergency cleared') : (live ? 'talking…' : fmtDur(e.end - e.start));
+        return `<tr class="${live ? 'live' : ''}${e.emergency ? ' emerg' : ''}">
+            <td>${fmtTime(e.start)}</td><td class="log-ch">${ch}</td>
+            <td><span class="log-unit" onclick="focusUnit('${escAttr(e.agency + '|' + e.user)}')">${escHtml(e.user)}</span></td>
+            <td>${what}</td><td>${replay}</td></tr>`;
     }).join('');
 }
 
-function filterUnits() {
-    renderClientList(allClients);
+let replaySource = null;
+function replay(idx) {
+    const e = radioLog[idx];
+    if (!e) return;
+    if (!e.pcmLen && e.recId) return playRecording(e.recId);
+    if (!e.pcmLen || !audioCtx) return;
+    ensureAudio();
+    if (replaySource) { try { replaySource.stop(); } catch (_) {} }
+    const buf = audioCtx.createBuffer(1, e.pcmLen, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    let o = 0;
+    for (const p of e.pcm) { data.set(p, o); o += p.length; }
+    replaySource = audioCtx.createBufferSource();
+    replaySource.buffer = buf;
+    replaySource.connect(playGain || audioCtx.destination);
+    replaySource.start();
 }
 
-// ─── Channel control ────────────────────────────────────────────────────────
+function clearLog() { radioLog.length = 0; renderLog(); }
 
-function changeChannel(delta) {
-    currentChannel = Math.max(0, Math.min(19, currentChannel + delta));
-    updateChannelDisplay();
-    sendChannelSwitch(currentChannel);
-    renderClientList(allClients); // refresh channel count
+function exportLog() {
+    const lines = [['time', 'agency', 'channel', 'unit', 'seconds', 'note']];
+    for (const e of [...radioLog].reverse()) {
+        lines.push([new Date(e.start).toISOString(), agencyName(e.agency), channelLabel(e.agency, e.channel), e.user,
+            e.emergency ? '' : Math.round((e.end - e.start) / 1000), e.emergency ? (e.active ? 'EMERGENCY' : 'emergency cleared') : '']);
+    }
+    const csv = lines.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = `radio-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function updateChannelDisplay() {
-    document.getElementById('channel-display').textContent = `CH ${currentChannel}`;
-    document.getElementById('ptt-ch-hint').textContent = currentChannel;
+function renderTalking() {
+    const el = document.getElementById('talking-list');
+    const list = [...talkState.values()].sort((a, b) => a.start - b.start);
+    if (!list.length) { el.innerHTML = '<div class="empty-small">Quiet</div>'; return; }
+    el.innerHTML = list.map(t => `<div class="talking-item" onclick="focusUnit('${escAttr(t.agency + '|' + t.user)}')">
+        <span class="status-dot dot-red pulse"></span>
+        <div><div class="name">${escHtml(t.user)}</div><div class="where">${escHtml(channelLabel(t.agency, t.channel))}${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''} · ${fmtDur(Date.now() - t.start)}</div></div>
+        ${t.entry.heard ? '<span class="heard">🔊 heard</span>' : ''}
+    </div>`).join('');
+}
+
+function renderHeader() {
+    document.getElementById('hdr-units').textContent = units.length;
+    document.getElementById('hdr-located').textContent = units.filter(u => u.location).length + takUnits.length;
+    document.getElementById('hdr-talking').textContent = new Set([...talkState.values()].map(t => t.agency + '|' + t.user)).size;
+    const open = [...emergencies.values()].filter(e => e.active && !e.acked).length;
+    document.getElementById('hdr-emergency').style.display = open ? 'flex' : 'none';
+    document.getElementById('hdr-emergency-count').textContent = open;
+}
+
+// ─── Emergencies ───────────────────────────────────────────────────────────
+
+function handleEmergency(m) {
+    const key = `${m.agency}|${m.user}`;
+    const prev = emergencies.get(key);
+    const e = prev || { agency: m.agency, user: m.user };
+    e.channel = m.channel;
+    e.tak = !!m.tak;
+    e.alert = m.alert || '';
+    e.active = !!m.active;
+    e.at = typeof m.at === 'number' ? m.at : Date.now();
+    if (m.lat !== undefined) { e.lat = m.lat; e.lon = m.lon; }
+    if (e.active) e.acked = false;
+    emergencies.set(key, e);
+    radioLog.unshift({ agency: m.agency, channel: m.channel, user: m.user, start: e.at, end: e.at,
+        emergency: true, active: e.active, heard: false, pcm: [], pcmLen: 0 });
+    if (e.active) alarm();
+    renderEmergencies(); renderHeader(); renderLog(); renderMarkers(true);
+    if (e.active) focusEmergencies();
+}
+
+function renderEmergencies() {
+    const el = document.getElementById('emerg-list');
+    const list = [...emergencies.values()].sort((a, b) => (b.active - a.active) || (b.at - a.at));
+    document.getElementById('emerg-panel').classList.toggle('has-active', list.some(e => e.active && !e.acked));
+    if (!list.length) { el.innerHTML = '<div class="empty-small">No active emergencies</div>'; return; }
+    el.innerHTML = list.map(e => {
+        const k = escAttr(e.agency + '|' + e.user);
+        return `<div class="emerg-item${e.active ? ' active' : ''}${e.acked ? ' acked' : ''}">
+            <div class="emerg-head"><span>${e.active ? '🚨 ' : ''}${escHtml(e.user)}</span><span>${e.active ? (e.acked ? 'ACKNOWLEDGED' : 'ACTIVE') : 'Cleared'}</span></div>
+            <div class="emerg-meta">${e.tak ? escHtml(e.alert || 'TAK alert') : escHtml(channelLabel(e.agency, e.channel))} · ${escHtml(agencyName(e.agency))} · ${fmtTime(e.at)} (${ago(e.at)})</div>
+            <div class="emerg-actions">
+                <button class="mini-btn" onclick="locateEmergency('${k}')">Locate</button>
+                ${e.tak ? '' : `<button class="mini-btn" onclick="selectTx('${escAttr(e.agency)}', ${e.channel})">Talk on channel</button>`}
+                ${e.active && !e.acked ? `<button class="mini-btn" onclick="ackEmergency('${k}')">Acknowledge</button>` : ''}
+                ${!e.active ? `<button class="mini-btn" onclick="emergencies.delete('${k}'); renderEmergencies();">Dismiss</button>` : ''}
+            </div></div>`;
+    }).join('');
+}
+
+function ackEmergency(key) {
+    const e = emergencies.get(key);
+    if (e) e.acked = true;
+    renderEmergencies(); renderHeader();
+}
+
+function locateEmergency(key) {
+    const e = emergencies.get(key);
+    if (!e) return;
+    if (e.tak && e.lat !== undefined && map) { map.setView([e.lat, e.lon], 16); return; }  // where the alert was raised
+    if (markers.has(key) || e.tak) return focusUnit(key);
+    if (e.lat !== undefined && map) map.setView([e.lat, e.lon], 16);
+    else flashMessage(`${e.user} has not shared a position.`);
+}
+
+function focusEmergencies() {
+    document.getElementById('emerg-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function alarm() {
+    try {
+        ensureAudio();
+        const t0 = audioCtx.currentTime;
+        for (let i = 0; i < 3; i++) {
+            const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+            o.type = 'square';
+            o.frequency.setValueAtTime(960, t0 + i * 0.5);
+            o.frequency.setValueAtTime(720, t0 + i * 0.5 + 0.2);
+            g.gain.setValueAtTime(0.12, t0 + i * 0.5);
+            g.gain.setValueAtTime(0, t0 + i * 0.5 + 0.4);
+            o.connect(g).connect(audioCtx.destination);
+            o.start(t0 + i * 0.5); o.stop(t0 + i * 0.5 + 0.42);
+        }
+    } catch (_) {}
+}
+
+// ─── Audio engine ───────────────────────────────────────────────────────────
+// Field units talk 16 kHz Opus. The console decodes and encodes it in the
+// browser (WebCodecs AudioDecoder / AudioEncoder), so the server only re-frames
+// packets. Playback goes through an AudioWorklet that mixes one jitter-buffered
+// queue per talker — replacing per-frame BufferSource scheduling, which
+// doubled and stalled. Wire format: see dispatch_audio.go on the server.
+
+const FRAME_AUDIO_OUT = 0xA0;   // server -> console: field audio
+const FRAME_AUDIO_IN = 0xB0;    // console -> server: our microphone
+const OPUS_RATE = 16000;
+const OPUS_FRAME = 320;         // 20 ms at 16 kHz
+const PREBUFFER_MS = 80;        // per talker, before playback starts
+const MAX_QUEUE_MS = 600;       // beyond this a talker's oldest audio is dropped
+
+let audioCtx = null;
+let playerNode = null;
+let playGain = null;
+let playAnalyser = null;
+let workletReady = null;
+const talkers = new Map();      // "agency/sender" -> { decoder, ts, lastHeard, name, agency }
+
+const WORKLET_SRC = `
+class Player extends AudioWorkletProcessor {
+  constructor(opts) {
+    super();
+    this.q = new Map();          // id -> { bufs: [Float32Array], off, started, queued }
+    this.pre = opts.processorOptions.prebuffer;
+    this.max = opts.processorOptions.maxQueue;
+    this.port.onmessage = (e) => {
+      const { id, samples } = e.data;
+      let t = this.q.get(id);
+      if (!t) { t = { bufs: [], off: 0, started: false, queued: 0 }; this.q.set(id, t); }
+      t.bufs.push(samples); t.queued += samples.length;
+      while (t.queued > this.max && t.bufs.length > 1) { t.queued -= t.bufs[0].length - t.off; t.bufs.shift(); t.off = 0; }
+      if (t.queued >= this.pre) t.started = true;
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    out.fill(0);
+    for (const [id, t] of this.q) {
+      if (!t.started) continue;
+      let i = 0;
+      while (i < out.length && t.bufs.length) {
+        const b = t.bufs[0];
+        const n = Math.min(out.length - i, b.length - t.off);
+        for (let k = 0; k < n; k++) out[i + k] += b[t.off + k];
+        i += n; t.off += n; t.queued -= n;
+        if (t.off >= b.length) { t.bufs.shift(); t.off = 0; }
+      }
+      if (!t.bufs.length) { t.started = false; t.queued = 0; }  // underrun: re-buffer
+    }
+    for (let k = 0; k < out.length; k++) out[k] = Math.max(-1, Math.min(1, out[k]));
+    return true;
+  }
+}
+registerProcessor('mr-player', Player);
+
+class Capture extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch && ch.length) this.port.postMessage(ch.slice(0));
+    return true;
+  }
+}
+registerProcessor('mr-capture', Capture);
+`;
+
+function audioSupported() {
+    return typeof AudioDecoder !== 'undefined' && typeof AudioEncoder !== 'undefined'
+        && typeof AudioWorkletNode !== 'undefined';
+}
+
+// Create the shared AudioContext + worklets. Must first run inside a user
+// gesture (browsers block audio until then).
+function ensureAudio() {
+    if (audioCtx && audioCtx.state !== 'closed') {
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+        return workletReady;
+    }
+    audioCtx = new AudioContext({ latencyHint: 'interactive' });
+    const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+    workletReady = audioCtx.audioWorklet.addModule(url).then(() => {
+        const rate = audioCtx.sampleRate;
+        playerNode = new AudioWorkletNode(audioCtx, 'mr-player', {
+            numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+            processorOptions: { prebuffer: Math.round(rate * PREBUFFER_MS / 1000), maxQueue: Math.round(rate * MAX_QUEUE_MS / 1000) },
+        });
+        playGain = audioCtx.createGain();
+        playGain.gain.value = volumeLevel;
+        playAnalyser = audioCtx.createAnalyser();
+        playAnalyser.fftSize = 256;
+        playerNode.connect(playGain).connect(audioCtx.destination);
+        playGain.connect(playAnalyser);
+        console.log('[dispatch] audio ready at ' + rate + ' Hz');
+    }).catch(e => { console.error('[dispatch] audio worklet failed', e); throw e; });
+    return workletReady;
+}
+
+let audioUnlocked = false;
+
+// Browsers block audio until the user interacts with the page. The banner
+// guarantees a gesture; any click or key also unlocks.
+function unlockAudioOnGesture() {
+    const banner = document.getElementById('audio-unlock-banner');
+    if (!audioSupported()) {
+        if (banner) {
+            banner.textContent = 'This browser cannot play MeshRelay audio. Use a current Chrome, Edge, or Firefox.';
+            banner.style.background = '#B45309';
+            banner.style.display = 'flex';
+        }
+        return;
+    }
+    const unlock = () => {
+        try {
+            ensureAudio();
+            if (audioCtx.state === 'suspended') audioCtx.resume().then(markUnlocked).catch(() => {});
+            else markUnlocked();
+        } catch (_) {}
+    };
+    function markUnlocked() {
+        if (audioCtx && audioCtx.state === 'running') {
+            audioUnlocked = true;
+            if (banner) banner.style.display = 'none';
+            document.removeEventListener('click', unlock);
+            document.removeEventListener('keydown', unlock);
+            document.removeEventListener('touchstart', unlock);
+        }
+    }
+    document.addEventListener('click', unlock);
+    document.addEventListener('keydown', unlock);
+    document.addEventListener('touchstart', unlock);
+    if (banner) { banner.style.display = 'flex'; banner.onclick = unlock; }
+}
+
+// Resample mono float samples (linear; speech-grade).
+function resample(input, fromRate, toRate) {
+    if (fromRate === toRate) return input;
+    const outLen = Math.max(1, Math.round(input.length * toRate / fromRate));
+    const out = new Float32Array(outLen);
+    const step = fromRate / toRate;
+    for (let i = 0; i < outLen; i++) {
+        const pos = i * step, i0 = Math.floor(pos), f = pos - i0;
+        const a = input[Math.min(i0, input.length - 1)], b = input[Math.min(i0 + 1, input.length - 1)];
+        out[i] = a + (b - a) * f;
+    }
+    return out;
+}
+
+// ─── Incoming audio ─────────────────────────────────────────────────────────
+
+function onAudioFrame(buf) {
+    // [0xA0][u32 channel][u16 len|sender][u16 len|agency][opus]
+    const v = new DataView(buf);
+    let o = 1;
+    if (buf.byteLength < 9) return;
+    const channel = v.getUint32(o); o += 4;
+    const sl = v.getUint16(o); o += 2;
+    const sender = new TextDecoder().decode(new Uint8Array(buf, o, sl)); o += sl;
+    const al = v.getUint16(o); o += 2;
+    const agency = new TextDecoder().decode(new Uint8Array(buf, o, al)); o += al;
+    const opus = new Uint8Array(buf, o);
+    if (!opus.length) return;
+
+    noteTalk(agency, channel, sender, true);
+    showReceiving(sender, agency, channel);
+    if (!audioCtx || !playerNode || audioCtx.state !== 'running') {
+        if (!audioUnlocked) { const b = document.getElementById('audio-unlock-banner'); if (b) b.style.display = 'flex'; }
+        return;
+    }
+    const id = agency + '/' + sender;
+    let t = talkers.get(id);
+    if (t) t.channel = channel;
+    if (!t) {
+        t = { ts: 0, lastHeard: 0, name: sender, agency, channel };
+        t.decoder = new AudioDecoder({
+            output: (data) => {
+                try {
+                    const pcm = new Float32Array(data.numberOfFrames);
+                    data.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+                    const samples = resample(pcm, data.sampleRate, audioCtx.sampleRate);
+                    recordAudio(agency, t.channel, sender, samples);
+                    playerNode.port.postMessage({ id, samples }, [samples.buffer]);
+                } finally { data.close(); }
+            },
+            error: (e) => { console.warn('[dispatch] decoder error for ' + id, e); talkers.delete(id); },
+        });
+        t.decoder.configure({ codec: 'opus', sampleRate: OPUS_RATE, numberOfChannels: 1 });
+        talkers.set(id, t);
+    }
+    t.lastHeard = performance.now();
+    try {
+        t.decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: t.ts, data: opus }));
+        t.ts += 20000;
+    } catch (e) {
+        console.warn('[dispatch] decode failed', e);
+    }
+}
+
+// Close decoders for talkers who have gone quiet.
+setInterval(() => {
+    const now = performance.now();
+    for (const [id, t] of talkers) {
+        if (now - t.lastHeard > 10000) {
+            try { t.decoder.close(); } catch (_) {}
+            talkers.delete(id);
+        }
+    }
+}, 5000);
+
+let receivingTimer = null;
+function showReceiving(sender, agency, channel) {
+    document.getElementById('status-receiving').style.display = 'flex';
+    document.getElementById('receiving-from').textContent = `${unitLabel(agency, sender)} · ${channelLabel(agency, channel)}`;
+    if (!isPTT && playAnalyser && !vizAnimId) drawViz(playAnalyser);
+    if (receivingTimer) clearTimeout(receivingTimer);
+    receivingTimer = setTimeout(() => {
+        document.getElementById('status-receiving').style.display = 'none';
+        document.getElementById('receiving-from').textContent = '';
+        if (!isPTT) clearViz();
+    }, 900);
 }
 
 // ─── Microphone + PTT ───────────────────────────────────────────────────────
+
+let micStream = null;
+let micSource = null;
+let micNode = null;
+let micSink = null;
+let micAnalyser = null;
+let encoder = null;
+let encTs = 0;
+let encBuf = new Float32Array(OPUS_FRAME);
+let encFill = 0;
+let isPTT = false;
+let floorState = 'idle';   // idle | requested | granted | queued | denied
 
 async function requestMic() {
     const errEl = document.getElementById('mic-error-text');
     const httpBlocked = location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
     try {
-        // On plain HTTP (non-localhost) browsers either block getUserMedia or
-        // omit navigator.mediaDevices entirely (Firefox). Guard against both so
-        // a missing mic never breaks the rest of the console (incoming audio,
-        // client list) which do not need it.
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error('mediaDevices unavailable (requires HTTPS)');
         }
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-        // Mic ready — keep stream alive but don't connect processor yet
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
         document.getElementById('status-mic-error').style.display = 'none';
     } catch (e) {
         document.getElementById('status-mic-error').style.display = 'flex';
-        if (httpBlocked) {
-            errEl.innerHTML = 'Mic needs HTTPS — outgoing PTT is disabled over HTTP. Incoming audio still works. Enable HTTPS on the server to transmit.';
-        } else {
-            errEl.innerHTML = 'Mic access denied — <a href="#" onclick="requestMic()">Retry</a>';
-        }
+        errEl.innerHTML = httpBlocked
+            ? 'Talking needs HTTPS — open this console over https:// to use the microphone. Listening works.'
+            : 'Microphone blocked — <a href="#" onclick="requestMic(); return false;">Retry</a>';
         console.warn('Mic unavailable:', e);
     }
 }
 
-function startPTT(e) {
+function makeEncoder() {
+    const enc = new AudioEncoder({
+        output: (chunk) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const out = new Uint8Array(1 + chunk.byteLength);
+            out[0] = FRAME_AUDIO_IN;
+            chunk.copyTo(out.subarray(1));
+            ws.send(out.buffer);
+        },
+        error: (e) => { console.error('[dispatch] encoder error', e); stopPTT(); },
+    });
+    enc.configure({
+        codec: 'opus', sampleRate: OPUS_RATE, numberOfChannels: 1, bitrate: 24000,
+        opus: { frameDuration: 20000, complexity: 5 },
+    });
+    return enc;
+}
+
+// Feed captured samples (context rate) to the encoder in 20 ms / 16 kHz frames.
+function onMicSamples(samples) {
+    if (!isPTT || !encoder) return;
+    const pcm = resample(samples, audioCtx.sampleRate, OPUS_RATE);
+    let i = 0;
+    while (i < pcm.length) {
+        const n = Math.min(OPUS_FRAME - encFill, pcm.length - i);
+        encBuf.set(pcm.subarray(i, i + n), encFill);
+        encFill += n; i += n;
+        if (encFill === OPUS_FRAME) {
+            const frame = new AudioData({
+                format: 'f32', sampleRate: OPUS_RATE, numberOfFrames: OPUS_FRAME,
+                numberOfChannels: 1, timestamp: encTs, data: encBuf,
+            });
+            encTs += 20000;
+            try { encoder.encode(frame); } finally { frame.close(); }
+            encBuf = new Float32Array(OPUS_FRAME);
+            encFill = 0;
+        }
+    }
+}
+
+async function startPTT(e) {
     if (e) e.preventDefault();
     if (isPTT) return;
-    // Mic is unavailable over plain HTTP. Don't keep re-requesting it on every
-    // press — that disrupts the page. Just show the hint and bail.
+    if (!audioSupported()) return;
     if (!micStream) {
         document.getElementById('status-mic-error').style.display = 'flex';
+        if (location.protocol === 'https:') requestMic();
         return;
     }
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !txKey) return;
 
     isPTT = true;
-    document.getElementById('ptt-btn').classList.add('active');
-    document.getElementById('status-ready').style.display = 'none';
-    document.getElementById('status-transmitting').style.display = 'flex';
-
+    setPttUi('requested');
+    ws.send(JSON.stringify({ type: 'ptt', down: true }));
     try {
-        audioCtxOut = new AudioContext({ sampleRate: 32000 }); // match Android's 32kHz sample rate
-        const src = audioCtxOut.createMediaStreamSource(micStream);
-
-        // Analyser for visualizer
-        vizAnalyser = audioCtxOut.createAnalyser();
-        vizAnalyser.fftSize = 256;
-        src.connect(vizAnalyser);
-
-        micProcessor = audioCtxOut.createScriptProcessor(1024, 1, 1);
-        micProcessor.onaudioprocess = (ev) => {
-            if (!isPTT || !ws || ws.readyState !== WebSocket.OPEN) return;
-            const float32 = ev.inputBuffer.getChannelData(0);
-            ws.send(float32ToInt16(float32).buffer);
-        };
-        src.connect(micProcessor);
-        micProcessor.connect(audioCtxOut.destination);
-        drawViz();
+        await ensureAudio();
+        if (!isPTT) return;                      // released while starting
+        encoder = makeEncoder();
+        encTs = 0; encFill = 0;
+        micSource = audioCtx.createMediaStreamSource(micStream);
+        micNode = new AudioWorkletNode(audioCtx, 'mr-capture', { numberOfInputs: 1, numberOfOutputs: 1 });
+        micNode.port.onmessage = (ev) => onMicSamples(ev.data);
+        micSink = audioCtx.createGain();
+        micSink.gain.value = 0;                  // keep the node pulled, never audible
+        micAnalyser = audioCtx.createAnalyser();
+        micAnalyser.fftSize = 256;
+        micSource.connect(micNode).connect(micSink).connect(audioCtx.destination);
+        micSource.connect(micAnalyser);
+        drawViz(micAnalyser);
     } catch (err) {
         console.error('PTT start error:', err);
         stopPTT();
@@ -309,118 +1062,103 @@ function startPTT(e) {
 function stopPTT() {
     if (!isPTT) return;
     isPTT = false;
-    document.getElementById('ptt-btn').classList.remove('active');
-    document.getElementById('status-ready').style.display = 'flex';
-    document.getElementById('status-transmitting').style.display = 'none';
-
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ptt', down: false }));
     try {
-        if (micProcessor) { micProcessor.disconnect(); micProcessor = null; }
-        if (audioCtxOut)  { audioCtxOut.close(); audioCtxOut = null; }
-        vizAnalyser = null;
+        if (micNode) { micNode.port.onmessage = null; micNode.disconnect(); }
+        if (micSource) micSource.disconnect();
+        if (micSink) micSink.disconnect();
+        if (encoder && encoder.state !== 'closed') { encoder.flush().catch(() => {}).finally(() => { try { encoder.close(); } catch (_) {} }); }
     } catch (_) {}
+    micNode = micSource = micSink = micAnalyser = null;
+    setTimeout(() => { if (!isPTT) encoder = null; }, 200);
+    setPttUi('idle');
     clearViz();
 }
 
-// ─── Incoming audio playback ─────────────────────────────────────────────────
-
-function playIncomingAudio(data) {
-    showReceiving();
-
-    // data = [0x00 type][username_len int16 BE][username bytes][audio_len int32 BE][pcm int16 LE bytes]
-    const view = new DataView(data);
-    let offset = 1; // skip packet type byte
-    if (data.byteLength < 3) return;
-    const usernameLen = view.getInt16(offset, false); offset += 2;
-    if (usernameLen < 0 || offset + usernameLen > data.byteLength) return;
-    const usernameBytes = new Uint8Array(data, offset, usernameLen);
-    const senderName = new TextDecoder().decode(usernameBytes);
-    offset += usernameLen;
-    if (offset + 4 > data.byteLength) return;
-    const audioLen = view.getInt32(offset, false); offset += 4;
-    if (audioLen <= 0 || offset + audioLen > data.byteLength) return;
-
-    // Copy audio bytes to an aligned buffer (offset may not be 2-byte aligned)
-    const rawBytes = new Uint8Array(data, offset, audioLen);
-    const aligned = new ArrayBuffer(audioLen);
-    new Uint8Array(aligned).set(rawBytes);
-    const pcmSamples = new Int16Array(aligned);
-
-    const float32 = new Float32Array(pcmSamples.length);
-    for (let i = 0; i < pcmSamples.length; i++) float32[i] = pcmSamples[i] / 32768.0;
-
-    document.getElementById('receiving-from').textContent = senderName;
-
-    schedulePCM(float32);
-}
-
-// Schedule each 20ms frame back-to-back on the audio timeline so frames play
-// seamlessly. The cursor (nextPlayTime) only ever moves FORWARD; it is only
-// re-seeded to "now + lead" when it has already fallen at/behind now (i.e. all
-// previously scheduled buffers have finished). This guarantees buffers never
-// overlap — overlap was causing the "doubling" / worsening artifacts.
-function schedulePCM(float32) {
+// Floor / emergency packets from the server, same layout the apps receive.
+function onControlPacket(buf) {
+    const v = new DataView(buf);
+    const type = v.getUint8(0);
+    let o = 1;
+    const str = () => { const n = v.getUint16(o); o += 2; const s = new TextDecoder().decode(new Uint8Array(buf, o, n)); o += n; return s; };
     try {
-        if (!audioCtxIn || audioCtxIn.state === 'closed') {
-            audioCtxIn = new AudioContext({ sampleRate: 32000 });
-            playGain = null;
-            nextPlayTime = 0;
+        if (type === 0x21) {            // granted: [i32 ch][str user][u16 dur][u8 queuePos]
+            o += 4; str(); o += 2;
+            const queuePos = v.getUint8(o);
+            if (isPTT) setPttUi(queuePos > 0 ? 'queued' : 'granted', queuePos);
+        } else if (type === 0x22) {     // denied: [i32 ch][u8 reason][u8 queuePos][str holder]
+            o += 4;
+            const reason = v.getUint8(o++); const queuePos = v.getUint8(o++); const holder = str();
+            if (!isPTT) return;
+            if (queuePos > 0) setPttUi('queued', queuePos, holder);
+            else { setPttUi('denied', 0, holder, reason); stopPttAfterDeny(); }
+        } else if (type === 0x23) {     // preempted: [i32 ch][str by][u8 pri]
+            o += 4; const by = str();
+            if (isPTT) { setPttUi('denied', 0, by, 'preempted'); stopPttAfterDeny(); }
+        } else if (type === 0x26) {     // emergency: [i32 ch][str user][u8 active]
+            const ch = v.getInt32(o); o += 4; const user = str(); const active = v.getUint8(o) === 1;
+            showEmergency(ch, user, active);
         }
-        // The browser can auto-suspend an AudioContext mid-stream (tab
-        // backgrounded, power saving). currentTime then freezes and playback
-        // dies. Resume it; do NOT touch nextPlayTime here (resetting it while
-        // buffers are still scheduled is what produced overlap/doubling).
-        if (audioCtxIn.state !== 'running') {
-            audioCtxIn.resume().catch(() => {});
-            if (audioCtxIn.state === 'suspended' && !audioUnlocked) {
-                const banner = document.getElementById('audio-unlock-banner');
-                if (banner) banner.style.display = 'flex';
-            }
-            return; // skip this frame; resume is async, next frame will schedule
-        }
-
-        if (!playGain) {
-            playGain = audioCtxIn.createGain();
-            playGain.gain.value = volumeLevel;
-            playGain.connect(audioCtxIn.destination);
-        }
-
-        const now = audioCtxIn.currentTime;
-        const frameDur = float32.length / 32000;
-        const LEAD = 0.10;      // target ~100ms jitter buffer ahead of now
-        const MAX_LEAD = 0.50;  // if buffered audio exceeds this, we're backlogged
-
-        // Re-seed only when the cursor has actually drained to/behind realtime.
-        // Because we only move it forward otherwise, scheduled buffers can never
-        // overlap each other.
-        if (nextPlayTime < now + 0.01) {
-            nextPlayTime = now + LEAD;
-        } else if (nextPlayTime - now > MAX_LEAD) {
-            // Sender outpacing playback — drop this frame to bound latency and
-            // the pending-node count. Cursor stays put; realtime catches up.
-            return;
-        }
-
-        const buf = audioCtxIn.createBuffer(1, float32.length, 32000);
-        buf.copyToChannel(float32, 0);
-        const srcNode = audioCtxIn.createBufferSource();
-        srcNode.buffer = buf;
-        srcNode.connect(playGain);
-        srcNode.start(nextPlayTime);
-        nextPlayTime += frameDur;
-    } catch (e) {
-        console.warn('[dispatch] playback error', e);
-    }
+    } catch (e) { console.warn('[dispatch] bad control packet', e); }
 }
 
-let receivingTimer = null;
-function showReceiving() {
-    document.getElementById('status-receiving').style.display = 'flex';
-    if (receivingTimer) clearTimeout(receivingTimer);
-    receivingTimer = setTimeout(() => {
-        document.getElementById('status-receiving').style.display = 'none';
-        document.getElementById('receiving-from').textContent = '';
-    }, 1500);
+let denyTimer = null;
+function stopPttAfterDeny() {
+    // Stop sending, but keep the "busy" message on screen for a moment.
+    const keepUi = floorState;
+    isPTT = true; stopPTT();
+    floorState = keepUi;
+    renderFloorState(lastFloorDetail);
+    if (denyTimer) clearTimeout(denyTimer);
+    denyTimer = setTimeout(() => { if (!isPTT) setPttUi('idle'); }, 2500);
 }
+
+let lastFloorDetail = {};
+function setPttUi(state, queuePos = 0, holder = '', reason = null) {
+    floorState = state;
+    lastFloorDetail = { queuePos, holder, reason };
+    renderFloorState(lastFloorDetail);
+}
+
+function renderFloorState({ queuePos, holder, reason }) {
+    const btn = document.getElementById('ptt-btn');
+    const tx = document.getElementById('status-transmitting');
+    const txText = document.getElementById('transmitting-text');
+    const ready = document.getElementById('status-ready');
+    btn.classList.toggle('active', floorState === 'granted' || floorState === 'requested');
+    btn.classList.toggle('busy', floorState === 'denied' || floorState === 'queued');
+    const show = floorState !== 'idle';
+    tx.style.display = show ? 'flex' : 'none';
+    ready.style.display = show ? 'none' : 'flex';
+    if (!txText) return;
+    if (floorState === 'requested') txText.textContent = 'Transmitting…';
+    else if (floorState === 'granted') txText.textContent = 'Transmitting';
+    else if (floorState === 'queued') txText.textContent = `Queued #${queuePos}` + (holder ? ` — ${holder} is talking` : '');
+    else if (floorState === 'denied') txText.textContent = reason === 'preempted'
+        ? `Interrupted by ${holder || 'a higher priority user'}`
+        : (reason === 1 ? 'Not allowed to talk on this channel' : `Channel busy${holder ? ' — ' + holder + ' is talking' : ''}`);
+}
+
+function showEmergency(ch, user, active) {
+    handleEmergency({ agency: txAgency(), channel: ch, user, active });
+}
+
+// Hold Space to talk (when not typing in a field).
+document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space' || e.repeat) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    e.preventDefault();
+    startPTT();
+});
+document.addEventListener('keyup', (e) => {
+    if (e.code !== 'Space') return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    e.preventDefault();
+    stopPTT();
+});
+window.addEventListener('blur', () => stopPTT());
 
 // ─── Volume ─────────────────────────────────────────────────────────────────
 
@@ -430,19 +1168,289 @@ function setVolume(val) {
     if (playGain) playGain.gain.value = volumeLevel;
 }
 
-// ─── Visualizer ─────────────────────────────────────────────────────────────
+// ─── Unit status ───────────────────────────────────────────────────────────
 
-function initViz() {
-    clearViz();
+const STATUS_NAMES = ['No status', 'Available', 'Busy', 'En route', 'On scene', 'Out of service'];
+const STATUS_COLORS = ['#8B949E', '#22C55E', '#F59E0B', '#3B82F6', '#A78BFA', '#EF4444'];
+function statusColor(code) { return STATUS_COLORS[code] || '#8B949E'; }
+
+function setUnitStatus(agency, user, code) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'status', agency, user, code: parseInt(code, 10) }));
 }
+
+function onStatus(m) {
+    const u = units.find(x => x.agency_id === m.agency && x.username === m.user);
+    if (u) u.status = m.code ? { code: m.code, name: m.name, by: m.by, at: m.at } : null;
+    radioLog.unshift({ agency: m.agency, channel: u ? u.channel : 0, user: m.user, start: Date.now(), end: Date.now(),
+        note: `Status: ${m.name || 'cleared'}${m.by ? ' (by ' + m.by + ')' : ''}`, heard: false, pcm: [], pcmLen: 0 });
+    renderUnits(); renderLog();
+}
+
+// ─── Messages ──────────────────────────────────────────────────────────────
+
+const messages = [];
+
+// Incoming messages count as read once this console is on screen and in
+// focus; the unit then sees "Read" (the server tells it, once).
+function consoleIsLooking() { return document.visibilityState === 'visible' && document.hasFocus(); }
+
+function markVisibleMessagesRead() {
+    if (!consoleIsLooking() || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const ids = messages.filter(m => m.dir === 'in' && !m.read && !m.readSent).map(m => m.id);
+    if (!ids.length) return;
+    messages.forEach(m => { if (ids.includes(m.id)) m.readSent = true; });
+    ws.send(JSON.stringify({ type: 'read', ids }));
+}
+document.addEventListener('visibilitychange', () => { markVisibleMessagesRead(); renderMessages(); });
+window.addEventListener('focus', () => { markVisibleMessagesRead(); renderMessages(); });
+
+function onMessage(m, live) {
+    messages.push(m);
+    if (messages.length > 300) messages.shift();
+    if (live && m.dir === 'in') chime();
+    if (live) { markVisibleMessagesRead(); renderMessages(); }
+}
+
+function onMessageRead(id) {
+    const m = messages.find(x => x.id === id);
+    if (m) m.read = true;
+    renderMessages();
+}
+
+function renderMessages() {
+    const el = document.getElementById('msg-list');
+    const badge = document.getElementById('msg-unread');
+    const unread = messages.filter(m => m.dir === 'in' && !m.read && !m.readSent).length;
+    badge.style.display = unread ? 'inline' : 'none';
+    badge.textContent = unread;
+    if (!messages.length) { el.innerHTML = '<div class="empty-small">No messages yet</div>'; return; }
+    el.innerHTML = messages.slice(-80).map(m => {
+        const who = m.dir === 'in'
+            ? (m.tak_uid
+                ? `<b onclick="messageTak('${escAttr(m.agency)}', '${escAttr(m.tak_uid)}', '${escAttr(m.from)}')">${escHtml(m.from)}</b> <span class="tak-tag">TAK</span> → Dispatch`
+                : `<b onclick="messageUnit('${escAttr(m.agency)}', '${escAttr(m.from)}')">${escHtml(m.from)}</b> → Dispatch`)
+            : `${escHtml(m.from)} → <b>${escHtml(m.to)}</b>${m.queued ? ` · ${m.queued} offline (will deliver)` : ''}${m.sent === 0 && !m.queued ? ' · nobody reached' : ''}`;
+        const unreadCls = m.dir === 'in' && !m.read && !m.readSent ? ' unread' : '';
+        return `<div class="msg ${m.dir}${unreadCls}"><div class="msg-meta">${who} · ${fmtTime(m.at)}</div>${escHtml(m.text)}</div>`;
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+}
+
+function renderMsgTargets() {
+    const sel = document.getElementById('msg-target');
+    if (!sel || sel === document.activeElement) return;
+    const prev = sel.value;
+    let html = '';
+    if (txKey) {
+        const [agency, ch] = splitKey(txKey);
+        if (ch !== 'all') html += `<option value="ch|${escHtml(txKey)}">Everyone on ${escHtml(channelLabel(agency, ch))}</option>`;
+    }
+    for (const a of directory.agencies) html += `<option value="all|${escHtml(a.id)}">All units · ${escHtml(a.name)}</option>`;
+    for (const u of [...units].sort((x, y) => x.username.localeCompare(y.username))) {
+        html += `<option value="unit|${escHtml(u.agency_id)}|${escHtml(u.username)}">${escHtml(unitLabel(u.agency_id, u.username))}</option>`;
+    }
+    for (const t of [...takUnits].sort((x, y) => x.callsign.localeCompare(y.callsign))) {
+        html += `<option value="tak|${escHtml(t.agency)}|${escHtml(t.uid)}">${escHtml(t.callsign)} (TAK)</option>`;
+    }
+    sel.innerHTML = html;
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function messageUnit(agency, user) {
+    renderMsgTargets();
+    const sel = document.getElementById('msg-target');
+    const v = `unit|${agency}|${user}`;
+    if (![...sel.options].some(o => o.value === v)) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = `${user} (offline)`;
+        sel.appendChild(o);
+    }
+    sel.value = v;
+    document.getElementById('msg-text').focus();
+}
+
+function messageTak(agency, uid, callsign) {
+    renderMsgTargets();
+    const sel = document.getElementById('msg-target');
+    const v = `tak|${agency}|${uid}`;
+    if (![...sel.options].some(o => o.value === v)) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = `${callsign || uid} (TAK)`;
+        sel.appendChild(o);
+    }
+    sel.value = v;
+    document.getElementById('msg-text').focus();
+}
+
+function takPopup(uid) {
+    const t = takUnits.find(x => x.uid === uid);
+    if (!t) return 'No longer reporting';
+    const rows = [
+        [t.group, t.role].filter(Boolean).join(' · '),
+        `TAK user${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''}${t.device ? ' · ' + escHtml(t.device) : ''}`,
+        `Position ${ago(Date.parse(t.at))}${t.stale ? ' (stale)' : ''}`,
+        t.speed > 0.5 ? `Moving ${Math.round(t.speed * 2.237)} mph, heading ${Math.round(t.course || 0)}°` : '',
+        t.battery ? `Battery ${t.battery}%` : '',
+        `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)}`,
+    ].filter(Boolean).map(r => `<div class="popup-row">${escHtml(r)}</div>`).join('');
+    return `<div class="popup-title">${escHtml(t.callsign)} <span class="tak-tag">TAK</span></div>${rows}
+        <div class="popup-actions"><button onclick="messageTak('${escAttr(t.agency)}', '${escAttr(t.uid)}', '${escAttr(t.callsign)}')">Message</button></div>`;
+}
+
+// ATAK team colors.
+const TAK_TEAMS = { white: '#FFFFFF', yellow: '#FACC15', orange: '#F97316', magenta: '#D946EF', red: '#EF4444', maroon: '#9F1239',
+    purple: '#8B5CF6', 'dark blue': '#1E40AF', blue: '#3B82F6', cyan: '#22D3EE', teal: '#14B8A6', green: '#22C55E',
+    'dark green': '#166534', brown: '#92400E' };
+function takTeamColor(group) { return TAK_TEAMS[(group || '').toLowerCase()] || '#22D3EE'; }
+
+function sendMessage() {
+    const input = document.getElementById('msg-text');
+    const text = input.value.trim();
+    const target = document.getElementById('msg-target').value;
+    if (!text || !target || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const parts = target.split('|');
+    const msg = { type: 'message', text };
+    if (parts[0] === 'unit') msg.unit = { agency: parts[1], user: parts.slice(2).join('|') };
+    else if (parts[0] === 'tak') msg.tak = { agency: parts[1], uid: parts.slice(2).join('|') };
+    else if (parts[0] === 'ch') msg.to_channel = parts[1];
+    else msg.to_agency = parts[1];
+    ws.send(JSON.stringify(msg));
+    input.value = '';
+}
+
+function chime() {
+    try {
+        ensureAudio();
+        const t0 = audioCtx.currentTime;
+        [880, 1320].forEach((f, i) => {
+            const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+            o.frequency.value = f;
+            g.gain.setValueAtTime(0.08, t0 + i * 0.12);
+            g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.12 + 0.18);
+            o.connect(g).connect(audioCtx.destination);
+            o.start(t0 + i * 0.12); o.stop(t0 + i * 0.12 + 0.2);
+        });
+    } catch (_) {}
+}
+
+// ─── Server recordings ─────────────────────────────────────────────────────
+
+// A finished recording: attach it to its live log entry so it can be replayed
+// even if this console was not monitoring that channel.
+function onRecording(r) {
+    for (const e of radioLog) {
+        if (!e.recId && !e.emergency && !e.note && e.agency === r.agency && e.user === r.user
+            && (e.channel === r.channel || e.channel === 'all')
+            && Math.abs(e.start - r.start) < 3000) {
+            e.recId = r.id;
+            break;
+        }
+    }
+    renderLog();
+}
+
+function showLogTab(name) {
+    document.querySelectorAll('.log-tab').forEach(t => t.classList.toggle('active', t.dataset.logtab === name));
+    const live = name === 'live';
+    document.getElementById('live-wrap').style.display = live ? 'block' : 'none';
+    document.getElementById('live-tools').style.display = live ? 'flex' : 'none';
+    document.getElementById('history-wrap').style.display = live ? 'none' : 'block';
+    document.getElementById('history-tools').style.display = live ? 'none' : 'flex';
+    if (!live) {
+        const d = document.getElementById('hist-date');
+        if (!d.value) d.value = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+        const sel = document.getElementById('hist-channel');
+        const prev = sel.value;
+        sel.innerHTML = '<option value="">All channels</option>' + directory.channels.map(c =>
+            `<option value="${escHtml(c.agency)}|${c.channel}">${escHtml(channelLabel(c.agency, c.channel))}${!currentAgency ? ' · ' + escHtml(agencyName(c.agency)) : ''}</option>`).join('');
+        sel.value = prev;
+        searchRecordings();
+    }
+}
+
+let historyRows = [];
+async function searchRecordings() {
+    const date = document.getElementById('hist-date').value;
+    const ch = document.getElementById('hist-channel').value;
+    const unit = document.getElementById('hist-unit').value.trim();
+    const q = new URLSearchParams({ date, limit: 500 });
+    if (ch) { const [a, n] = ch.split('|'); q.set('agency', a); q.set('channel', n); }
+    if (unit) q.set('user', unit);
+    const body = document.getElementById('hist-body');
+    try {
+        const r = await fetch('/api/recordings?' + q.toString(), { credentials: 'same-origin' });
+        historyRows = await r.json();
+    } catch (e) { historyRows = []; }
+    document.getElementById('hist-empty').style.display = historyRows.length ? 'none' : 'block';
+    document.getElementById('hist-empty').textContent = historyRows.length ? '' : `No recordings on ${date}${ch || unit ? ' matching that filter' : ''}.`;
+    body.innerHTML = historyRows.map((r, i) => `<tr>
+        <td>${fmtTime(r.start)}</td>
+        <td class="log-ch">${escHtml(channelLabel(r.agency, r.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(r.agency)) : ''}</td>
+        <td><span class="log-unit">${escHtml(r.user)}</span></td>
+        <td>${fmtDur(r.duration_ms)}</td>
+        <td><button class="replay-btn" onclick="playRecording('${escAttr(r.id)}')">▶ Play</button></td></tr>`).join('');
+}
+
+// Fetch a recording, decode its Opus frames, and play it (gaps preserved).
+async function playRecording(id) {
+    if (!audioSupported()) return;
+    await ensureAudio();
+    let buf;
+    try {
+        const r = await fetch(`/api/recordings/${encodeURIComponent(id)}/audio`, { credentials: 'same-origin' });
+        if (!r.ok) throw new Error(r.status);
+        buf = await r.arrayBuffer();
+    } catch (e) { console.warn('[dispatch] recording fetch failed', e); return; }
+    const v = new DataView(buf);
+    const frames = [];
+    for (let o = 0; o + 6 <= buf.byteLength;) {
+        const at = v.getUint32(o), n = v.getUint16(o + 4);
+        o += 6;
+        if (o + n > buf.byteLength) break;
+        frames.push({ at, data: new Uint8Array(buf, o, n) });
+        o += n;
+    }
+    if (!frames.length) return;
+    const rate = audioCtx.sampleRate;
+    const total = Math.ceil((frames[frames.length - 1].at + 40) / 1000 * rate);
+    const out = new Float32Array(total);
+    await new Promise((resolve) => {
+        const dec = new AudioDecoder({
+            output: (d) => {
+                try {
+                    const pcm = new Float32Array(d.numberOfFrames);
+                    d.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+                    const res = resample(pcm, d.sampleRate, rate);
+                    const at = Math.round(d.timestamp / 1e6 * rate);
+                    out.set(res.subarray(0, Math.max(0, Math.min(res.length, total - at))), at);
+                } finally { d.close(); }
+            },
+            error: () => resolve(),
+        });
+        dec.configure({ codec: 'opus', sampleRate: OPUS_RATE, numberOfChannels: 1 });
+        for (const f of frames) {
+            try { dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: f.at * 1000, data: f.data })); } catch (_) {}
+        }
+        dec.flush().then(() => { dec.close(); resolve(); }).catch(() => resolve());
+    });
+    if (replaySource) { try { replaySource.stop(); } catch (_) {} }
+    const ab = audioCtx.createBuffer(1, total, rate);
+    ab.getChannelData(0).set(out);
+    replaySource = audioCtx.createBufferSource();
+    replaySource.buffer = ab;
+    replaySource.connect(playGain || audioCtx.destination);
+    replaySource.start();
+}
+
+// ─── Visualizer ────────────────────────────────────────────────────────────
 
 function clearViz() {
     if (vizAnimId) { cancelAnimationFrame(vizAnimId); vizAnimId = null; }
     const canvas = document.getElementById('audio-visualizer');
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Draw flat baseline
-    ctx.strokeStyle = 'rgba(124,58,237,0.25)';
+    ctx.strokeStyle = 'rgba(124,58,237,0.3)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(0, canvas.height / 2);
@@ -450,63 +1458,44 @@ function clearViz() {
     ctx.stroke();
 }
 
-function drawViz() {
-    if (!vizAnalyser) { clearViz(); return; }
+function drawViz(analyser) {
+    if (vizAnimId) { cancelAnimationFrame(vizAnimId); vizAnimId = null; }
+    if (!analyser) { clearViz(); return; }
     const canvas = document.getElementById('audio-visualizer');
     const ctx = canvas.getContext('2d');
-    const bufLen = vizAnalyser.frequencyBinCount;
+    const bufLen = analyser.frequencyBinCount;
     const dataArr = new Uint8Array(bufLen);
-
+    const color = isPTT ? '#EF4444' : '#3B82F6';
     function frame() {
-        if (!vizAnalyser) { clearViz(); return; }
         vizAnimId = requestAnimationFrame(frame);
-        vizAnalyser.getByteTimeDomainData(dataArr);
+        analyser.getByteTimeDomainData(dataArr);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = '#7C3AED';
+        ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.beginPath();
         const sliceW = canvas.width / bufLen;
         let x = 0;
         for (let i = 0; i < bufLen; i++) {
-            const v = dataArr[i] / 128.0;
-            const y = (v * canvas.height) / 2;
+            const y = (dataArr[i] / 128.0) * canvas.height / 2;
             i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
             x += sliceW;
         }
-        ctx.lineTo(canvas.width, canvas.height / 2);
         ctx.stroke();
     }
     frame();
 }
 
-// ─── Logout ─────────────────────────────────────────────────────────────────
+// ─── Logout / utilities ────────────────────────────────────────────────────
 
 function logout() {
     fetch('/api/logout', { method: 'POST', credentials: 'same-origin' })
-    .finally(() => { window.location.href = '/login.html'; });
-}
-
-// ─── Utilities ───────────────────────────────────────────────────────────────
-
-function float32ToInt16(float32) {
-    const int16 = new Int16Array(float32.length);
-    for (let i = 0; i < float32.length; i++) {
-        const s = Math.max(-1, Math.min(1, float32[i]));
-        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    return int16;
+        .finally(() => { window.location.href = '/login.html'; });
 }
 
 function escHtml(str) {
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
-
-const AVATAR_COLORS = [
-    '#7C3AED','#2563EB','#059669','#D97706','#DC2626',
-    '#7C3AED','#0891B2','#BE185D','#065F46','#92400E',
-];
-function avatarColor(username) {
-    let hash = 0;
-    for (const c of username) hash = (hash * 31 + c.charCodeAt(0)) | 0;
-    return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+// For values inside a single-quoted JS string in an HTML attribute.
+function escAttr(str) {
+    return escHtml(String(str ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }

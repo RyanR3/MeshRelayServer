@@ -3,122 +3,173 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MeshRelay Dispatch</title>
-    <link rel="stylesheet" href="dispatch.css">
+    <title>MeshRelay Command</title>
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="dispatch.css?v=14">
 </head>
 <body>
     <!-- Click-to-enable-audio banner (browsers block autoplay until a user gesture) -->
-    <div id="audio-unlock-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; background:#7C3AED; color:#fff; padding:12px 16px; text-align:center; cursor:pointer; font-weight:600; box-shadow:0 2px 8px rgba(0,0,0,0.3);">
-        🔊 Click here to enable incoming audio
-    </div>
+    <div id="audio-unlock-banner" class="top-banner banner-audio" style="display:none;">🔊 Click anywhere to enable radio audio</div>
 
-    <!-- Header -->
-    <header class="dispatch-header">
-        <div class="dispatch-header-left">
-            <img src="logo.png" alt="MeshRelay" class="dispatch-logo">
-            <span class="dispatch-title">Dispatch Console</span>
-            <span class="dispatch-agency" id="dispatch-agency-label"></span>
+    <header class="cmd-header">
+        <div class="cmd-header-left">
+            <img src="logo.png" alt="" class="cmd-logo">
+            <div>
+                <div class="cmd-title">MeshRelay Command</div>
+                <div class="cmd-subtitle"><span id="dispatch-agency-label"></span></div>
+            </div>
         </div>
-        <div class="dispatch-header-right">
+        <div class="cmd-header-center">
+            <div class="hdr-stat"><span class="hdr-stat-value" id="hdr-units">0</span><span class="hdr-stat-label">Units</span></div>
+            <div class="hdr-stat"><span class="hdr-stat-value" id="hdr-located">0</span><span class="hdr-stat-label">On map</span></div>
+            <div class="hdr-stat"><span class="hdr-stat-value" id="hdr-talking">0</span><span class="hdr-stat-label">Talking</span></div>
+            <button class="hdr-emergency" id="hdr-emergency" onclick="focusEmergencies()" style="display:none;">
+                <span class="dot-pulse"></span> <span id="hdr-emergency-count">0</span> EMERGENCY
+            </button>
+        </div>
+        <div class="cmd-header-right">
+            <div class="cmd-clock"><span id="clock-local">--:--:--</span><span id="clock-date"></span></div>
             <span class="dispatch-user" id="dispatch-user-label"></span>
-            <span id="dispatch-ws-status" class="ws-status ws-connecting">Connecting...</span>
-            <button class="dispatch-logout-btn" onclick="logout()">Logout</button>
+            <span id="dispatch-ws-status" class="ws-status ws-connecting">Connecting…</span>
+            <button class="hdr-btn" onclick="logout()">Logout</button>
         </div>
     </header>
 
-    <!-- Main layout -->
-    <div class="dispatch-layout">
-
-        <!-- Left panel: Active Units -->
-        <section class="dispatch-panel units-panel">
-            <div class="panel-header">
-                <h2>Active Units</h2>
-                <span class="unit-count" id="unit-count">0 online</span>
+    <div class="cmd-layout">
+        <!-- Left: channels + units -->
+        <aside class="cmd-left panel">
+            <div class="tabs">
+                <button class="tab active" data-tab="channels" onclick="showLeftTab('channels')">Channels</button>
+                <button class="tab" data-tab="units" onclick="showLeftTab('units')">Units <span class="tab-count" id="units-tab-count">0</span></button>
             </div>
-            <div class="units-filter">
-                <input type="text" id="unit-search" placeholder="Search units..." oninput="filterUnits()">
-                <select id="unit-channel-filter" onchange="filterUnits()">
-                    <option value="">All Channels</option>
-                </select>
-            </div>
-            <div class="units-list" id="units-list">
-                <div class="units-empty">No units connected</div>
-            </div>
-        </section>
-
-        <!-- Right panel: PTT Controls -->
-        <section class="dispatch-panel ptt-panel">
-            <div class="panel-header">
-                <h2>PTT Controls</h2>
-            </div>
-
-            <!-- Channel selector -->
-            <div class="ptt-channel-row">
-                <label class="ptt-label">Transmit Channel</label>
-                <div class="channel-selector">
-                    <button class="ch-btn" onclick="changeChannel(-1)">&#8722;</button>
-                    <span class="channel-display" id="channel-display">CH 0</span>
-                    <button class="ch-btn" onclick="changeChannel(1)">&#43;</button>
+            <div class="tab-body" id="tab-channels">
+                <div class="list-tools">
+                    <input type="text" id="channel-search" placeholder="Filter channels…" oninput="renderChannels()">
+                    <label class="chk" title="Only channels with units, talk, or that you transmit on / monitor"><input type="checkbox" id="channels-active-only" checked onchange="savePref('cmd.inUse', this.checked); renderChannels()"> In use</label>
                 </div>
-                <span class="channel-unit-count" id="channel-unit-count">0 units on this channel</span>
+                <div class="list-hint">Click a channel to transmit on it. 🔈 = monitor (listen only).</div>
+                <div class="channel-tree" id="channel-tree"></div>
             </div>
+            <div class="tab-body" id="tab-units" style="display:none;">
+                <div class="list-tools">
+                    <input type="text" id="unit-search" placeholder="Search units…" oninput="renderUnits()">
+                    <select id="unit-sort" onchange="renderUnits()">
+                        <option value="name">A–Z</option>
+                        <option value="channel">Channel</option>
+                        <option value="recent">Last position</option>
+                        <option value="status">Status</option>
+                    </select>
+                </div>
+                <div class="units-list" id="units-list"></div>
+            </div>
+        </aside>
 
-            <!-- PTT Button -->
-            <div class="ptt-btn-area">
-                <button
-                    id="ptt-btn"
-                    class="ptt-btn"
-                    onmousedown="startPTT()"
-                    onmouseup="stopPTT()"
-                    onmouseleave="stopPTT()"
-                    ontouchstart="startPTT(event)"
-                    ontouchend="stopPTT()"
-                >
-                    <div class="ptt-icon">
-                        <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
-                            <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                            <line x1="12" y1="19" x2="12" y2="22"/>
-                            <line x1="8" y1="22" x2="16" y2="22"/>
-                        </svg>
+        <!-- Center: map + radio log -->
+        <main class="cmd-center">
+            <div class="map-wrap panel">
+                <div id="map"></div>
+                <div class="map-tools">
+                    <button class="map-btn" onclick="fitAllUnits()" title="Zoom to every unit">Fit all</button>
+                    <label class="map-chk" title="Pan to whoever is talking"><input type="checkbox" id="map-follow" onchange="saveUiPrefs()"> Follow talker</label>
+                    <label class="map-chk"><input type="checkbox" id="map-labels" checked onchange="saveUiPrefs(); renderMarkers(true)"> Labels</label>
+                </div>
+                <div class="map-empty" id="map-empty">No unit positions yet. Units appear when their app shares its location with dispatch (Settings → Share location with dispatch).</div>
+            </div>
+            <div class="radio-log panel">
+                <div class="panel-title">
+                    <div class="log-tabs">
+                        <button class="log-tab active" data-logtab="live" onclick="showLogTab('live')">Radio Log</button>
+                        <button class="log-tab" data-logtab="history" onclick="showLogTab('history')">Recordings</button>
                     </div>
+                    <div class="panel-title-tools" id="live-tools">
+                        <select id="log-filter" onchange="renderLog()">
+                            <option value="all">All channels</option>
+                            <option value="heard">Monitored only</option>
+                        </select>
+                        <button class="mini-btn" onclick="exportLog()" title="Download the log as CSV">Export</button>
+                        <button class="mini-btn" onclick="clearLog()">Clear</button>
+                    </div>
+                    <div class="panel-title-tools" id="history-tools" style="display:none;">
+                        <input type="date" id="hist-date" onchange="searchRecordings()">
+                        <select id="hist-channel" onchange="searchRecordings()"><option value="">All channels</option></select>
+                        <input type="text" id="hist-unit" placeholder="Unit" style="width:90px" onkeydown="if(event.key==='Enter')searchRecordings()">
+                        <button class="mini-btn" onclick="searchRecordings()">Search</button>
+                    </div>
+                </div>
+                <div class="log-table-wrap" id="live-wrap">
+                    <table class="log-table">
+                        <thead><tr><th>Time</th><th>Channel</th><th>Unit</th><th>Length</th><th></th></tr></thead>
+                        <tbody id="log-body"></tbody>
+                    </table>
+                    <div class="log-empty" id="log-empty">Transmissions on your channels appear here, with replay.</div>
+                </div>
+                <div class="log-table-wrap" id="history-wrap" style="display:none;">
+                    <table class="log-table">
+                        <thead><tr><th>Time</th><th>Channel</th><th>Unit</th><th>Length</th><th></th></tr></thead>
+                        <tbody id="hist-body"></tbody>
+                    </table>
+                    <div class="log-empty" id="hist-empty">Pick a day and search. Recordings are kept on the server for the period set in Settings.</div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Right: transmit, emergencies, now talking -->
+        <aside class="cmd-right">
+            <section class="panel tx-panel">
+                <div class="panel-title"><span>Transmit</span></div>
+                <div class="tx-channel">
+                    <div class="tx-channel-name" id="tx-channel-name">—</div>
+                    <div class="tx-channel-meta" id="tx-channel-meta"></div>
+                </div>
+                <button id="ptt-btn" class="ptt-btn"
+                        onmousedown="startPTT()" onmouseup="stopPTT()" onmouseleave="stopPTT()"
+                        ontouchstart="startPTT(event)" ontouchend="stopPTT()">
+                    <svg viewBox="0 0 24 24" width="38" height="38" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
+                    </svg>
                     <span class="ptt-label-text">HOLD TO TALK</span>
                 </button>
-                <div class="ptt-hint">Press and hold to transmit on CH <span id="ptt-ch-hint">0</span></div>
-            </div>
+                <div class="ptt-hint">or hold <kbd>Space</kbd></div>
+                <div class="status-indicators">
+                    <div class="status-row" id="status-ready"><span class="status-dot dot-green"></span><span>Ready</span></div>
+                    <div class="status-row" id="status-transmitting" style="display:none;"><span class="status-dot dot-red pulse"></span><span id="transmitting-text">Transmitting</span></div>
+                    <div class="status-row" id="status-receiving" style="display:none;"><span class="status-dot dot-blue pulse"></span><span>Receiving — <span id="receiving-from"></span></span></div>
+                    <div class="status-row" id="status-mic-error" style="display:none;"><span class="status-dot dot-yellow"></span><span id="mic-error-text"></span></div>
+                </div>
+                <canvas id="audio-visualizer" class="audio-viz" width="300" height="44"></canvas>
+                <div class="volume-row">
+                    <span class="vol-label">Volume</span>
+                    <input type="range" id="volume-slider" min="0" max="2" step="0.05" value="1" oninput="setVolume(this.value)">
+                    <span id="volume-display">100%</span>
+                </div>
+            </section>
 
-            <!-- Status indicators -->
-            <div class="status-indicators">
-                <div class="status-row" id="status-ready">
-                    <span class="status-dot dot-green"></span>
-                    <span>Ready</span>
-                </div>
-                <div class="status-row" id="status-transmitting" style="display:none;">
-                    <span class="status-dot dot-red pulse"></span>
-                    <span>Transmitting</span>
-                </div>
-                <div class="status-row" id="status-receiving" style="display:none;">
-                    <span class="status-dot dot-blue pulse"></span>
-                    <span>Receiving — <span id="receiving-from"></span></span>
-                </div>
-                <div class="status-row" id="status-mic-error" style="display:none;">
-                    <span class="status-dot dot-yellow"></span>
-                    <span id="mic-error-text">Mic access denied — <a href="#" onclick="requestMic()">Retry</a></span>
-                </div>
-            </div>
+            <section class="panel emerg-panel" id="emerg-panel">
+                <div class="panel-title"><span>Emergencies</span></div>
+                <div id="emerg-list"><div class="empty-small">No active emergencies</div></div>
+            </section>
 
-            <!-- Volume control for incoming -->
-            <div class="volume-row">
-                <label class="ptt-label">Incoming Volume</label>
-                <input type="range" id="volume-slider" min="0" max="2" step="0.05" value="1" oninput="setVolume(this.value)">
-                <span id="volume-display">100%</span>
-            </div>
+            <section class="panel msg-panel">
+                <div class="panel-title"><span>Messages <span class="tab-count" id="msg-unread" style="display:none;"></span></span></div>
+                <div class="msg-list" id="msg-list"><div class="empty-small">No messages yet</div></div>
+                <div class="msg-compose">
+                    <select id="msg-target"></select>
+                    <div class="msg-row">
+                        <input type="text" id="msg-text" placeholder="Message…" maxlength="2000" onkeydown="if(event.key==='Enter')sendMessage()">
+                        <button class="mini-btn send-btn" onclick="sendMessage()">Send</button>
+                    </div>
+                </div>
+            </section>
 
-            <!-- Audio visualizer -->
-            <canvas id="audio-visualizer" class="audio-viz" width="320" height="60"></canvas>
-        </section>
+            <section class="panel talking-panel">
+                <div class="panel-title"><span>Now Talking</span></div>
+                <div id="talking-list"><div class="empty-small">Quiet</div></div>
+            </section>
+        </aside>
     </div>
 
-    <script src="dispatch.js?v=8"></script>
+    <script src="vendor/leaflet/leaflet.js"></script>
+    <script src="dispatch.js?v=16"></script>
 </body>
 </html>

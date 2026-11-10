@@ -771,6 +771,11 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 		}
 	}
 
+	for _, meshAgency := range meshAgencies {
+		s.fanOutToDispatch(meshAgency, meshCh, sender, opus)
+		s.recordAudio(meshAgency, meshCh, sender, opus)
+	}
+
 	// Zero recipients means the audio arrived and was mapped, but no client is
 	// on (or monitoring) the channel — a different problem from not receiving.
 	agencyLabel := strings.Join(meshAgencies, "+")

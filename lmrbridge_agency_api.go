@@ -389,6 +389,7 @@ func (s *Server) handleDeleteMyLMRBridge(w http.ResponseWriter, r *http.Request)
 		s.mu.Lock()
 		delete(s.clients, kickKeys[i])
 		delete(s.authenticatedAddrs, addr.String())
+		delete(s.authAccounts, addr.String())
 		s.mu.Unlock()
 	}
 

@@ -126,18 +126,229 @@ function navigateTo(pageName) {
 
 function initFloorControlPanel() {
     const sel = document.getElementById('floor-control-agency');
+    const guestSel = document.getElementById('guest-invites-agency');
+    const recSel = document.getElementById('recording-agency');
+    const takSel = document.getElementById('tak-agency');
     if (currentRole === 'super_admin' && sel) {
         fetch('/api/agencies').then(r => r.json()).then(agencies => {
             agenciesList = agencies || [];
-            const current = sel.value;
-            sel.innerHTML = agenciesList.map(a =>
+            const options = agenciesList.map(a =>
                 `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('');
-            if (current && agenciesList.some(a => a.id === current)) sel.value = current;
+            [sel, guestSel, recSel, takSel].forEach(el => {
+                if (!el) return;
+                const current = el.value;
+                el.innerHTML = options;
+                if (current && agenciesList.some(a => a.id === current)) el.value = current;
+            });
             fetchFloorControl();
-        }).catch(() => fetchFloorControl());
+            fetchGuestInvites();
+            fetchRecordingSetting();
+            fetchTak();
+        }).catch(() => { fetchFloorControl(); fetchGuestInvites(); fetchRecordingSetting(); fetchTak(); });
     } else {
         fetchFloorControl();
+        fetchGuestInvites();
+        fetchRecordingSetting();
+        fetchTak();
     }
+}
+
+// --- TAK Server (Settings) ---------------------------------------------------
+
+function takAgencyId() {
+    const sel = document.getElementById('tak-agency');
+    return (currentRole === 'super_admin' && sel && sel.value) ? sel.value : '';
+}
+
+function renderTakState(d) {
+    const el = document.getElementById('tak-state');
+    if (!el) return;
+    if (!d.configured) { el.textContent = 'Not configured'; return; }
+    const exp = d.cert_expires ? ` · certificate valid until ${new Date(d.cert_expires).toLocaleDateString()}` : '';
+    const states = {
+        connected: `Connected — ${d.tak_users || 0} TAK user${d.tak_users === 1 ? '' : 's'} seen`,
+        connecting: 'Connecting…', disabled: 'Off', error: `Not connected: ${d.error || 'error'} (retrying)`,
+    };
+    el.textContent = (states[d.status] || d.status) + exp;
+    el.style.color = d.status === 'connected' ? '#3FB950' : d.status === 'error' ? '#F85149' : '';
+}
+
+function fetchTak() {
+    const host = document.getElementById('tak-host');
+    if (!host) return;
+    const agency = takAgencyId();
+    fetch('/api/my-agency/tak' + (agency ? '?agency=' + encodeURIComponent(agency) : ''))
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('tak-status-msg', d.error, 'error'); return; }
+            host.value = d.host || '';
+            document.getElementById('tak-stream-port').value = d.stream_port || 8089;
+            document.getElementById('tak-enroll-port').value = d.enroll_port || 8446;
+            document.getElementById('tak-api-port').value = d.api_port || 8443;
+            const gs = document.getElementById('tak-groups-section');
+            gs.style.display = d.enrolled ? 'block' : 'none';
+            if (d.enrolled && d.status === 'connected') loadTakGroups();
+            else if (d.enrolled) document.getElementById('tak-groups-list').innerHTML =
+                '<span style="color:#8B949E;font-size:12px;">Groups load once the connection is up.</span>';
+            document.getElementById('tak-username').value = d.username || '';
+            document.getElementById('tak-password').value = '';
+            document.getElementById('tak-callsign').value = d.callsign || 'MeshRelay Dispatch';
+            document.getElementById('tak-enabled').checked = d.configured ? !!d.enabled : true;
+            document.getElementById('tak-password').placeholder = d.enrolled ? 'only to re-enroll' : 'needed to enroll';
+            renderTakState(d);
+        })
+        .catch(err => showStatus('tak-status-msg', 'Failed to load: ' + err.message, 'error'));
+}
+
+function saveTak() {
+    const body = {
+        host: document.getElementById('tak-host').value.trim(),
+        stream_port: parseInt(document.getElementById('tak-stream-port').value, 10) || 8089,
+        enroll_port: parseInt(document.getElementById('tak-enroll-port').value, 10) || 8446,
+        api_port: parseInt(document.getElementById('tak-api-port').value, 10) || 8443,
+        username: document.getElementById('tak-username').value.trim(),
+        password: document.getElementById('tak-password').value,
+        callsign: document.getElementById('tak-callsign').value.trim(),
+        enabled: document.getElementById('tak-enabled').checked,
+    };
+    const agency = takAgencyId();
+    if (agency) body.agency_id = agency;
+    const btn = document.getElementById('tak-save-btn');
+    btn.disabled = true; btn.textContent = body.password ? 'Enrolling…' : 'Saving…';
+    fetch('/api/my-agency/tak', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('tak-status-msg', d.error, 'error'); return; }
+            document.getElementById('tak-password').value = '';
+            renderTakState(d);
+            showStatus('tak-status-msg', d.status === 'connected' ? 'Connected to TAK Server' : 'Saved', d.status === 'error' ? 'error' : 'success');
+            setTimeout(fetchTak, 4000);
+        })
+        .catch(err => showStatus('tak-status-msg', 'Failed: ' + err.message, 'error'))
+        .finally(() => { btn.disabled = false; btn.textContent = 'Save & Connect'; });
+}
+
+function loadTakGroups() {
+    const list = document.getElementById('tak-groups-list');
+    const agency = takAgencyId();
+    list.innerHTML = '<span style="color:#8B949E;font-size:12px;">Loading…</span>';
+    fetch('/api/my-agency/tak/groups' + (agency ? '?agency=' + encodeURIComponent(agency) : ''))
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(d.error)}</span>`; return; }
+            const groups = d.groups || [];
+            if (!groups.length) { list.innerHTML = '<span style="color:#8B949E;font-size:12px;">This TAK account is not in any groups.</span>'; return; }
+            list.innerHTML = groups.map(g => `<label><input type="checkbox" value="${escapeHtml(g.name)}" ${g.active ? 'checked' : ''}>
+                <span>${escapeHtml(g.name)}${g.description ? `<small>${escapeHtml(g.description)}</small>` : ''}</span></label>`).join('');
+        })
+        .catch(err => { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(err.message)}</span>`; });
+}
+
+function saveTakGroups() {
+    const groups = [...document.querySelectorAll('#tak-groups-list input:checked')].map(i => i.value);
+    const body = { groups };
+    const agency = takAgencyId();
+    if (agency) body.agency_id = agency;
+    const btn = document.getElementById('tak-groups-save');
+    btn.disabled = true;
+    fetch('/api/my-agency/tak/groups', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('tak-status-msg', d.error, 'error'); return; }
+            showStatus('tak-status-msg', `Dispatch is now in: ${groups.join(', ')}`, 'success');
+            loadTakGroups();
+        })
+        .catch(err => showStatus('tak-status-msg', 'Failed: ' + err.message, 'error'))
+        .finally(() => { btn.disabled = false; });
+}
+
+function removeTak() {
+    if (!confirm('Disconnect from the TAK Server and forget its certificate?')) return;
+    const body = { remove: true };
+    const agency = takAgencyId();
+    if (agency) body.agency_id = agency;
+    fetch('/api/my-agency/tak', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => r.json()).then(d => { renderTakState(d); fetchTak(); showStatus('tak-status-msg', 'TAK connection removed', 'success'); });
+}
+
+// --- Radio recording (Settings) ----------------------------------------------
+
+function recordingAgencyId() {
+    const sel = document.getElementById('recording-agency');
+    return (currentRole === 'super_admin' && sel && sel.value) ? sel.value : '';
+}
+
+function fetchRecordingSetting() {
+    const toggle = document.getElementById('recording-toggle');
+    if (!toggle) return;
+    const agency = recordingAgencyId();
+    fetch('/api/my-agency/recording' + (agency ? '?agency=' + encodeURIComponent(agency) : ''))
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('recording-status', data.error, 'error'); return; }
+            toggle.checked = !!data.enabled;
+            document.getElementById('recording-retention').textContent = data.retention_days;
+        })
+        .catch(err => showStatus('recording-status', 'Failed to load: ' + err.message, 'error'));
+}
+
+function saveRecordingSetting() {
+    const toggle = document.getElementById('recording-toggle');
+    const body = { enabled: toggle.checked };
+    const agency = recordingAgencyId();
+    if (agency) body.agency_id = agency;
+    fetch('/api/my-agency/recording', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('recording-status', data.error, 'error'); fetchRecordingSetting(); return; }
+        showStatus('recording-status', toggle.checked ? 'Radio traffic is being recorded' : 'Recording is off for this agency', 'success');
+    })
+    .catch(err => { showStatus('recording-status', 'Failed to save: ' + err.message, 'error'); fetchRecordingSetting(); });
+}
+
+// --- Guest invites from the app (Settings) ---------------------------------
+
+function guestInvitesAgencyId() {
+    const sel = document.getElementById('guest-invites-agency');
+    return (currentRole === 'super_admin' && sel && sel.value) ? sel.value : '';
+}
+
+function fetchGuestInvites() {
+    const toggle = document.getElementById('guest-invites-toggle');
+    if (!toggle) return;
+    const agency = guestInvitesAgencyId();
+    fetch('/api/my-agency/guest-invites' + (agency ? '?agency=' + encodeURIComponent(agency) : ''))
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('guest-invites-status', data.error, 'error'); return; }
+            toggle.checked = !!data.enabled;
+            const count = document.getElementById('guest-invites-count');
+            if (count) count.textContent = data.active_guests
+                ? `Active guests right now: ${data.active_guests}.` : '';
+        })
+        .catch(err => showStatus('guest-invites-status', 'Failed to load: ' + err.message, 'error'));
+}
+
+function saveGuestInvites() {
+    const toggle = document.getElementById('guest-invites-toggle');
+    const body = { enabled: toggle.checked };
+    const agency = guestInvitesAgencyId();
+    if (agency) body.agency_id = agency;
+    fetch('/api/my-agency/guest-invites', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('guest-invites-status', data.error, 'error'); fetchGuestInvites(); return; }
+        showStatus('guest-invites-status', toggle.checked
+            ? 'Members can invite guests from the app'
+            : 'Guest invites are off (existing guests keep access until they expire)', 'success');
+    })
+    .catch(err => { showStatus('guest-invites-status', 'Failed to save: ' + err.message, 'error'); fetchGuestInvites(); });
 }
 
 function floorControlAgencyQuery() {
@@ -303,6 +514,8 @@ function updateDashboard(data) {
     updateChannels(data.channels);
     updateClients(data.clients);
     updateUsersPageStats();
+    const ocm = document.getElementById('onlineClientsModal');
+    if (ocm && ocm.classList.contains('active')) renderOnlineClientsModal();
 
     // Network activity chart
     if (data.network_timeseries) {
@@ -471,8 +684,137 @@ function getAvatarColor(username) {
     return avatarColors[Math.abs(hash) % avatarColors.length];
 }
 
-function isUserOnline(username) {
-    return connectedClients.some(c => c.username === username);
+// Online = a live connection signed in with this ACCOUNT. The callsign a phone
+// joins under can differ from its login account (login "Dev1", callsign
+// "Xcover"), so match the connection's account, not just its callsign.
+function isUserOnline(user) {
+    if (typeof user === 'string') user = { username: user };
+    return connectedClients.some(c =>
+        (c.account || c.username) === user.username &&
+        (!user.agency_id || !c.agency_id || c.agency_id === user.agency_id));
+}
+
+// --- Users table: sort, group, filter --------------------------------------
+// Column headers sort (click again to reverse); "Group by" stacks users under
+// headers (online/offline, agency, role, guests) that can be collapsed; the
+// stat cards filter (all / online / offline / new). Choices are remembered.
+
+function loadPref(key, fallback) {
+    try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (e) { return fallback; }
+}
+function savePref(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+}
+
+let usersSort = loadPref('usersSortV2', { key: 'name', dir: 1 });
+let usersGroup = loadPref('usersGroup', 'none');
+let usersFilter = 'all';               // per visit: all | online | offline | new
+const collapsedUserGroups = new Set();
+
+const USER_SORT_DEFAULT_DIR = { last_login: -1, created: -1, status: -1 };
+
+function sortUsersBy(key) {
+    if (usersSort.key === key) usersSort = { key, dir: -usersSort.dir };
+    else usersSort = { key, dir: USER_SORT_DEFAULT_DIR[key] || 1 };
+    savePref('usersSortV2', usersSort);
+    currentUsersPage = 1;
+    renderUsersPage();
+}
+
+function setUsersGroup(value) {
+    usersGroup = value;
+    savePref('usersGroup', value);
+    collapsedUserGroups.clear();
+    currentUsersPage = 1;
+    renderUsersPage();
+}
+
+function setUsersFilter(value) {
+    usersFilter = (usersFilter === value) ? 'all' : value;
+    currentUsersPage = 1;
+    renderUsersPage();
+}
+
+function toggleUserGroup(id) {
+    if (collapsedUserGroups.has(id)) collapsedUserGroups.delete(id); else collapsedUserGroups.add(id);
+    renderUsersPage();
+}
+
+function userTime(v) { const n = v ? Date.parse(v) : NaN; return isNaN(n) ? 0 : n; }
+function userLabel(u) { return (u.name || u.username || '').toLowerCase(); }
+const ROLE_ORDER = { super_admin: 0, admin: 1, dispatch: 2, user: 3 };
+
+function sortUsers(list) {
+    const { key, dir } = usersSort;
+    const cmpText = (x, y) => x.localeCompare(y, undefined, { sensitivity: 'base', numeric: true });
+    const value = {
+        name: u => userLabel(u),
+        username: u => (u.username || '').toLowerCase(),
+        status: u => (isUserOnline(u) ? 1 : 0),
+        agency: u => (u.agency_id || 'default').toLowerCase(),
+        role: u => ROLE_ORDER[u.role || 'user'] ?? 9,
+        last_login: u => (isUserOnline(u) ? Date.now() + 1 : userTime(u.last_login)),
+        created: u => userTime(u.created_at),
+    }[key] || (u => userLabel(u));
+    return list.slice().sort((a, b) => {
+        const va = value(a), vb = value(b);
+        const c = (typeof va === 'string') ? cmpText(va, vb) : (va - vb);
+        return (c * dir) || cmpText(userLabel(a), userLabel(b));
+    });
+}
+
+// Group key + label for the current grouping, or null when not grouping.
+function userGroupOf(u) {
+    switch (usersGroup) {
+        case 'status': return isUserOnline(u) ? { id: 'online', label: 'Online', order: 0 } : { id: 'offline', label: 'Offline', order: 1 };
+        case 'agency': {
+            const a = u.agency_id || 'default';
+            const ag = (typeof agenciesList !== 'undefined' && agenciesList || []).find(x => x.id === a);
+            return { id: 'agency:' + a, label: ag && ag.name && ag.name !== a ? `${ag.name} (${a})` : a, order: a.toLowerCase() };
+        }
+        case 'role': {
+            const r = u.role || 'user';
+            const names = { super_admin: 'Super Admins', admin: 'Admins', dispatch: 'Dispatch', user: 'Users' };
+            return { id: 'role:' + r, label: names[r] || r, order: ROLE_ORDER[r] ?? 9 };
+        }
+        case 'guest': return u.guest_expires_at ? { id: 'guest', label: 'Guests', order: 1 } : { id: 'member', label: 'Members', order: 0 };
+        default: return null;
+    }
+}
+
+// --- Online clients popup ---------------------------------------------------
+
+function showOnlineClientsModal() {
+    renderOnlineClientsModal();
+    showModal('onlineClientsModal');
+}
+
+function renderOnlineClientsModal() {
+    const list = document.getElementById('online-clients-list');
+    const count = document.getElementById('online-clients-count');
+    if (!list) return;
+    const clients = (connectedClients || []).slice()
+        .sort((a, b) => (a.username || '').localeCompare(b.username || '', undefined, { sensitivity: 'base' }));
+    if (count) count.textContent = `(${clients.length})`;
+    if (clients.length === 0) {
+        list.innerHTML = '<div class="empty-state"><div>No one is connected</div></div>';
+        return;
+    }
+    list.innerHTML = clients.map(c => {
+        const agency = currentRole === 'super_admin' && c.agency_id ? ` <span class="agency-badge">${escapeHtml(c.agency_id)}</span>` : '';
+        const account = c.account && c.account !== c.username ? ` · signed in as <strong>${escapeHtml(c.account)}</strong>` : '';
+        const since = c.connected_at ? timeSince(new Date(c.connected_at)) : '';
+        return `
+            <div class="client-item">
+                <div class="client-username">${statusDotHtml(true)} ${escapeHtml(c.username)}${agency}
+                    <span class="client-channel">Ch ${escapeHtml(String(c.channel))}</span></div>
+                <div class="client-info">${escapeHtml(c.address || '')}${since ? ' · connected ' + escapeHtml(since) : ''}${account}</div>
+            </div>`;
+    }).join('');
+}
+
+function statusDotHtml(online) {
+    return online ? '<span class="status-dot-online"></span>' : '<span class="status-dot-offline"></span>';
 }
 
 function filterUsersTable() {
@@ -545,26 +887,80 @@ function fetchUsers() {
 
 function getFilteredUsers() {
     const query = (document.getElementById('users-search').value || '').toLowerCase();
-    if (!query) return allUsers;
-    return allUsers.filter(u => u.username.toLowerCase().includes(query) || (u.name || '').toLowerCase().includes(query) || (u.agency_id || '').toLowerCase().includes(query));
+    const weekAgo = Date.now() - 7 * 86400000;
+    let list = allUsers;
+    if (usersFilter === 'online') list = list.filter(u => isUserOnline(u));
+    else if (usersFilter === 'offline') list = list.filter(u => !isUserOnline(u));
+    else if (usersFilter === 'new') list = list.filter(u => userTime(u.created_at) > weekAgo);
+    if (query) list = list.filter(u => u.username.toLowerCase().includes(query) || (u.name || '').toLowerCase().includes(query) || (u.agency_id || '').toLowerCase().includes(query));
+    return sortUsers(list);
+}
+
+// Rows to show: users, with group headers in front of each group when grouping.
+function getUserTableItems() {
+    const users = getFilteredUsers();
+    if (usersGroup === 'none') return users.map(u => ({ type: 'user', user: u }));
+    const groups = new Map();
+    for (const u of users) {
+        const g = userGroupOf(u);
+        if (!groups.has(g.id)) groups.set(g.id, { ...g, users: [] });
+        groups.get(g.id).users.push(u);
+    }
+    const ordered = [...groups.values()].sort((x, y) =>
+        typeof x.order === 'string' ? x.order.localeCompare(y.order) : x.order - y.order);
+    const items = [];
+    for (const g of ordered) {
+        const collapsed = collapsedUserGroups.has(g.id);
+        const online = g.users.filter(u => isUserOnline(u)).length;
+        items.push({ type: 'group', group: g, collapsed, online });
+        if (!collapsed) g.users.forEach(u => items.push({ type: 'user', user: u }));
+    }
+    return items;
 }
 
 function renderUsersPage() {
-    const filtered = getFilteredUsers();
-    const total = filtered.length;
+    const groupSel = document.getElementById('users-group');
+    if (groupSel && groupSel.value !== usersGroup) groupSel.value = usersGroup;
+    const items = getUserTableItems();
+    const total = items.length;
     const totalPages = Math.max(1, Math.ceil(total / USERS_PER_PAGE));
 
     if (currentUsersPage > totalPages) currentUsersPage = totalPages;
 
     const start = (currentUsersPage - 1) * USERS_PER_PAGE;
-    const pageUsers = filtered.slice(start, start + USERS_PER_PAGE);
+    let pageItems = items.slice(start, start + USERS_PER_PAGE);
+    // A page that starts mid-group repeats that group's header.
+    if (pageItems.length && pageItems[0].type === 'user' && usersGroup !== 'none') {
+        for (let i = start - 1; i >= 0; i--) {
+            if (items[i].type === 'group') { pageItems = [{ ...items[i], continued: true }, ...pageItems]; break; }
+        }
+    }
 
-    renderUsersTable(pageUsers);
-    renderPagination(total, totalPages);
+    renderUsersHeader();
+    renderUsersTable(pageItems);
+    renderPagination(getFilteredUsers().length, totalPages, total);
     updateUsersPageStats();
 }
 
-function renderUsersTable(users) {
+// Sort arrows on the clickable headers.
+function renderUsersHeader() {
+    document.querySelectorAll('#users-data-table th[data-sort]').forEach(th => {
+        const key = th.getAttribute('data-sort');
+        const arrow = th.querySelector('.sort-arrow');
+        const active = usersSort.key === key;
+        th.classList.toggle('sorted', active);
+        if (arrow) arrow.textContent = active ? (usersSort.dir > 0 ? '▲' : '▼') : '';
+    });
+}
+
+function shortDateTime(v) {
+    const d = new Date(v);
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function renderUsersTable(items) {
+    const users = items;
     const tbody = document.getElementById('users-table-body');
     const emptyState = document.getElementById('users-empty');
     const table = document.getElementById('users-data-table');
@@ -582,12 +978,35 @@ function renderUsersTable(users) {
     emptyState.style.display = 'none';
 
     if (!users || users.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #8B949E; padding: 30px;">No matching users</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #8B949E; padding: 30px;">No matching users</td></tr>';
         return;
     }
 
-    tbody.innerHTML = users.map(user => {
-        const created = user.created_at ? new Date(user.created_at).toLocaleString() : 'Unknown';
+    const colCount = document.querySelectorAll('#users-data-table thead th').length -
+        (currentRole === 'super_admin' ? 0 : 1);
+    tbody.innerHTML = users.map(item => {
+        if (item.type === 'group') {
+            const g = item.group;
+            const n = g.users.length;
+            return `
+            <tr class="user-group-row" onclick="toggleUserGroup('${escapeHtml(g.id).replace(/'/g, '&#39;')}')">
+                <td colspan="${colCount}">
+                    <span class="group-caret">${item.collapsed ? '▸' : '▾'}</span>
+                    <span class="group-label">${escapeHtml(g.label)}</span>
+                    <span class="group-count">${n} ${n === 1 ? 'user' : 'users'}${usersGroup !== 'status' ? ` · ${item.online} online` : ''}${item.continued ? ' (continued)' : ''}</span>
+                </td>
+            </tr>`;
+        }
+        const user = item.user;
+        const created = user.created_at
+            ? `<span title="${escapeHtml(new Date(user.created_at).toLocaleString())}">${escapeHtml(shortDateTime(user.created_at))}</span>`
+            : 'Unknown';
+        const online = isUserOnline(user);
+        const lastLogin = online
+            ? '<span style="color:#3FB950;">Online now</span>'
+            : (user.last_login
+                ? `<span title="${escapeHtml(new Date(user.last_login).toLocaleString())}">${escapeHtml(timeSince(new Date(user.last_login)))}</span>`
+                : '<span style="color:#8B949E;">Never</span>');
         const safeName = escapeHtml(user.name || '');
         const safeUsername = escapeHtml(user.username);
         const safeAgency = escapeHtml(user.agency_id || 'default');
@@ -596,10 +1015,18 @@ function renderUsersTable(users) {
         const superAdminOpt = currentRole === 'super_admin' ? `<option value="super_admin" ${role === 'super_admin' ? 'selected' : ''}>Super Admin</option>` : '';
         const initial = (user.name || user.username).charAt(0).toUpperCase();
         const avatarColor = getAvatarColor(user.username);
-        const online = isUserOnline(user.username);
         const statusDot = online ? '<span class="status-dot-online"></span>' : '<span class="status-dot-offline"></span>';
         // Dispatch users are web-only — show badge instead of editable role dropdown; no QR/Edit
         const isDispatch = role === 'dispatch';
+        // Guests invited from the app: who invited them and when they expire.
+        const guestLeft = user.guest_expires_at ? Date.parse(user.guest_expires_at) - Date.now() : 0;
+        const guestLeftText = guestLeft <= 0 ? 'expiring'
+            : guestLeft < 3600000 ? `${Math.max(1, Math.round(guestLeft / 60000))}m left`
+            : guestLeft < 2 * 86400000 ? `${Math.round(guestLeft / 3600000)}h left`
+            : `${Math.round(guestLeft / 86400000)}d left`;
+        const guestBadge = user.guest_expires_at
+            ? `<div><span class="guest-badge" title="Guest of ${escapeHtml(user.invited_by || '?')} until ${escapeHtml(new Date(user.guest_expires_at).toLocaleString())}">Guest · ${guestLeftText}</span></div>`
+            : '';
         const roleCell = isDispatch
             ? `<span class="link-status" style="background:rgba(99,102,241,0.15);color:#818CF8;border-color:rgba(99,102,241,0.3);">Dispatch</span>`
             : `<select class="role-select" onchange="updateUserRole('${safeUsername}', this.value, '${safeAgency}')" data-current="${role}">
@@ -615,12 +1042,13 @@ function renderUsersTable(users) {
         return `
             <tr>
                 <td><div class="user-avatar" style="background: ${avatarColor};">${initial}</div></td>
-                <td>${safeName || '<span style="color:#8B949E;">—</span>'}</td>
-                <td><strong>${safeUsername}</strong></td>
+                <td class="user-name-cell">${safeName || '<span style="color:#8B949E;">—</span>'}</td>
+                <td class="nowrap"><strong>${safeUsername}</strong>${guestBadge}</td>
                 <td style="text-align: center;">${statusDot}</td>
                 ${agencyCol}
                 <td>${roleCell}</td>
-                <td>${created}</td>
+                <td class="nowrap">${lastLogin}</td>
+                <td class="nowrap">${created}</td>
                 <td>
                     <div class="actions-cell">${actionButtons}</div>
                 </td>
@@ -629,10 +1057,11 @@ function renderUsersTable(users) {
     }).join('');
 }
 
-function renderPagination(total, totalPages) {
+function renderPagination(userCount, totalPages, rowCount) {
     const pagination = document.getElementById('users-pagination');
     const info = document.getElementById('pagination-info');
     const controls = document.getElementById('pagination-controls');
+    const total = rowCount === undefined ? userCount : rowCount;
 
     if (total <= USERS_PER_PAGE) {
         pagination.style.display = 'none';
@@ -641,9 +1070,13 @@ function renderPagination(total, totalPages) {
 
     pagination.style.display = 'flex';
 
-    const start = (currentUsersPage - 1) * USERS_PER_PAGE + 1;
-    const end = Math.min(currentUsersPage * USERS_PER_PAGE, total);
-    info.textContent = `Showing ${start}-${end} of ${total} users`;
+    if (usersGroup === 'none') {
+        const start = (currentUsersPage - 1) * USERS_PER_PAGE + 1;
+        const end = Math.min(currentUsersPage * USERS_PER_PAGE, total);
+        info.textContent = `Showing ${start}-${end} of ${userCount} users`;
+    } else {
+        info.textContent = `Page ${currentUsersPage} of ${totalPages} · ${userCount} users`;
+    }
 
     let html = '';
 
@@ -666,8 +1099,7 @@ function renderPagination(total, totalPages) {
 }
 
 function goToUsersPage(page) {
-    const filtered = getFilteredUsers();
-    const totalPages = Math.max(1, Math.ceil(filtered.length / USERS_PER_PAGE));
+    const totalPages = Math.max(1, Math.ceil(getUserTableItems().length / USERS_PER_PAGE));
     if (page < 1 || page > totalPages) return;
     currentUsersPage = page;
     renderUsersPage();
@@ -682,7 +1114,7 @@ function updateUsersPageStats() {
     if (!totalEl) return; // not on users page
 
     const total = allUsers.length;
-    const online = allUsers.filter(u => isUserOnline(u.username)).length;
+    const online = allUsers.filter(u => isUserOnline(u)).length;
     const offline = total - online;
 
     // Count users created in last 7 days
@@ -694,6 +1126,11 @@ function updateUsersPageStats() {
     onlineEl.textContent = online;
     offlineEl.textContent = offline;
     newEl.textContent = newUsers;
+
+    document.querySelectorAll('.users-stat-card[data-filter]').forEach(card => {
+        const f = card.getAttribute('data-filter');
+        card.classList.toggle('active', f !== 'all' && f === usersFilter);
+    });
 }
 
 // Create or remove the Zello Bridge health row so it only appears when a bridge

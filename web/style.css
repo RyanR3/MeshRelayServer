@@ -2835,3 +2835,70 @@ body {
 
 /* Channel mappings listed on an owner's bridge card. */
 .zb-maps { margin: 8px 0 0; }
+
+/* --- Users table: fits beside the sidebar, sortable, groupable ------------- */
+.users-table-wrap {
+    overflow-x: auto;
+    border-radius: 14px;
+    -webkit-overflow-scrolling: touch;
+}
+.users-table th, .users-table td { padding: 12px 14px; }
+.users-table td.nowrap, .users-table th { white-space: nowrap; }
+.users-table .user-name-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.users-table .actions-cell { gap: 6px; }
+.users-table .btn-action { padding: 5px 10px; }
+
+.users-table th[data-sort] { cursor: pointer; user-select: none; }
+.users-table th[data-sort]:hover { color: #E6EDF3; }
+.users-table th.sorted { color: #E6EDF3; }
+.users-table .sort-arrow { font-size: 10px; margin-left: 2px; color: #A78BFA; }
+
+.users-table tr.user-group-row td {
+    background: #0D1117;
+    cursor: pointer;
+    padding: 10px 14px;
+    border-bottom: 1px solid #1E2733;
+}
+.users-table tr.user-group-row:hover td { background: #121821; }
+.users-table .group-caret { display: inline-block; width: 16px; color: #8B949E; }
+.users-table .group-label { font-weight: 600; color: #E6EDF3; margin-right: 10px; }
+.users-table .group-count { font-size: 12px; color: #8B949E; }
+
+.guest-badge {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 1px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(245, 158, 11, 0.15);
+    color: #F59E0B;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.users-stat-card[data-filter] { cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.users-stat-card[data-filter]:hover { border-color: #2F3B4A; }
+.users-stat-card[data-filter].active { border-color: #7C3AED; background: #1A1730; }
+
+/* Narrower screens: the activity sidebar goes below the table instead of
+   squeezing it. */
+@media (max-width: 1920px) {
+    .users-page-layout { flex-direction: column; }
+    .users-sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; }
+    .users-sidebar > * { flex: 1 1 320px; }
+}
+
+/* TAK Server settings */
+.tak-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; margin-bottom: 8px; }
+.tak-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #8B949E; }
+.tak-grid input { margin-bottom: 0; }
+@media (max-width: 900px) { .tak-grid { grid-template-columns: 1fr; } }
+.tak-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 14px; }
+.tak-groups label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #E6EDF3; padding: 6px 8px; background: #151B23; border: 1px solid #1E2733; border-radius: 8px; cursor: pointer; }
+.tak-groups label small { color: #8B949E; display: block; font-size: 11px; }
+.tak-grid input {
+    width: 100%; padding: 9px 12px; background: #0B0E14; border: 1px solid #1E2733; border-radius: 8px;
+    color: #E6EDF3; font-size: 14px; font-family: inherit; outline: none;
+}
+.tak-grid input:focus { border-color: #7C3AED; }
+.tak-grid input::placeholder { color: #5C6773; }

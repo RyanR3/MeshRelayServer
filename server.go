@@ -35,6 +35,14 @@ type Client struct {
 	// MonitoredChannels: extra channels this client always LISTENS to (mutual-aid
 	// / Zello monitor toggle), in addition to its active Channel.
 	MonitoredChannels []int
+	// Loc: last position from a LOCATION_REPORT (dispatch_command.go). Memory only.
+	Loc *UnitLocation
+	// Dispatch consoles only: the agency of the transmit channel (super admin
+	// picks one; "" = every agency) and the extra channels monitored,
+	// as channel keys "agency:channel".
+	DispatchTxAgency string
+	DispatchMonitor  map[string]bool
+	DispatchAllCall  bool // transmit to every talkgroup of the TX agency
 }
 
 type Channel struct {
@@ -99,6 +107,13 @@ type Agency struct {
 	// on the server and replayed to the channel once the current talker is
 	// done, in the order received.
 	QueueWhenBusy bool `json:"queue_when_busy"`
+
+	// NoGuestInvites stops this agency's members inviting guests from the app
+	// (guest_invites.go). Off = invites allowed, the default.
+	NoGuestInvites bool `json:"no_guest_invites,omitempty"`
+
+	// NoRecording stops recording this agency's radio traffic (recorder.go).
+	NoRecording bool `json:"no_recording,omitempty"`
 }
 
 // Floor modes kept in Server.floorOn (lock-free, read per audio packet).
@@ -140,6 +155,12 @@ type UserAccount struct {
 	// 4=MONITOR). 0/absent = default RESPONDER. Assigned at provisioning; clients
 	// cannot self-elevate (except Emergency alert).
 	Priority int `json:"priority,omitempty"`
+	// Guest invited from the app (guest_invites.go): who invited them, and
+	// when the account is deleted. Nil for every other account.
+	InvitedBy      string     `json:"invited_by,omitempty"`
+	GuestExpiresAt *time.Time `json:"guest_expires_at,omitempty"`
+	// LastLogin: when this account last signed in to PTT (RFC 3339).
+	LastLogin string `json:"last_login,omitempty"`
 	// MCX Step 2 note: the derived MCX identity (<callsign>@<agency>.<mcptt_domain>)
 	// is NOT stored — it's computed on demand (see userMCXID / GetUsers) and added
 	// to API responses. The plain Username remains the display name + routing key.
@@ -184,7 +205,9 @@ type WebSession struct {
 // DispatchConn represents an active dispatch browser WebSocket connection.
 // It wraps the WebSocket connection with a send channel to avoid concurrent writes.
 type DispatchConn struct {
-	Send chan []byte // buffered channel for outbound frames
+	Send chan []byte // buffered channel for outbound binary frames
+	Text chan []byte // JSON messages (activity, emergencies) — dispatch_command.go
+	tx   dispatchTX  // transmit (PTT) state, dispatch_audio.go
 }
 
 // EnrollmentToken is a temporary token that can be used in place of a password
@@ -231,7 +254,13 @@ type Server struct {
 	users                  map[string]*UserAccount // "agencyID:username" -> account
 	agencies               map[string]*Agency      // agencyID -> agency
 	authenticatedAddrs     map[string]string       // addr string -> agencyID
-	lastChannel            map[string]int          // userKey -> channel of the last JOIN, for re-registration
+	authAccounts           map[string]string       // addr string -> userKey of the LOGIN account (the joined callsign can differ)
+	dispatchOps            *dispatchOps            // unit status, dispatch messages (dispatch_ops.go)
+	opsOnce                sync.Once
+	recorder               *Recorder   // radio traffic recording (recorder.go)
+	takMgr                 *takManager // TAK Server connectors per agency (tak.go)
+	takOnce                sync.Once
+	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
 	pendingChallenges      map[string][32]byte                                          // addr string -> nonce (Phase 4f challenge-response)
 	enrollmentTokens       map[string]*EnrollmentToken                                  // token string -> enrollment token
@@ -659,6 +688,7 @@ func NewServer(config *Config, configFile string) *Server {
 		users:              make(map[string]*UserAccount),
 		agencies:           make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]string),
+		authAccounts:       make(map[string]string),
 		pendingChallenges:  make(map[string][32]byte),
 		enrollmentTokens:   make(map[string]*EnrollmentToken),
 		guestEvents:        make(map[string]*GuestEvent),
@@ -845,6 +875,9 @@ func (s *Server) StartPTT() error {
 
 	s.conn = conn
 	log.Printf("MeshRelay server listening on UDP port %d", s.config.PTTPort)
+	s.recorder = NewRecorder(s, s.config.RecordingDir, s.config.RecordingRetentionDays)
+	log.Printf("Recording radio traffic to %s/ (kept %d days)", s.recorder.dir, s.recorder.retention)
+	s.loadTakConnections()
 
 	// Start heartbeat checker
 	go s.heartbeatChecker()
@@ -909,6 +942,14 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handleGroupInviteResponse(payload.(*GroupInviteResponse), addr)
 	case PacketTypeGroupDisband:
 		s.handleGroupDisband(payload.(*GroupDisband), addr)
+	case PacketTypeGuestInviteRequest:
+		s.handleGuestInviteRequest(payload.(*GuestInviteRequest), addr)
+	case PacketTypeLocationReport:
+		s.handleLocationReport(payload.(*LocationReport), addr)
+	case PacketTypeUnitStatus:
+		s.handleUnitStatus(payload.(*UnitStatusPacket), addr)
+	case PacketTypeDispatchMessage:
+		s.handleDispatchMessage(payload.(*DispatchMessagePacket), addr)
 	case PacketTypeDirectAudio:
 		s.handleDirectAudioPacket(payload.(*DirectAudioPacket), addr)
 	case PacketTypeText:
@@ -1190,36 +1231,13 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 		s.sipGateway.OnAudioPacket(channelKey(client.AgencyID, client.Channel), audioData)
 	}
 
-	// Fan out to dispatch browser connections listening on this channel.
-	// A dispatch user with an empty AgencyID (super_admin) monitors all
-	// agencies, so it matches on channel only; an agency-scoped dispatch
-	// user must also match the sender's agency.
-	//
-	// The dispatch console currently only decodes raw PCM. Until it learns to
-	// decode Opus, skip Opus frames rather than push undecodable bytes that
-	// would play as noise. (Opus dispatch support is a later phase.)
+	// Dispatch consoles tuned to this channel (they decode Opus in the
+	// browser; see dispatch_audio.go). Legacy PCM frames are not sent.
 	if packet.Codec == CodecOpus {
-		return
+		s.fanOutToDispatch(client.AgencyID, client.Channel, client.Username, packet.AudioData)
+		s.recordAudio(client.AgencyID, client.Channel, client.Username, packet.AudioData)
 	}
-	dispatchSent := 0
-	s.mu.RLock()
-	for connKey, dc := range s.dispatchConns {
-		if dispClient, ok := s.clients[connKey]; ok {
-			agencyMatch := dispClient.AgencyID == "" || dispClient.AgencyID == client.AgencyID
-			if agencyMatch && dispClient.Channel == client.Channel {
-				select {
-				case dc.Send <- audioData:
-					dispatchSent++
-				default:
-					// dispatch send buffer full — drop frame
-				}
-			}
-		}
-	}
-	s.mu.RUnlock()
-	if dispatchSent > 0 {
-		log.Printf("Fan out audio from %s [%s] ch %d to %d dispatch console(s)", client.Username, client.AgencyID, client.Channel, dispatchSent)
-	}
+	s.noteDispatchTalk(client.AgencyID, client.Channel, client.Username)
 }
 
 func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UDPAddr) {
@@ -1545,6 +1563,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		s.sendPacket(p.data, p.addr)
 		log.Printf("%s", p.desc)
 	}
+	s.deliverPending(agencyID, packet.Username, addr)
 
 	// MCX Step 3: if floor control is on and the floor is taken on the joined
 	// channel, tell the joining client so its UI reflects the current holder.
@@ -1612,6 +1631,7 @@ func (s *Server) removeClient(client *Client) {
 	// Remove from authenticated addresses
 	if client.Addr != nil {
 		delete(s.authenticatedAddrs, client.Addr.String())
+		delete(s.authAccounts, client.Addr.String())
 	}
 
 	// Remove from clients map
@@ -1793,6 +1813,10 @@ func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
 		s.testFloorSink(addr, data)
 		return
 	}
+	// A dispatch console's loopback address: deliver over its WebSocket.
+	if deliverToDispatch(data, addr) {
+		return
+	}
 	if s.conn == nil {
 		return
 	}
@@ -1966,14 +1990,31 @@ func (s *Server) GetClients(agencyFilter string) []map[string]interface{} {
 		if agencyFilter != "" && client.AgencyID != agencyFilter {
 			continue
 		}
+		// The login account can differ from the callsign shown on the air.
+		account := client.Username
+		if client.Addr != nil {
+			if k := s.authAccounts[client.Addr.String()]; k != "" {
+				account = k[strings.LastIndex(k, ":")+1:]
+			}
+		}
 		clients = append(clients, map[string]interface{}{
 			"username":       client.Username,
+			"account":        account,
 			"agency_id":      client.AgencyID,
 			"address":        client.Addr.String(),
 			"channel":        client.Channel,
 			"connected_at":   client.ConnectedAt,
 			"last_heartbeat": client.LastHeartbeat,
 		})
+		if client.Loc != nil {
+			clients[len(clients)-1]["location"] = client.Loc.json()
+		}
+		if client.Addr != nil && client.Addr.IP.Equal(net.IPv4(127, 0, 0, 2)) {
+			clients[len(clients)-1]["console"] = true // a dispatch console, not a unit
+		}
+		if st := s.statusFor(client.AgencyID, client.Username); st != nil {
+			clients[len(clients)-1]["status"] = st
+		}
 	}
 
 	return clients
@@ -2422,11 +2463,25 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		oldAddr := existingClient.Addr.String()
 		if oldAddr != addr.String() {
 			delete(s.authenticatedAddrs, oldAddr)
+			delete(s.authAccounts, oldAddr)
 			log.Printf("Cleaned up stale auth for user %s (old addr: %s)", packet.Username, oldAddr)
 		}
 	}
 
 	s.authenticatedAddrs[addr.String()] = user.AgencyID
+	if s.authAccounts == nil {
+		s.authAccounts = make(map[string]string)
+	}
+	s.authAccounts[addr.String()] = userKey(user.AgencyID, user.Username)
+	// Last login, for the dashboard. Reconnects are frequent (network
+	// switches, heartbeats lost), so the file is rewritten at most every few
+	// minutes per account; the in-memory value is always current.
+	now := time.Now()
+	prev, _ := time.Parse(time.RFC3339, user.LastLogin)
+	user.LastLogin = now.Format(time.RFC3339)
+	if now.Sub(prev) > 5*time.Minute {
+		s.saveUsers()
+	}
 	// MCX Step 2: hand the client its MCX domain so it can derive its own MCX id
 	// (<callsign>@<domain>). Appended in a backward-compatible way — old clients
 	// read the "Authenticated" prefix and ignore the "|domain=" suffix.
@@ -2499,7 +2554,11 @@ func (s *Server) cleanupExpiredTokens() {
 	// Check for expired guest events and remove them (releases and re-acquires lock internally)
 	s.cleanupExpiredGuestEvents()
 
+	// Guests invited from the app whose time is up.
+	kicks := s.removeExpiredInvitedGuests()
+
 	s.mu.Unlock()
+	s.finishExpiredGuestKicks(kicks)
 }
 
 // startTokenCleanup runs a goroutine that cleans up expired tokens every minute.
@@ -2753,6 +2812,18 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 	defer s.mu.RUnlock()
 
 	users := make([]map[string]interface{}, 0, len(s.users)+4)
+
+	// Accounts signed in right now: by the account each connection logged in
+	// with, plus callsign matches for connections without that record.
+	online := make(map[string]bool, len(s.clients))
+	for key, c := range s.clients {
+		online[key] = true
+		if c.Addr != nil {
+			if k := s.authAccounts[c.Addr.String()]; k != "" {
+				online[k] = true
+			}
+		}
+	}
 	for _, user := range s.users {
 		if agencyFilter != "" && user.AgencyID != agencyFilter {
 			continue
@@ -2790,8 +2861,15 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 			// display name and routing key).
 			"mcx_id": userMCXID(user.Username, user.AgencyID, s.config.McpttDomain),
 			// MCX Step 3: provisioned floor priority.
-			"priority": pri,
+			"priority":   pri,
+			"online":     online[userKey(user.AgencyID, user.Username)],
+			"last_login": user.LastLogin,
 		})
+		if user.GuestExpiresAt != nil {
+			u := users[len(users)-1]
+			u["invited_by"] = user.InvitedBy
+			u["guest_expires_at"] = user.GuestExpiresAt.Format(time.RFC3339)
+		}
 	}
 
 	// Also include dispatch users (web-admin only, no PTT account)
@@ -3604,6 +3682,7 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 		s.mu.Lock()
 		delete(s.clients, kickKeys[i])
 		delete(s.authenticatedAddrs, addr.String())
+		delete(s.authAccounts, addr.String())
 		s.mu.Unlock()
 	}
 

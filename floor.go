@@ -747,6 +747,8 @@ func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) 
 	if client == nil {
 		return
 	}
+	// Consoles see every emergency in their agency, floor control or not.
+	s.notifyDispatchEmergency(client.AgencyID, client.Channel, alert.User, alert.Active)
 	if !s.floorEnabledForAgency(client.AgencyID) {
 		return
 	}

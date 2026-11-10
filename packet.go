@@ -315,6 +315,18 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 	case PacketTypeGroupDisband:
 		pkt, err := ParseGroupDisband(payload)
 		return packetType, pkt, err
+	case PacketTypeGuestInviteRequest:
+		pkt, err := ParseGuestInviteRequest(payload)
+		return packetType, pkt, err
+	case PacketTypeLocationReport:
+		pkt, err := ParseLocationReport(payload)
+		return packetType, pkt, err
+	case PacketTypeUnitStatus:
+		pkt, err := ParseUnitStatus(payload)
+		return packetType, pkt, err
+	case PacketTypeDispatchMessage:
+		pkt, err := ParseDispatchMessage(payload)
+		return packetType, pkt, err
 	case PacketTypeDirectAudio:
 		pkt, err := ParseDirectAudioPacket(payload)
 		return packetType, pkt, err
