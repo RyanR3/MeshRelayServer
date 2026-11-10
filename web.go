@@ -184,6 +184,18 @@ func (s *Server) StartWeb() error {
 	r.HandleFunc("/ws/dispatch", s.handleDispatchWebSocket)
 
 	// Serve static files (web GUI)
+	// The dispatch console lives at /dispatch; the old .html address redirects
+	// so existing bookmarks keep working.
+	r.HandleFunc("/dispatch", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "./web/dispatch.html")
+	})
+	r.HandleFunc("/dispatch.html", func(w http.ResponseWriter, r *http.Request) {
+		target := "/dispatch"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+	})
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./web")))
 
 	addr := fmt.Sprintf(":%d", s.config.WebPort)
@@ -239,7 +251,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Allow unauthenticated access to login-related paths
 		if path == "/api/login" || path == "/api/session" ||
-			path == "/login.html" || path == "/dispatch.html" ||
+			path == "/login.html" || path == "/dispatch.html" || path == "/dispatch" ||
 			path == "/dispatch.js" || path == "/dispatch.css" ||
 			path == "/style.css" ||
 			path == "/logo.png" || path == "/favicon.ico" {
@@ -282,7 +294,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				path == "/" || path == "/index.html" ||
 				path == "/app.js" || path == "/style.css" ||
 				path == "/logo.png" || path == "/favicon.ico" ||
-				path == "/dispatch.html" || path == "/dispatch.js" || path == "/dispatch.css"
+				path == "/dispatch.html" || path == "/dispatch" || path == "/dispatch.js" || path == "/dispatch.css"
 			if !allowedWhenForced {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
