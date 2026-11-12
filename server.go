@@ -1823,6 +1823,13 @@ func (s *Server) sendRoster(agencyID string, all bool) {
 		if !visible[c.AgencyID] {
 			continue
 		}
+		// A /command console is not a unit: phones reach it through their
+		// "Dispatch" conversation (packet 0x30). Listing it here showed the
+		// dispatcher's login as a second contact that could not be messaged
+		// (private texts are channel-encrypted; the console can't read them).
+		if isConsoleAddr(c.Addr) {
+			continue
+		}
 		// Tag users from a PARTNER agency with that agency's name, so a group
 		// builder can tell whose people are whose. Own-agency users stay bare.
 		name := c.Username

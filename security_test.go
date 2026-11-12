@@ -544,3 +544,32 @@ func TestSecretFilesAreOwnerOnly(t *testing.T) {
 		t.Fatalf("config mode %o, want 600", fi.Mode().Perm())
 	}
 }
+
+// A /command console is reached through the phone's "Dispatch" conversation;
+// it must not also appear in the roster as a second, un-messageable contact.
+func TestRosterExcludesDispatchConsoles(t *testing.T) {
+	s, sink := newSecTestServer(t)
+	addUser(s, "a1", "phone", "pp")
+	s.clients[userKey("a1", "WCDRT900")] = &Client{Username: "WCDRT900", AgencyID: "a1",
+		Addr: newDispatchAddr(), LastHeartbeat: time.Now()}
+	ph := udp(7301)
+	mustLogin(t, s, sink, ph, "phone", "a1", "pp")
+	s.handleJoin(&JoinPacket{Username: "phone", Channel: 1}, ph)
+	sink.reset()
+	s.broadcastRoster("a1")
+	var roster []byte
+	for _, p := range sink.take(ph) {
+		if len(p) > 0 && p[0] == PacketTypeRoster {
+			roster = p
+		}
+	}
+	if roster == nil {
+		t.Fatal("phone got no roster")
+	}
+	if !bytes.Contains(roster, []byte("phone")) {
+		t.Fatal("roster is missing the phone itself")
+	}
+	if bytes.Contains(roster, []byte("WCDRT900")) {
+		t.Fatal("dispatch console listed in the phone roster")
+	}
+}
