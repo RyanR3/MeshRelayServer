@@ -591,7 +591,7 @@ function renderLog() {
         const ch = `${escHtml(channelLabel(e.agency, e.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(e.agency)) : ''}`;
         const what = e.note ? escHtml(e.note) : e.emergency ? (e.active ? '🚨 EMERGENCY' : 'Emergency cleared') : (live ? 'talking…' : fmtDur(e.end - e.start));
         return `<tr class="${live ? 'live' : ''}${e.emergency ? ' emerg' : ''}">
-            <td>${fmtTime(e.start)}</td><td class="log-ch">${ch}</td>
+            <td>${fmtTime(e.start)}</td><td class="log-ch" title="${ch}">${ch}</td>
             <td><span class="log-unit" onclick="focusUnit('${escAttr(e.agency + '|' + e.user)}')">${escHtml(e.user)}</span></td>
             <td>${what}</td><td>${replay}</td></tr>`;
     }).join('');
@@ -1386,7 +1386,7 @@ async function searchRecordings() {
     document.getElementById('hist-empty').textContent = historyRows.length ? '' : `No recordings on ${date}${ch || unit ? ' matching that filter' : ''}.`;
     body.innerHTML = historyRows.map((r, i) => `<tr>
         <td>${fmtTime(r.start)}</td>
-        <td class="log-ch">${escHtml(channelLabel(r.agency, r.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(r.agency)) : ''}</td>
+        <td class="log-ch" title="${escHtml(channelLabel(r.agency, r.channel))}">${escHtml(channelLabel(r.agency, r.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(r.agency)) : ''}</td>
         <td><span class="log-unit">${escHtml(r.user)}</span></td>
         <td>${fmtDur(r.duration_ms)}</td>
         <td><button class="replay-btn" onclick="playRecording('${escAttr(r.id)}')">▶ Play</button></td></tr>`).join('');
