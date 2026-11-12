@@ -118,7 +118,8 @@ func TestEditUserPasswordResetPersistsDashboardStore(t *testing.T) {
 	s := newPwTestServer()
 	s.config.WebAdminsFile = dir + "/web_admins.json"
 	s.config.UsersFile = dir + "/users.json"
-	s.webSessions = map[string]*WebSession{"tok": {Username: "admin", Role: "super_admin"}}
+	s.webSessions = map[string]*WebSession{}
+	addTestSession(s, "tok", "admin", "super_admin", "")
 	s.activityLog = NewActivityLog(dir+"/activity.json", 100)
 	key := userKey("dev", "devadmin")
 	s.users[key] = &UserAccount{Username: "devadmin", AgencyID: "dev", Role: "admin", PasswordHash: hashPassword("wrong")}
