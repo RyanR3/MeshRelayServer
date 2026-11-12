@@ -134,7 +134,7 @@
                     btn.textContent = 'Sign In';
                     return;
                 }
-                window.location.href = data.role === 'dispatch' ? '/command' : '/';
+                window.location.href = afterLogin(data.role);
             })
             .catch(() => {
                 errorEl.textContent = 'Connection error';
@@ -142,6 +142,16 @@
                 btn.disabled = false;
                 btn.textContent = 'Sign In';
             });
+        }
+
+        // Where to go after signing in. A page that sent you here (e.g. /command)
+        // passes ?next=; only known same-site pages are honoured, never an
+        // arbitrary URL (open-redirect).
+        function afterLogin(role) {
+            if (role === 'dispatch') return '/command';
+            const next = new URLSearchParams(window.location.search).get('next');
+            const allowed = ['/', '/command'];
+            return allowed.includes(next) ? next : '/';
         }
 
         document.getElementById('password').addEventListener('keydown', (e) => {
@@ -159,7 +169,7 @@
         .then(r => r.ok ? r.json() : null)
         .then(data => {
             if (data && data.status === 'ok') {
-                window.location.href = data.role === 'dispatch' ? '/command' : '/';
+                window.location.href = afterLogin(data.role);
             }
         })
         .catch(() => {});

@@ -188,6 +188,20 @@ body {
     color: #E6EDF3;
 }
 
+.nav-item .nav-ext {
+    margin-left: auto;
+    display: flex;
+    opacity: 0.6;
+}
+.nav-item .nav-ext svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+}
+.sidebar.collapsed .nav-item .nav-ext {
+    display: none;
+}
+
 .nav-item.active {
     background: rgba(124, 58, 237, 0.15);
     color: #A78BFA;

@@ -3472,6 +3472,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Set up navigation click handlers
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', () => {
+                if (item.dataset.href) {
+                    window.open(item.dataset.href, '_blank', 'noopener');
+                    return;
+                }
                 const page = item.dataset.page;
                 if (page) navigateTo(page);
             });

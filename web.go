@@ -289,7 +289,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			// Page requests get redirected to login
-			http.Redirect(w, r, "/login.html", http.StatusFound)
+			target := "/login.html"
+			if path == "/command" || path == "/dispatch" || path == "/dispatch.html" {
+				target += "?next=/command"
+			}
+			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
 

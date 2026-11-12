@@ -108,7 +108,7 @@ async function checkSession() {
         const r = await fetch('/api/session', { credentials: 'same-origin' });
         const data = await r.json();
         if (!r.ok || !['dispatch', 'agency_admin', 'super_admin'].includes(data.role)) {
-            window.location.href = '/login.html';
+            window.location.href = '/login.html?next=/command';
             return;
         }
         currentAgency = data.agency_id || '';
@@ -119,7 +119,7 @@ async function checkSession() {
         connectDispatchWS();
         requestMic();
     } catch (e) {
-        window.location.href = '/login.html';
+        window.location.href = '/login.html?next=/command';
     }
 }
 
@@ -1489,7 +1489,7 @@ function drawViz(analyser) {
 
 function logout() {
     fetch('/api/logout', { method: 'POST', credentials: 'same-origin' })
-        .finally(() => { window.location.href = '/login.html'; });
+        .finally(() => { window.location.href = '/login.html?next=/command'; });
 }
 
 function escHtml(str) {
