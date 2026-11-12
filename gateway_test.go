@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -40,15 +41,34 @@ func TestGatewayStartsWhenEnabled(t *testing.T) {
 }
 
 // fakeMesh captures MeshRelayCallback invocations for the SIP-side translation.
+// The gateway calls it from its read goroutine while the test polls, so the
+// fields are guarded (go test -race).
 type fakeMesh struct {
+	mu      sync.Mutex
 	granted string
 	audio   [][]byte
 }
 
-func (f *fakeMesh) GrantFloor(key, user string) error       { f.granted = user; return nil }
+func (f *fakeMesh) GrantFloor(key, user string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.granted = user
+	return nil
+}
 func (f *fakeMesh) DenyFloor(key, user string, r uint8) error { return nil }
-func (f *fakeMesh) DeliverAudio(key string, rtp []byte) error { f.audio = append(f.audio, rtp); return nil }
+func (f *fakeMesh) DeliverAudio(key string, rtp []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.audio = append(f.audio, rtp)
+	return nil
+}
 func (f *fakeMesh) BroadcastEmergency(key, user string) error { return nil }
+
+func (f *fakeMesh) grantedUser() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.granted
+}
 
 // TestSipInviteTranslatesToFloor: an inbound SIP INVITE grants the floor to the
 // SIP user on the bridged MeshRelay channel.
@@ -79,13 +99,13 @@ func TestSipInviteTranslatesToFloor(t *testing.T) {
 	// Give the gateway a moment to process and expect the floor grant.
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		if mesh.granted != "" {
+		if mesh.grantedUser() != "" {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if mesh.granted != "raptor7" {
-		t.Fatalf("INVITE should grant floor to raptor7, got %q", mesh.granted)
+	if got := mesh.grantedUser(); got != "raptor7" {
+		t.Fatalf("INVITE should grant floor to raptor7, got %q", got)
 	}
 }
 
@@ -93,8 +113,8 @@ func TestSipInviteTranslatesToFloor(t *testing.T) {
 func TestSipUserParse(t *testing.T) {
 	cases := map[string]string{
 		"<sip:raptor7@domain>;tag=x": "raptor7",
-		"sip:medic3@d.com":            "medic3",
-		"\"IC\" <sip:ic@sc.com>":       "ic",
+		"sip:medic3@d.com":           "medic3",
+		"\"IC\" <sip:ic@sc.com>":     "ic",
 	}
 	for in, want := range cases {
 		if got := sipUser(in); got != want {

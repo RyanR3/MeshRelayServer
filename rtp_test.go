@@ -7,7 +7,8 @@ import (
 
 // buildClientRtpPacket mirrors exactly what the Android/iOS clients put on the
 // wire for a PacketTypeAudioRtp frame:
-//   [0x13][12B RTP header][u16 userLen|user][i32 audioLen|opus]
+//
+//	[0x13][12B RTP header][u16 userLen|user][i32 audioLen|opus]
 func buildClientRtpPacket(user string, opus []byte, marker bool, seq uint16, ts, ssrc uint32) []byte {
 	out := []byte{PacketTypeAudioRtp}
 	hdr := make([]byte, 12)
