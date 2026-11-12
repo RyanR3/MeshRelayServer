@@ -47,12 +47,12 @@ type MeshRelayCallback interface {
 // SipGateway is the stub gateway implementing MCXBridge (MeshRelay -> MCX) and
 // holding a MeshRelayCallback (MCX -> MeshRelay).
 type SipGateway struct {
-	cfg      *SipGatewayConfig
-	mesh     MeshRelayCallback
-	conn     *net.UDPConn
-	mu       sync.Mutex
-	running  bool
-	boundPort int // actual bound port (useful when SipPort==0 in tests)
+	cfg        *SipGatewayConfig
+	mesh       MeshRelayCallback
+	conn       *net.UDPConn
+	mu         sync.Mutex
+	running    bool
+	boundPort  int // actual bound port (useful when SipPort==0 in tests)
 	registered bool
 	// bridgeKey is the MeshRelay channel key ("agency:channel") bound to the
 	// external MCX group.
