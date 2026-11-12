@@ -22,8 +22,14 @@ import (
 )
 
 type Client struct {
-	Username      string
-	AgencyID      string
+	Username string
+	AgencyID string
+	// Account: userKey of the login account that JOINed this callsign (the
+	// callsign can differ from the login). Only packets from an address that
+	// authenticated as this account may move the client to a new address or
+	// take the callsign over. "" for records not created by a UDP JOIN
+	// (dispatch consoles) or when auth is disabled.
+	Account       string
 	Addr          *net.UDPAddr
 	Channel       int
 	LastHeartbeat time.Time
@@ -355,15 +361,7 @@ func (al *ActivityLog) Save() error {
 	copy(events, al.Events)
 	al.mu.RUnlock()
 
-	file, err := os.Create(al.filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(events)
+	return writeJSONFileAtomic(al.filePath, events)
 }
 
 func (al *ActivityLog) Add(eventType, username, details, agencyID string) {
@@ -997,28 +995,33 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		return
 	}
 
-	s.mu.RLock()
-	client, clientKey := s.findClientForSender(packet.Username, addr)
-	s.mu.RUnlock()
+	// Resolve the sender from the authenticated source address: the name in
+	// the packet must be a callsign this address is entitled to. A look-up by
+	// name alone let another agency's user take this client over.
+	s.mu.Lock()
+	client := s.senderClient(packet.Username, addr)
+	var snap Client
+	if client != nil {
+		// Any authenticated packet keeps the client alive.
+		client.LastHeartbeat = time.Now()
+		// Learn the client's current address from its audio, not only from its
+		// 10-second heartbeats. Production log, 2026-09-09 01:42:41 UTC: a
+		// gateway's path changed mid-transmission and for the next ~10 s the
+		// server kept relaying to the stale address — 50 pkt/s "to 1 client"
+		// that never arrived — until the next heartbeat refreshed it.
+		// senderClient only returns a record at another address when this
+		// address authenticated as the record's own login account.
+		s.adoptSenderAddr(client, addr, "audio")
+		// Relay from a snapshot: JOINs change Channel under s.mu.
+		snap = *client
+	}
+	s.mu.Unlock()
 
 	if client == nil {
 		log.Printf("Audio from unknown client: %s (%s)", packet.Username, addr)
 		return
 	}
-	_ = clientKey
-
-	// Update client's last heartbeat
-	client.LastHeartbeat = time.Now()
-	// Learn the client's current address from its audio, not only from its
-	// 10-second heartbeats. Production log, 2026-09-09 01:42:41 UTC: a gateway's
-	// path changed mid-transmission and for the next ~10 s the server kept
-	// relaying to the stale address — 50 pkt/s "to 1 client" that never
-	// arrived — until the next heartbeat refreshed it. Any authenticated packet
-	// is proof of the live address.
-	if addr != nil && (client.Addr == nil || client.Addr.String() != addr.String()) {
-		log.Printf("Client %s address changed %v -> %v (audio)", packet.Username, client.Addr, addr)
-		client.Addr = addr
-	}
+	client = &snap
 
 	// Prepend packet type to the serialized data, preserving both the codec and
 	// the RTP framing. An RTP-aligned packet (0x13) is relayed as RTP with the
@@ -1071,11 +1074,18 @@ func (s *Server) relayDeferred(key string, channelNum int, user string, packet *
 		s.testRelaySink(key, channelNum, user, audioData)
 		return
 	}
+	// The recording belongs to the channel's agency: never resolve the user
+	// by name in another agency.
+	agency := agencyFromKey(key)
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(user)
+	var client *Client
+	if c := s.clientInAgency(agency, user); c != nil {
+		cp := *c
+		client = &cp
+	}
 	s.mu.RUnlock()
 	if client == nil {
-		client = &Client{Username: user, AgencyID: agencyFromKey(key), Channel: channelNum}
+		client = &Client{Username: user, AgencyID: agency, Channel: channelNum}
 	}
 	s.relayAudioData(client, packet, audioData)
 }
@@ -1084,9 +1094,19 @@ func (s *Server) relayDeferred(key string, channelNum int, user string, packet *
 // hear it: the sender's channel, always-listen monitors, ad-hoc group members,
 // mutual-aid partners, bridges and the dispatch console.
 func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData []byte) {
-	// Get client's agency-scoped channel
+	// Get client's agency-scoped channel, and the mutual-aid partners'
+	// channels, under s.mu: the channel map and the link list are written by
+	// the dashboard while packets are being relayed.
 	key := channelKey(client.AgencyID, client.Channel)
+	s.mu.RLock()
 	channel := s.channels[key]
+	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
+	partnerChannels := make(map[string]*Channel, len(partners))
+	for _, p := range partners {
+		pk := channelKey(p, client.Channel)
+		partnerChannels[pk] = s.channels[pk]
+	}
+	s.mu.RUnlock()
 	if channel == nil {
 		return
 	}
@@ -1151,12 +1171,16 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 		if a := s.groupMgr.adhocInfo(gkey); a != nil {
 			creator = a.createdBy
 		}
+		// Members are callsigns; resolve them only in the group's agency and
+		// the agencies linked to it, never a same-named user elsewhere.
+		groupAgency := agencyFromKey(gkey)
+		reach := s.mutualAidAgencies(groupAgency)
 		s.mu.RLock()
 		for _, u := range append(members, creator) {
 			if u == "" || u == packet.Username {
 				continue
 			}
-			mc, _ := s.findClientByUsername(u)
+			mc := s.findClientInAgencies(u, reach, groupAgency)
 			if mc == nil || sentTo[mc.Addr.String()] || s.gatewayPaused(mc) {
 				continue
 			}
@@ -1167,14 +1191,13 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 		s.mu.RUnlock()
 	}
 
-	// Check for mutual aid partners — also relay to partner agencies' same channel
-	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
+	// Mutual aid partners (looked up above) — also relay to partner agencies' same channel
 	if len(partners) > 0 {
 		log.Printf("Audio mutual aid: %s [%s] ch %d has partners %v", packet.Username, client.AgencyID, client.Channel, partners)
 	}
 	for _, partnerAgency := range partners {
 		partnerKey := channelKey(partnerAgency, client.Channel)
-		partnerChannel := s.channels[partnerKey]
+		partnerChannel := partnerChannels[partnerKey]
 		if partnerChannel != nil {
 			partnerChannel.mu.RLock()
 			partnerCount := 0
@@ -1245,10 +1268,23 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 		return
 	}
 
-	s.mu.RLock()
-	sender, _ := s.findClientByUsername(packet.Sender)
-	recipient, _ := s.findClientByUsername(packet.Recipient)
-	s.mu.RUnlock()
+	// The sender is whoever this address authenticated as; the recipient is
+	// looked up in the sender's agency or one linked to it by mutual aid.
+	s.mu.Lock()
+	sender := s.senderClient(packet.Sender, addr)
+	var recipient *Client
+	var senderAgency, recipientAgency string
+	var recipientAddr *net.UDPAddr
+	if sender != nil {
+		sender.LastHeartbeat = time.Now()
+		senderAgency = sender.AgencyID
+		recipient = s.peerClient(sender.AgencyID, packet.Recipient)
+		if recipient != nil {
+			recipientAgency = recipient.AgencyID
+			recipientAddr = recipient.Addr
+		}
+	}
+	s.mu.Unlock()
 
 	if sender == nil {
 		log.Printf("Direct audio from unknown sender: %s (%s)", packet.Sender, addr)
@@ -1256,20 +1292,9 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 	}
 
 	if recipient == nil {
-		log.Printf("Direct audio to unknown recipient: %s from %s", packet.Recipient, packet.Sender)
+		log.Printf("Direct audio to unknown recipient: %s from %s [%s] (offline, or another agency without mutual aid)", packet.Recipient, packet.Sender, senderAgency)
 		return
 	}
-
-	// Enforce same-agency isolation (unless mutual aid link is active)
-	if sender.AgencyID != recipient.AgencyID {
-		if !s.hasMutualAidLink(sender.AgencyID, recipient.AgencyID) {
-			log.Printf("Direct audio blocked: %s [%s] -> %s [%s] (cross-agency)", packet.Sender, sender.AgencyID, packet.Recipient, recipient.AgencyID)
-			return
-		}
-	}
-
-	// Update sender's last heartbeat
-	sender.LastHeartbeat = time.Now()
 
 	// Create packet with type prepended
 	audioData, err := CreateDirectAudioPacket(packet)
@@ -1279,33 +1304,14 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 	}
 
 	// Send only to the specific recipient
-	s.sendPacket(audioData, recipient.Addr)
+	s.sendPacket(audioData, recipientAddr)
 
-	log.Printf("Relayed direct audio from %s to %s [%s] (%d bytes)",
-		packet.Sender, packet.Recipient, sender.AgencyID, len(packet.AudioData))
+	log.Printf("Relayed direct audio from %s [%s] to %s [%s] (%d bytes)",
+		packet.Sender, senderAgency, packet.Recipient, recipientAgency, len(packet.AudioData))
 }
 
 func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) {
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
-		return
-	}
-
-	s.mu.RLock()
-	client, _ := s.findClientByUsername(packet.Sender)
-	s.mu.RUnlock()
-
-	if client == nil {
-		log.Printf("Text message from unknown client: %s (%s)", packet.Sender, addr)
-		return
-	}
-
-	// Update client's last heartbeat
-	client.LastHeartbeat = time.Now()
-
-	// Get client's agency-scoped channel
-	key := channelKey(client.AgencyID, client.Channel)
-	channel := s.channels[key]
-	if channel == nil {
 		return
 	}
 
@@ -1314,64 +1320,95 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 	// dropped the message: text over the server never arrived.
 	textData := SerializeTextPacket(packet)
 
+	// Resolve the sender from the authenticated address (never by the name in
+	// the packet alone), and collect every recipient address under the lock:
+	// the channel map and mutual-aid links change while messages are relayed.
+	s.mu.Lock()
+	client := s.senderClient(packet.Sender, addr)
+	if client == nil {
+		s.mu.Unlock()
+		log.Printf("Text message from unknown client: %s (%s)", packet.Sender, addr)
+		return
+	}
+	client.LastHeartbeat = time.Now()
+	agencyID, chNum := client.AgencyID, client.Channel
+
 	// A private message goes to its recipient only. It used to be relayed to
 	// everyone on the sender's channel (and mutual-aid partners), and clients
 	// did not filter, so other members saw it as if it were sent to them.
 	if packet.Recipient != "" {
-		s.mu.RLock()
-		rc, _ := s.findClientByUsername(packet.Recipient)
-		allowed := rc != nil && (rc.AgencyID == client.AgencyID || s.hasMutualAidLink(client.AgencyID, rc.AgencyID))
 		var raddr *net.UDPAddr
-		if allowed {
+		if rc := s.peerClient(agencyID, packet.Recipient); rc != nil {
 			raddr = rc.Addr
 		}
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		if raddr != nil {
 			s.sendPacket(textData, raddr)
-			log.Printf("Relayed private text message from %s [%s] to %s", packet.Sender, client.AgencyID, packet.Recipient)
+			log.Printf("Relayed private text message from %s [%s] to %s", packet.Sender, agencyID, packet.Recipient)
 		} else {
 			log.Printf("Private text from %s to %s not delivered (recipient offline or other agency)", packet.Sender, packet.Recipient)
 		}
 		return
 	}
 
-	// Broadcast message to all clients in the same channel
+	channel := s.channels[channelKey(agencyID, chNum)]
+	if channel == nil {
+		s.mu.Unlock()
+		return
+	}
+	var addrs []*net.UDPAddr
 	channel.mu.RLock()
-	relayCount := 0
 	for _, otherClient := range channel.Clients {
-		s.sendPacket(textData, otherClient.Addr)
-		relayCount++
+		addrs = append(addrs, otherClient.Addr)
 	}
 	channel.mu.RUnlock()
 
-	// Check for mutual aid partners — also relay to partner agencies' same channel
-	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
-	for _, partnerAgency := range partners {
-		partnerKey := channelKey(partnerAgency, client.Channel)
-		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
+	// Mutual aid partners — also relay to partner agencies' same channel
+	for _, partnerAgency := range s.getMutualAidPartners(agencyID, chNum) {
+		if partnerChannel := s.channels[channelKey(partnerAgency, chNum)]; partnerChannel != nil {
 			partnerChannel.mu.RLock()
 			for _, otherClient := range partnerChannel.Clients {
-				s.sendPacket(textData, otherClient.Addr)
-				relayCount++
+				addrs = append(addrs, otherClient.Addr)
 			}
 			partnerChannel.mu.RUnlock()
 		}
 	}
+	s.mu.Unlock()
+
+	for _, a := range addrs {
+		s.sendPacket(textData, a)
+	}
 
 	log.Printf("Relayed text message from %s [%s] to %d clients in channel %d",
-		packet.Sender, client.AgencyID, relayCount-1, client.Channel)
+		packet.Sender, agencyID, len(addrs)-1, chNum)
 }
 
 func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
+	// An address that has not logged in (a new NAT mapping, a network switch,
+	// a server restart) gets no answer at all. That silence is exactly what
+	// every client's liveness watchdog treats as "link dead": after 3.5
+	// heartbeat intervals it reconnects and logs in again (Android
+	// ServerManager.handleConnectionLost -> reconnectLoop; a network-change
+	// callback does the same at once). An unsolicited failed AUTH_RESPONSE
+	// would NOT trigger that — the app only shows an "Authentication failed"
+	// toast — so silence is the correct "re-login needed" signal.
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
 		return
 	}
 
-	s.mu.RLock()
-	client, _ := s.findClientForSender(packet.Username, addr)
-	s.mu.RUnlock()
+	lowPower := packet.Flags&HeartbeatFlagLowPower != 0
 
+	s.mu.Lock()
+	client := s.senderClient(packet.Username, addr)
 	if client == nil {
+		blocked := s.senderBlocked(packet.Username, addr)
+		s.mu.Unlock()
+		if blocked {
+			// The callsign is online under another login account (or is a
+			// dispatch console): not this address's to refresh or re-home.
+			log.Printf("Heartbeat for %s from %s dropped: callsign belongs to another session", packet.Username, addr)
+			return
+		}
 		// Client not registered (record expired, or the server restarted while
 		// the client stayed authenticated) — re-register it on the channel it
 		// was last on. A heartbeat carries only the username, so the old code
@@ -1381,30 +1418,60 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		ch := s.lastChannelFor(packet.Username, addr)
 		log.Printf("Heartbeat from unregistered client %s — auto-registering on channel %d", packet.Username, ch)
 		s.handleJoin(&JoinPacket{Username: packet.Username, Channel: ch}, addr)
-		if packet.Flags&HeartbeatFlagLowPower != 0 {
+		if lowPower {
 			s.mu.Lock()
-			if c, _ := s.findClientForSender(packet.Username, addr); c != nil {
+			c := s.senderClient(packet.Username, addr)
+			if c != nil {
 				c.LowPower = true
 			}
 			s.mu.Unlock()
-			s.sendPacket(CreateHeartbeatPacketFlags(packet.Username, HeartbeatFlagLowPower), addr)
+			if c != nil {
+				s.sendPacket(CreateHeartbeatPacketFlags(packet.Username, HeartbeatFlagLowPower), addr)
+			}
 		}
 		return
 	}
 
-	// Update address in case it changed (e.g. mobile network switch)
-	client.Addr = addr
-
-	// Update client's last heartbeat
+	// Update address in case it changed (e.g. mobile network switch).
+	// senderClient only returns a record at another address when this
+	// address authenticated as that record's own login account.
+	s.adoptSenderAddr(client, addr, "heartbeat")
 	client.LastHeartbeat = time.Now()
-	client.LowPower = packet.Flags&HeartbeatFlagLowPower != 0
+	client.LowPower = lowPower
+	agencyID, chNum, username := client.AgencyID, client.Channel, client.Username
 
-	// Get client's agency-scoped channel
-	key := channelKey(client.AgencyID, client.Channel)
-	channel := s.channels[key]
+	// Everyone the heartbeat is relayed to, collected under the locks: the
+	// channel's member map is written by JOIN/LEAVE concurrently, and reading
+	// it unlocked was a fatal "concurrent map iteration and map write".
+	channel := s.channels[channelKey(agencyID, chNum)]
 	if channel == nil {
+		s.mu.Unlock()
 		return
 	}
+	var relayTo []*net.UDPAddr
+	channel.mu.RLock()
+	for _, otherClient := range channel.Clients {
+		// Low-power clients take presence from the roster instead: relaying
+		// every heartbeat to them kept their phone's cellular radio from ever
+		// idling.
+		if otherClient.Username != username && !otherClient.LowPower {
+			relayTo = append(relayTo, otherClient.Addr)
+		}
+	}
+	channel.mu.RUnlock()
+	// Mutual aid partners — also relay heartbeat to partner agencies' same channel
+	for _, partnerAgency := range s.getMutualAidPartners(agencyID, chNum) {
+		if partnerChannel := s.channels[channelKey(partnerAgency, chNum)]; partnerChannel != nil {
+			partnerChannel.mu.RLock()
+			for _, otherClient := range partnerChannel.Clients {
+				if !otherClient.LowPower {
+					relayTo = append(relayTo, otherClient.Addr)
+				}
+			}
+			partnerChannel.mu.RUnlock()
+		}
+	}
+	s.mu.Unlock()
 
 	// Create heartbeat packet
 	heartbeatData, err := CreateHeartbeatPacket(packet.Username)
@@ -1420,43 +1487,19 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	// keeps lastServerPacketTime fresh for every client, alone or not.
 	// A low-power client gets the flag back, which tells it this server
 	// supports the low-power stream.
-	if client.LowPower {
+	if lowPower {
 		s.sendPacket(CreateHeartbeatPacketFlags(packet.Username, HeartbeatFlagLowPower), addr)
 	} else {
 		s.sendPacket(heartbeatData, addr)
 	}
 
-	// Relay heartbeat to all other clients in the same channel (not to sender).
-	// Low-power clients take presence from the roster instead: relaying every
-	// heartbeat to them kept their phone's cellular radio from ever idling.
-	relayCount := 0
-	for _, otherClient := range channel.Clients {
-		if otherClient.Username != packet.Username && !otherClient.LowPower {
-			s.sendPacket(heartbeatData, otherClient.Addr)
-			relayCount++
-		}
+	for _, a := range relayTo {
+		s.sendPacket(heartbeatData, a)
 	}
 
-	// Check for mutual aid partners — also relay heartbeat to partner agencies' same channel
-	partners := s.getMutualAidPartners(client.AgencyID, client.Channel)
-	for _, partnerAgency := range partners {
-		partnerKey := channelKey(partnerAgency, client.Channel)
-		if partnerChannel := s.channels[partnerKey]; partnerChannel != nil {
-			partnerChannel.mu.RLock()
-			for _, otherClient := range partnerChannel.Clients {
-				if otherClient.LowPower {
-					continue
-				}
-				s.sendPacket(heartbeatData, otherClient.Addr)
-				relayCount++
-			}
-			partnerChannel.mu.RUnlock()
-		}
-	}
-
-	if relayCount > 0 {
+	if len(relayTo) > 0 {
 		log.Printf("Relayed heartbeat from %s [%s] to %d clients in channel %d",
-			packet.Username, client.AgencyID, relayCount, client.Channel)
+			packet.Username, agencyID, len(relayTo), chNum)
 	}
 }
 
@@ -1489,6 +1532,20 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	// Check if client already exists
 	ck := userKey(agencyID, packet.Username)
+	client, exists := s.clients[ck]
+	// The login account this address authenticated as ("" with auth off).
+	account := s.authAccounts[addr.String()]
+	if exists && s.config.AuthEnabled && !s.mayActAs(client, addr) {
+		// The callsign is online under a different login account (or is a
+		// dispatch console). Taking it over would steal its audio, its queued
+		// dispatch messages and — for an LMR gateway — the radio bridge. The
+		// SAME account re-joining from a new address (network switch, stale
+		// old session) passes mayActAs and moves the record as before.
+		s.mu.Unlock()
+		log.Printf("JOIN refused: %s [%s] from %s — callsign is online under another account (%s at %v)",
+			packet.Username, agencyID, addr, client.Account, client.Addr)
+		return
+	}
 	if s.lastChannel == nil {
 		s.lastChannel = make(map[string]int)
 	}
@@ -1496,7 +1553,6 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		s.lastChannel[ck] = packet.Channel
 		s.scheduleSaveLastChannels()
 	}
-	client, exists := s.clients[ck]
 	var oldChannel int
 	isChannelSwitch := false
 
@@ -1518,11 +1574,15 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		client.AgencyID = agencyID
 		client.Addr = addr
 		client.LastHeartbeat = time.Now()
+		if account != "" {
+			client.Account = account
+		}
 	} else {
 		// New client
 		client = &Client{
 			Username:      packet.Username,
 			AgencyID:      agencyID,
+			Account:       account,
 			Addr:          addr,
 			Channel:       packet.Channel,
 			LastHeartbeat: time.Now(),
@@ -2050,81 +2110,52 @@ func (s *Server) GetChannels(agencyFilter string) []map[string]interface{} {
 }
 
 func (s *Server) handleGroupCreate(packet *GroupPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
-		return
-	}
-
-	log.Printf("Group create from %s: %s (creator: %s, members: %v)", addr, packet.GroupName, packet.Creator, packet.Members)
-
-	// Store group
-	s.mu.Lock()
-	s.groups[packet.GroupID] = packet
-	s.mu.Unlock()
-
-	// Determine creator's agency
-	s.mu.RLock()
-	creatorAgency := "default"
-	if creator, _ := s.findClientByUsername(packet.Creator); creator != nil {
-		creatorAgency = creator.AgencyID
-	}
-
-	relayData, err := CreateGroupPacket(PacketTypeGroupCreate, packet)
-	if err != nil {
-		log.Printf("Error creating group packet: %v", err)
-		s.mu.RUnlock()
-		return
-	}
-
-	// Relay only to clients in the same agency
-	relayCount := 0
-	for _, client := range s.clients {
-		if client.AgencyID == creatorAgency {
-			s.sendPacket(relayData, client.Addr)
-			relayCount++
-		}
-	}
-	s.mu.RUnlock()
-
-	log.Printf("Relayed group create to %d clients [%s]", relayCount, creatorAgency)
+	s.relayGroupPacket(PacketTypeGroupCreate, packet, addr)
 }
 
 func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
+	s.relayGroupPacket(PacketTypeGroupUpdate, packet, addr)
+}
+
+// relayGroupPacket stores a legacy group create/update and relays it to the
+// creator's agency. The creator must be the client this address is signed in
+// as: the agency used to come from a by-name search for packet.Creator, so
+// anyone could push group packets into another agency.
+func (s *Server) relayGroupPacket(packetType byte, packet *GroupPacket, addr *net.UDPAddr) {
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
 		return
 	}
 
-	log.Printf("Group update from %s: %s (members: %v)", addr, packet.GroupName, packet.Members)
-
-	// Update stored group
-	s.mu.Lock()
-	s.groups[packet.GroupID] = packet
-	s.mu.Unlock()
-
-	// Determine creator's agency
-	s.mu.RLock()
-	creatorAgency := "default"
-	if creator, _ := s.findClientByUsername(packet.Creator); creator != nil {
-		creatorAgency = creator.AgencyID
-	}
-
-	relayData, err := CreateGroupPacket(PacketTypeGroupUpdate, packet)
+	relayData, err := CreateGroupPacket(packetType, packet)
 	if err != nil {
-		log.Printf("Error creating group update packet: %v", err)
-		s.mu.RUnlock()
+		log.Printf("Error creating group packet: %v", err)
 		return
 	}
 
+	s.mu.Lock()
+	creatorAgency := "default"
+	if creator := s.senderClient(packet.Creator, addr); creator != nil {
+		creatorAgency = creator.AgencyID
+	} else if s.config.AuthEnabled {
+		s.mu.Unlock()
+		log.Printf("Group packet from %s dropped: creator %q is not this session's client", addr, packet.Creator)
+		return
+	}
+	s.groups[packet.GroupID] = packet
+
 	// Relay only to clients in the same agency
-	relayCount := 0
+	var addrs []*net.UDPAddr
 	for _, client := range s.clients {
 		if client.AgencyID == creatorAgency {
-			s.sendPacket(relayData, client.Addr)
-			relayCount++
+			addrs = append(addrs, client.Addr)
 		}
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
-	log.Printf("Relayed group update to %d clients [%s]", relayCount, creatorAgency)
+	for _, a := range addrs {
+		s.sendPacket(relayData, a)
+	}
+	log.Printf("Relayed group packet 0x%02X %q (creator %s) to %d clients [%s]", packetType, packet.GroupName, packet.Creator, len(addrs), creatorAgency)
 }
 
 func (s *Server) GetGroups() []map[string]interface{} {
@@ -2231,14 +2262,24 @@ func (s *Server) findClientForSender(username string, addr *net.UDPAddr) (*Clien
 func (s *Server) lastChannelFor(username string, addr *net.UDPAddr) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var user *UserAccount
 	if addr != nil {
 		if agencyID := s.authenticatedAddrs[addr.String()]; agencyID != "" {
 			if ch, ok := s.lastChannel[userKey(agencyID, username)]; ok {
 				return ch
 			}
+			// Stay in the session's agency: a same-named account elsewhere
+			// says nothing about this client.
+			user = s.users[userKey(agencyID, username)]
+			if user == nil {
+				return 0
+			}
 		}
 	}
-	if user := s.findUserByUsername(username); user != nil {
+	if user == nil {
+		user = s.findUserByUsername(username)
+	}
+	if user != nil {
 		if ch, ok := s.lastChannel[userKey(user.AgencyID, username)]; ok {
 			return ch
 		}
@@ -2307,10 +2348,7 @@ func (s *Server) scheduleSaveLastChannels() {
 		if err != nil {
 			return
 		}
-		tmp := s.lastChannelsFile() + ".tmp"
-		if err := os.WriteFile(tmp, data, 0644); err == nil {
-			os.Rename(tmp, s.lastChannelsFile())
-		}
+		writeFileAtomic(s.lastChannelsFile(), data)
 	}()
 }
 
@@ -2358,16 +2396,22 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Try agency-scoped lookup first, fall back to search by username
-	var user *UserAccount
+	// Candidate accounts: the agency-scoped one when the client names its
+	// agency, otherwise every account with that username (older clients send
+	// no agency; the same username can exist in several agencies). Each
+	// candidate is checked against ITS OWN password and enrollment tokens, so
+	// the agency is decided by the credential, never by map order.
+	var candidates []*UserAccount
 	if packet.AgencyID != "" {
-		user = s.users[userKey(packet.AgencyID, packet.Username)]
+		if u := s.users[userKey(packet.AgencyID, packet.Username)]; u != nil {
+			candidates = append(candidates, u)
+		}
 	}
-	if user == nil {
-		user = s.findUserByUsername(packet.Username)
+	if len(candidates) == 0 {
+		candidates = s.findUsersByUsername(packet.Username)
 	}
 
-	if user == nil {
+	if len(candidates) == 0 {
 		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Unknown user"})
 		s.sendPacket(resp, addr)
@@ -2391,29 +2435,9 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 
 	// Challenge-response: client sends HMAC-SHA256(stored hash, nonce)
 	delete(s.pendingChallenges, addrKey) // consume nonce (one-time use)
-	expectedHmac := computeHmacSha256([]byte(user.PasswordHash), nonce[:])
-	authOk := subtle.ConstantTimeCompare(
-		[]byte(hex.EncodeToString(expectedHmac)),
-		[]byte(packet.PasswordHash)) == 1
-
-	// If real password didn't match, try enrollment tokens
-	usedEnrollToken := ""
-	if !authOk {
-		for token, et := range s.enrollmentTokens {
-			if et.Username == packet.Username && time.Now().Before(et.ExpiresAt) {
-				// The client used the enrollment token as a password:
-				// client computes SHA256(token), then HMAC(SHA256(token), nonce)
-				tokenHash := hashPassword(et.Token)
-				tokenHmac := computeHmacSha256([]byte(tokenHash), nonce[:])
-				if subtle.ConstantTimeCompare(
-					[]byte(hex.EncodeToString(tokenHmac)),
-					[]byte(packet.PasswordHash)) == 1 {
-					authOk = true
-					usedEnrollToken = token
-					break
-				}
-			}
-		}
+	user, usedEnrollToken, authOk := s.matchCredential(candidates, nonce, packet.PasswordHash)
+	if user == nil {
+		user = candidates[0] // for the log line only
 	}
 
 	if !authOk {
@@ -2491,6 +2515,51 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: msg})
 	s.sendPacket(resp, addr)
+}
+
+// matchCredential finds the account (among candidates) whose password, or one
+// of whose enrollment / guest tokens, produced the client's HMAC over nonce.
+// A token only ever authenticates the account it was issued for: same
+// username AND same agency. Matching on username alone let agency A's QR
+// code log in as (and rebind the password of) a same-named user in agency B.
+// Caller holds s.mu.
+func (s *Server) matchCredential(candidates []*UserAccount, nonce [32]byte, clientHmac string) (*UserAccount, string, bool) {
+	matches := func(hash string) bool {
+		expected := computeHmacSha256([]byte(hash), nonce[:])
+		return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(expected)), []byte(clientHmac)) == 1
+	}
+	for _, u := range candidates {
+		if matches(u.PasswordHash) {
+			return u, "", true
+		}
+	}
+	now := time.Now()
+	for _, u := range candidates {
+		for token, et := range s.enrollmentTokens {
+			if et.Username != u.Username || et.AgencyID != u.AgencyID || !now.Before(et.ExpiresAt) {
+				continue
+			}
+			// The client used the enrollment token as a password:
+			// client computes SHA256(token), then HMAC(SHA256(token), nonce)
+			if matches(hashPassword(et.Token)) {
+				return u, token, true
+			}
+		}
+	}
+	return nil, "", false
+}
+
+// findUsersByUsername returns every account with this username, in a stable
+// (agency) order. Caller holds s.mu.
+func (s *Server) findUsersByUsername(username string) []*UserAccount {
+	var out []*UserAccount
+	for _, u := range s.users {
+		if u.Username == username {
+			out = append(out, u)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AgencyID < out[j].AgencyID })
+	return out
 }
 
 // computeHmacSha256 computes HMAC-SHA256(key, data).
@@ -2604,21 +2673,24 @@ func (s *Server) loadUsers() {
 	log.Printf("Loaded %d user accounts", len(s.users))
 }
 
+// saveUsers writes users.json (owner-only, atomic). Caller holds s.mu (read or
+// write): it iterates s.users. Callers that have already released s.mu use
+// saveUsersUnlocked — iterating the map unlocked raced with logins and edits
+// ("concurrent map iteration and map write" is fatal in Go).
 func (s *Server) saveUsers() error {
 	users := make([]*UserAccount, 0, len(s.users))
 	for _, user := range s.users {
 		users = append(users, user)
 	}
 
-	file, err := os.Create(s.config.UsersFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+	return writeJSONFileAtomic(s.config.UsersFile, users)
+}
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(users)
+// saveUsersUnlocked is saveUsers for callers that do NOT hold s.mu.
+func (s *Server) saveUsersUnlocked() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.saveUsers()
 }
 
 func hashPassword(password string) string {
@@ -2966,15 +3038,7 @@ func (s *Server) saveWebAdmins() error {
 		admins = append(admins, *admin)
 	}
 
-	file, err := os.Create(s.config.WebAdminsFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(admins)
+	return writeJSONFileAtomic(s.config.WebAdminsFile, admins)
 }
 
 func (s *Server) generateSessionToken() string {
@@ -3028,15 +3092,7 @@ func (s *Server) saveAgencies() error {
 		agencies = append(agencies, agency)
 	}
 
-	file, err := os.Create(s.config.AgenciesFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(agencies)
+	return writeJSONFileAtomic(s.config.AgenciesFile, agencies)
 }
 
 // migrateToAgencies runs once if no agencies exist, creating a "default" agency
@@ -3262,15 +3318,7 @@ func (s *Server) saveMutualAid() error {
 		links = append(links, link)
 	}
 
-	file, err := os.Create(s.config.MutualAidFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(links)
+	return writeJSONFileAtomic(s.config.MutualAidFile, links)
 }
 
 // getMutualAidPartners returns all partner agency IDs if an active mutual aid link
@@ -3282,6 +3330,7 @@ func (s *Server) saveMutualAid() error {
 // several agencies onto one radio channel, which is the same relationship a
 // mutual-aid link describes. Routing both through this one function means the
 // three relay sites that call it need no LMR-specific branch.
+// Caller holds s.mu (read is enough): it walks the bridge and link maps.
 func (s *Server) getMutualAidPartners(agencyID string, channel int) []string {
 	if p := s.getLMRPartners(agencyID, channel); len(p) > 0 {
 		return p
@@ -3317,6 +3366,7 @@ func (s *Server) getMutualAidPartners(agencyID string, channel int) []string {
 }
 
 // hasMutualAidLink checks if two agencies share an active mutual aid link on any channel.
+// Caller holds s.mu (read is enough).
 func (s *Server) hasMutualAidLink(agencyA, agencyB string) bool {
 	for _, link := range s.mutualAidLinks {
 		if !link.Active {
@@ -3459,15 +3509,7 @@ func (s *Server) saveGuestEvents() error {
 		events = append(events, ev)
 	}
 
-	file, err := os.Create("guest_events.json")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(events)
+	return writeJSONFileAtomic("guest_events.json", events)
 }
 
 // CreateGuestEvent creates a guest event with a shared user account and multi-use token.
@@ -3686,12 +3728,15 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 		s.mu.Unlock()
 	}
 
+	// The savers iterate server maps: hold s.mu (read) while they run.
+	s.mu.RLock()
 	if ev.OwnsAgency {
 		s.saveAgencies()
 		s.saveWebAdmins()
 	}
-
-	if err := s.saveGuestEvents(); err != nil {
+	err := s.saveGuestEvents()
+	s.mu.RUnlock()
+	if err != nil {
 		log.Printf("Warning: failed to save guest events: %v", err)
 	}
 
@@ -3828,6 +3873,7 @@ func (s *Server) ownLMRBridge(c *Client) *LMRBridge {
 func (s *Server) autoFloorForGateway(client *Client, fkey string) bool {
 	s.mu.RLock()
 	own := s.ownLMRBridge(client)
+	acct := s.accountFor(client)
 	s.mu.RUnlock()
 	if own == nil || s.floor == nil {
 		return false
@@ -3844,7 +3890,6 @@ func (s *Server) autoFloorForGateway(client *Client, fkey string) bool {
 	s.autoFloorLast[client.Username] = time.Now()
 	s.autoFloorMu.Unlock()
 
-	acct := s.findUserByUsername(client.Username)
 	pri := acct.effectivePriority()
 	s.floor.Request(fkey, &FloorRequest{Channel: client.Channel, User: client.Username, Priority: pri}, pri)
 	granted := s.floor.HasFloor(fkey, client.Username)

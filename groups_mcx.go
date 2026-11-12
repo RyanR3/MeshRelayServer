@@ -345,6 +345,11 @@ func ParseGroupCreateAdhoc(data []byte) (*GroupCreateAdhoc, error) {
 	if err := binary.Read(r, binary.BigEndian, &count); err != nil {
 		return nil, err
 	}
+	// Each member costs at least its 2-byte length: never reserve room for
+	// more members than the packet can hold.
+	if int(count) > r.Len()/2 {
+		return nil, errLengthExceedsPacket
+	}
 	members := make([]string, 0, count)
 	for i := 0; i < int(count); i++ {
 		m, err := getStr(r)
@@ -367,8 +372,13 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
 		return
 	}
+	// The creator is the client this address is signed in as.
 	s.mu.RLock()
-	creator, _ := s.findClientByUsername(pkt.Creator)
+	var creator *Client
+	if c := s.senderClient(pkt.Creator, addr); c != nil {
+		cp := *c
+		creator = &cp
+	}
 	s.mu.RUnlock()
 	if creator == nil {
 		return
@@ -403,11 +413,16 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 		if m == pkt.Creator {
 			continue
 		}
+		// Resolve only among the invitable agencies (own + mutual-aid
+		// linked), never a same-named user of an unrelated agency.
 		s.mu.RLock()
-		mc, _ := s.findClientByUsername(m)
+		var maddr *net.UDPAddr
+		if mc := s.findClientInAgencies(m, invitable, agencyID); mc != nil {
+			maddr = mc.Addr
+		}
 		s.mu.RUnlock()
-		if mc != nil && invitable[mc.AgencyID] {
-			s.sendPacket(invite, mc.Addr)
+		if maddr != nil {
+			s.sendPacket(invite, maddr)
 			invited++
 		}
 	}
@@ -420,7 +435,11 @@ func (s *Server) handleGroupInviteResponse(resp *GroupInviteResponse, addr *net.
 		return
 	}
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(resp.User)
+	var client *Client
+	if c := s.senderClient(resp.User, addr); c != nil {
+		cp := *c
+		client = &cp
+	}
 	s.mu.RUnlock()
 	if client == nil {
 		return
@@ -471,7 +490,11 @@ func (s *Server) handleGroupDisband(pkt *GroupDisband, addr *net.UDPAddr) {
 		return
 	}
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(pkt.User)
+	var client *Client
+	if c := s.senderClient(pkt.User, addr); c != nil {
+		cp := *c
+		client = &cp
+	}
 	s.mu.RUnlock()
 	if client == nil {
 		return

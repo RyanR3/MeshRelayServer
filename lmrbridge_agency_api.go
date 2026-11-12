@@ -182,7 +182,7 @@ func (s *Server) handleCreateMyLMRBridge(w http.ResponseWriter, r *http.Request)
 			"failed to create gateway user: "+err.Error())
 		return
 	}
-	if err := s.saveUsers(); err != nil {
+	if err := s.saveUsersUnlocked(); err != nil {
 		log.Printf("LMR: failed to save users after creating gateway account: %v", err)
 	}
 
@@ -395,7 +395,7 @@ func (s *Server) handleDeleteMyLMRBridge(w http.ResponseWriter, r *http.Request)
 
 	go s.notifyLMRChannel(agencies, channel, chName, false)
 
-	if err := s.saveUsers(); err != nil {
+	if err := s.saveUsersUnlocked(); err != nil {
 		log.Printf("LMR: failed to save users after deleting gateway account: %v", err)
 	}
 	if err := s.saveLMRBridges(); err != nil {

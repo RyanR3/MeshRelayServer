@@ -39,8 +39,8 @@ func getStr(buf *bytes.Reader) (string, error) {
 	if err := binary.Read(buf, binary.BigEndian, &n); err != nil {
 		return "", err
 	}
-	b := make([]byte, n)
-	if _, err := buf.Read(b); err != nil {
+	b, err := readN(buf, int(n))
+	if err != nil {
 		return "", err
 	}
 	return string(b), nil
@@ -241,7 +241,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 
 	// Monitor priority cannot request the floor.
 	if effectivePriority >= PriorityMonitor {
-		fc.server.sendFloorToUser(req.User, buildFloorDenied(req.Channel, FloorDenyNoPermission, 0, holderName(c)))
+		fc.server.sendFloorToUserIn(key, req.User, buildFloorDenied(req.Channel, FloorDenyNoPermission, 0, holderName(c)))
 		return
 	}
 
@@ -253,7 +253,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 
 	// Already the holder? Re-grant (idempotent).
 	if c.holder.user == req.User {
-		fc.server.sendFloorToUser(req.User, buildFloorGranted(req.Channel, req.User, 0, 0))
+		fc.server.sendFloorToUserIn(key, req.User, buildFloorGranted(req.Channel, req.User, 0, 0))
 		return
 	}
 
@@ -263,7 +263,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 		oldPri := c.holder.priority
 		fc.interruptPlayback(c)
 		if c.holder != nil {
-			fc.server.sendFloorToUser(old, buildFloorPreempted(req.Channel, req.User, effectivePriority))
+			fc.server.sendFloorToUserIn(key, old, buildFloorPreempted(req.Channel, req.User, effectivePriority))
 		}
 		fc.grant(key, req.Channel, req.User, effectivePriority)
 		log.Printf("Floor %s: %s (pri %d) PREEMPTED %s (pri %d)", key, req.User, effectivePriority, old, oldPri)
@@ -275,11 +275,11 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 	// and keeps sending; those frames land in RecordDeferred.
 	if fc.server.floorQueueForAgency(agencyFromKey(key)) {
 		if d := c.recording[req.User]; d != nil {
-			fc.server.sendFloorToUser(req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(fc.deferredPos(c, d))))
+			fc.server.sendFloorToUserIn(key, req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(fc.deferredPos(c, d))))
 			return
 		}
 		if len(c.deferred) >= floorMaxQueue {
-			fc.server.sendFloorToUser(req.User, buildFloorDenied(req.Channel, FloorDenyChannelFull, 0, c.holder.user))
+			fc.server.sendFloorToUserIn(key, req.User, buildFloorDenied(req.Channel, FloorDenyChannelFull, 0, c.holder.user))
 			return
 		}
 		d := &deferredTx{user: req.User, priority: effectivePriority, started: time.Now()}
@@ -289,7 +289,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 		}
 		c.recording[req.User] = d
 		pos := fc.deferredPos(c, d)
-		fc.server.sendFloorToUser(req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(pos)))
+		fc.server.sendFloorToUserIn(key, req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(pos)))
 		log.Printf("Floor %s: %s queued for replay (#%d) behind %s", key, req.User, pos, c.holder.user)
 		return
 	}
@@ -297,10 +297,10 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 	// Equal/lower priority -> deny + queue.
 	pos := fc.enqueue(c, req.User, effectivePriority)
 	if pos == 0 {
-		fc.server.sendFloorToUser(req.User, buildFloorDenied(req.Channel, FloorDenyChannelFull, 0, c.holder.user))
+		fc.server.sendFloorToUserIn(key, req.User, buildFloorDenied(req.Channel, FloorDenyChannelFull, 0, c.holder.user))
 		return
 	}
-	fc.server.sendFloorToUser(req.User, buildFloorDenied(req.Channel, FloorDenyBusy, uint8(pos), c.holder.user))
+	fc.server.sendFloorToUserIn(key, req.User, buildFloorDenied(req.Channel, FloorDenyBusy, uint8(pos), c.holder.user))
 }
 
 func (c *floorChannel) holderPriorityBefore(user string) uint8 {
@@ -331,7 +331,7 @@ func (fc *FloorController) grant(key string, channel int, user string, priority 
 	c.holder = &floorHolder{user: user, priority: priority, lastAudio: time.Now(), grantedAt: time.Now()}
 	// remove from queue if present
 	fc.dequeueUser(c, user)
-	fc.server.sendFloorToUser(user, buildFloorGranted(channel, user, 0, 0))
+	fc.server.sendFloorToUserIn(key, user, buildFloorGranted(channel, user, 0, 0))
 }
 
 func (fc *FloorController) dequeueUser(c *floorChannel, user string) {
@@ -537,7 +537,7 @@ func (fc *FloorController) Emergency(key string, channel int, user string, activ
 		// resumes after).
 		fc.interruptPlayback(c)
 		if c.holder != nil && c.holder.user != user {
-			fc.server.sendFloorToUser(c.holder.user, buildFloorPreempted(channel, user, PriorityEmergency))
+			fc.server.sendFloorToUserIn(key, c.holder.user, buildFloorPreempted(channel, user, PriorityEmergency))
 		}
 		fc.grant(key, channel, user, PriorityEmergency)
 		fc.server.broadcastFloorToChannel(key, buildEmergencyAlert(channel, user, true))
@@ -627,19 +627,37 @@ func channelNumFromKey(key string) int {
 
 // sendFloorToUser sends a floor packet to a specific user's current address.
 func (s *Server) sendFloorToUser(username string, data []byte) {
+	s.sendFloorToUserIn("", username, data)
+}
+
+// sendFloorToUserIn sends a floor packet to a user of the floor channel key's
+// agency (key "" = any agency, the legacy by-name lookup). Floor state is
+// tracked by callsign, and the same callsign can exist in several agencies:
+// resolving by name alone delivered one agency's grants/denials to a
+// same-named user in another.
+func (s *Server) sendFloorToUserIn(key, username string, data []byte) {
 	if s.testFloorUserSink != nil {
 		s.testFloorUserSink(username, data)
 		return
 	}
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(username)
-	s.mu.RUnlock()
+	var client *Client
+	if key == "" {
+		client, _ = s.findClientByUsername(username)
+	} else {
+		client = s.clientInAgency(agencyFromKey(key), username)
+	}
+	var addr *net.UDPAddr
 	if client != nil {
+		addr = client.Addr
+	}
+	s.mu.RUnlock()
+	if addr != nil {
 		if s.testFloorSink != nil {
-			s.testFloorSink(client.Addr, data)
+			s.testFloorSink(addr, data)
 			return
 		}
-		s.sendPacket(data, client.Addr)
+		s.sendPacket(data, addr)
 	}
 }
 
@@ -672,8 +690,19 @@ func (s *Server) handleFloorRequest(req *FloorRequest, addr *net.UDPAddr) {
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
 		return
 	}
+	// The requester is the client this address is signed in as; the name in
+	// the request must be its callsign (another agency's user could otherwise
+	// take or release this agency's floor).
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(req.User)
+	var client *Client
+	var acct *UserAccount
+	if c := s.senderClient(req.User, addr); c != nil {
+		cp := *c
+		client = &cp
+		// Server-authoritative priority from the login account (ignore the
+		// client-claimed value).
+		acct = s.accountFor(c)
+	}
 	s.mu.RUnlock()
 	if client == nil {
 		return
@@ -682,7 +711,7 @@ func (s *Server) handleFloorRequest(req *FloorRequest, addr *net.UDPAddr) {
 		// Floor control off for this agency: auto-grant so clients that gate on
 		// grant still work (open-PTT semantics preserved).
 		if req.Priority != 0 {
-			s.sendFloorToUser(req.User, buildFloorGranted(req.Channel, req.User, 0, 0))
+			s.sendFloorToUserIn(channelKey(client.AgencyID, client.Channel), req.User, buildFloorGranted(req.Channel, req.User, 0, 0))
 		}
 		return
 	}
@@ -698,15 +727,13 @@ func (s *Server) handleFloorRequest(req *FloorRequest, addr *net.UDPAddr) {
 		return
 	}
 
-	// Server-authoritative priority (ignore client-claimed value).
-	acct := s.findUserByUsername(req.User)
 	pri := acct.effectivePriority()
 
 	// MCX Step 4: apply group-type rules. Broadcast channels deny the floor to
 	// anyone but the designated transmitter; emergency channels force Priority 1.
 	allowed, forced := s.groupFloorRules(key, req.User, pri)
 	if !allowed {
-		s.sendFloorToUser(req.User, buildFloorDenied(req.Channel, FloorDenyNoPermission, 0, s.BroadcastUser(key)))
+		s.sendFloorToUserIn(key, req.User, buildFloorDenied(req.Channel, FloorDenyNoPermission, 0, s.BroadcastUser(key)))
 		return
 	}
 	if forced != 0 {
@@ -731,7 +758,7 @@ func (s *Server) SetUserPriority(agencyID, username string, priority int) {
 		u.Priority = priority
 	}
 	s.mu.Unlock()
-	s.saveUsers()
+	s.saveUsersUnlocked()
 }
 
 // handleEmergencyAlert processes an EMERGENCY_ALERT (0x26): set or cancel the
@@ -741,8 +768,16 @@ func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) 
 	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
 		return
 	}
+	// Only the signed-in client itself can raise or cancel its emergency.
 	s.mu.RLock()
-	client, _ := s.findClientByUsername(alert.User)
+	var client *Client
+	isSupervisor := false
+	if c := s.senderClient(alert.User, addr); c != nil {
+		cp := *c
+		client = &cp
+		acct := s.accountFor(c)
+		isSupervisor = acct != nil && (acct.Role == "admin" || acct.Role == "super_admin")
+	}
 	s.mu.RUnlock()
 	if client == nil {
 		return
@@ -753,8 +788,6 @@ func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) 
 		return
 	}
 	key := channelKey(client.AgencyID, client.Channel)
-	acct := s.findUserByUsername(alert.User)
-	isSupervisor := acct != nil && (acct.Role == "admin" || acct.Role == "super_admin")
 	s.floor.Emergency(key, client.Channel, alert.User, alert.Active, isSupervisor)
 	// MCX Step 5: propagate an emergency set to the external MCX platform.
 	if s.sipGateway != nil && alert.Active {

@@ -186,11 +186,7 @@ func (s *Server) saveLMRBridges() error {
 	}
 	s.mu.RUnlock()
 
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.lmrBridgesFile(), data, 0600)
+	return writeJSONFileAtomic(s.lmrBridgesFile(), list)
 }
 
 // --- channel allocation ----------------------------------------------------

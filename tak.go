@@ -141,8 +141,9 @@ func (s *Server) saveTakConnections() error {
 	}
 	m.mu.Unlock()
 	sort.Slice(list, func(i, j int) bool { return list[i].AgencyID < list[j].AgencyID })
-	data, _ := json.MarshalIndent(list, "", "  ")
-	return os.WriteFile(takConnectionsFile, data, 0o600)
+	// TAK credentials: owner-only, written atomically (os.WriteFile kept the
+	// mode of a file created 0644 by an older version).
+	return writeJSONFileAtomic(takConnectionsFile, list)
 }
 
 // --- enrollment -------------------------------------------------------------

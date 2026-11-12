@@ -1508,7 +1508,7 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if pttSynced {
-		if err := s.saveUsers(); err != nil {
+		if err := s.saveUsersUnlocked(); err != nil {
 			log.Printf("Password change: failed to save users for %s: %v", username, err)
 		}
 	}

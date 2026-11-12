@@ -89,11 +89,7 @@ func (s *Server) saveMutualAidRequests() error {
 	}
 	s.mu.RUnlock()
 
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.mutualAidRequestsFile(), data, 0600)
+	return writeJSONFileAtomic(s.mutualAidRequestsFile(), list)
 }
 
 // newMutualAidRequestID mints a random request id.

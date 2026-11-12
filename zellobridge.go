@@ -281,14 +281,8 @@ func (s *Server) saveZelloBridges() error {
 	}
 	s.mu.RUnlock()
 
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	enc := json.NewEncoder(file)
-	enc.SetIndent("", "  ")
-	return enc.Encode(bridges)
+	// Holds Zello Work passwords: owner-only, written atomically.
+	return writeJSONFileAtomic(path, bridges)
 }
 
 // StartEnabledZelloBridges launches runtime goroutines for every enabled bridge.
@@ -754,7 +748,10 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 		}
 		s.mu.RUnlock()
 
-		for _, partner := range s.getMutualAidPartners(meshAgency, meshCh) {
+		s.mu.RLock()
+		zPartners := s.getMutualAidPartners(meshAgency, meshCh) // reads the link list: under s.mu
+		s.mu.RUnlock()
+		for _, partner := range zPartners {
 			s.mu.RLock()
 			pc := s.channels[channelKey(partner, meshCh)]
 			s.mu.RUnlock()

@@ -276,6 +276,25 @@ type GroupPacket struct {
 	Timestamp int64
 }
 
+// errLengthExceedsPacket is returned when a length field claims more bytes
+// than the packet actually carries.
+var errLengthExceedsPacket = errors.New("length field exceeds packet size")
+
+// readN reads exactly n bytes from r. The length comes from the packet itself,
+// so it is checked against the bytes actually left BEFORE anything is
+// allocated: a 7-byte packet claiming 10 MB of audio used to allocate the
+// full 10 MB (pre-auth, from anyone on the internet) before failing.
+func readN(r *bytes.Reader, n int) ([]byte, error) {
+	if n < 0 || n > r.Len() {
+		return nil, errLengthExceedsPacket
+	}
+	b := make([]byte, n)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
 // ParsePacket parses a raw packet and returns its type and data
 func ParsePacket(data []byte) (byte, interface{}, error) {
 	if len(data) < 1 {
@@ -403,8 +422,8 @@ func ParseAudioPacket(data []byte) (*AudioPacket, error) {
 	}
 
 	// Read username
-	usernameBytes := make([]byte, usernameLen)
-	if _, err := io.ReadFull(buf, usernameBytes); err != nil {
+	usernameBytes, err := readN(buf, int(usernameLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -420,8 +439,8 @@ func ParseAudioPacket(data []byte) (*AudioPacket, error) {
 	}
 
 	// Read audio data
-	audioData := make([]byte, audioLen)
-	if _, err := io.ReadFull(buf, audioData); err != nil {
+	audioData, err := readN(buf, int(audioLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -447,8 +466,8 @@ func ParseDirectAudioPacket(data []byte) (*DirectAudioPacket, error) {
 	}
 
 	// Read sender
-	senderBytes := make([]byte, senderLen)
-	if _, err := io.ReadFull(buf, senderBytes); err != nil {
+	senderBytes, err := readN(buf, int(senderLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -464,8 +483,8 @@ func ParseDirectAudioPacket(data []byte) (*DirectAudioPacket, error) {
 	}
 
 	// Read recipient
-	recipientBytes := make([]byte, recipientLen)
-	if _, err := io.ReadFull(buf, recipientBytes); err != nil {
+	recipientBytes, err := readN(buf, int(recipientLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -481,8 +500,8 @@ func ParseDirectAudioPacket(data []byte) (*DirectAudioPacket, error) {
 	}
 
 	// Read audio data
-	audioData := make([]byte, audioLen)
-	if _, err := io.ReadFull(buf, audioData); err != nil {
+	audioData, err := readN(buf, int(audioLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -507,8 +526,8 @@ func ParseTextPacket(data []byte) (*TextMessagePacket, error) {
 		return nil, errors.New("invalid sender length")
 	}
 
-	senderBytes := make([]byte, senderLen)
-	if _, err := io.ReadFull(buf, senderBytes); err != nil {
+	senderBytes, err := readN(buf, int(senderLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -522,8 +541,8 @@ func ParseTextPacket(data []byte) (*TextMessagePacket, error) {
 		return nil, errors.New("invalid recipient length")
 	}
 
-	recipientBytes := make([]byte, recipientLen)
-	if _, err := io.ReadFull(buf, recipientBytes); err != nil {
+	recipientBytes, err := readN(buf, int(recipientLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -537,8 +556,8 @@ func ParseTextPacket(data []byte) (*TextMessagePacket, error) {
 		return nil, errors.New("invalid content length")
 	}
 
-	contentBytes := make([]byte, contentLen)
-	if _, err := io.ReadFull(buf, contentBytes); err != nil {
+	contentBytes, err := readN(buf, int(contentLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -571,8 +590,8 @@ func ParseHeartbeatPacket(data []byte) (*HeartbeatPacket, error) {
 	}
 
 	// Read username
-	usernameBytes := make([]byte, usernameLen)
-	if _, err := io.ReadFull(buf, usernameBytes); err != nil {
+	usernameBytes, err := readN(buf, int(usernameLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -598,8 +617,8 @@ func ParseJoinPacket(data []byte) (*JoinPacket, error) {
 	}
 
 	// Read username
-	usernameBytes := make([]byte, usernameLen)
-	if _, err := io.ReadFull(buf, usernameBytes); err != nil {
+	usernameBytes, err := readN(buf, int(usernameLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -751,8 +770,8 @@ func ParseGroupPacket(data []byte) (*GroupPacket, error) {
 	if groupIDLen < 0 || groupIDLen > 512 {
 		return nil, errors.New("invalid group ID length")
 	}
-	groupIDBytes := make([]byte, groupIDLen)
-	if _, err := io.ReadFull(buf, groupIDBytes); err != nil {
+	groupIDBytes, err := readN(buf, int(groupIDLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -764,8 +783,8 @@ func ParseGroupPacket(data []byte) (*GroupPacket, error) {
 	if groupNameLen < 0 || groupNameLen > 256 {
 		return nil, errors.New("invalid group name length")
 	}
-	groupNameBytes := make([]byte, groupNameLen)
-	if _, err := io.ReadFull(buf, groupNameBytes); err != nil {
+	groupNameBytes, err := readN(buf, int(groupNameLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -777,8 +796,8 @@ func ParseGroupPacket(data []byte) (*GroupPacket, error) {
 	if creatorLen < 0 || creatorLen > 256 {
 		return nil, errors.New("invalid creator length")
 	}
-	creatorBytes := make([]byte, creatorLen)
-	if _, err := io.ReadFull(buf, creatorBytes); err != nil {
+	creatorBytes, err := readN(buf, int(creatorLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -801,8 +820,8 @@ func ParseGroupPacket(data []byte) (*GroupPacket, error) {
 		if memberLen < 0 || memberLen > 256 {
 			return nil, errors.New("invalid member length")
 		}
-		memberBytes := make([]byte, memberLen)
-		if _, err := io.ReadFull(buf, memberBytes); err != nil {
+		memberBytes, err := readN(buf, int(memberLen))
+		if err != nil {
 			return nil, err
 		}
 		members[i] = string(memberBytes)
@@ -866,8 +885,8 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 	if usernameLen < 0 || usernameLen > 256 {
 		return nil, errors.New("invalid username length")
 	}
-	usernameBytes := make([]byte, usernameLen)
-	if _, err := io.ReadFull(buf, usernameBytes); err != nil {
+	usernameBytes, err := readN(buf, int(usernameLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -879,8 +898,8 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 	if hashLen < 0 || hashLen > 256 {
 		return nil, errors.New("invalid password hash length")
 	}
-	hashBytes := make([]byte, hashLen)
-	if _, err := io.ReadFull(buf, hashBytes); err != nil {
+	hashBytes, err := readN(buf, int(hashLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -889,8 +908,7 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 	if buf.Len() >= 2 {
 		var agencyLen int16
 		if err := binary.Read(buf, binary.BigEndian, &agencyLen); err == nil && agencyLen > 0 && agencyLen <= 256 {
-			agencyBytes := make([]byte, agencyLen)
-			if _, err := io.ReadFull(buf, agencyBytes); err == nil {
+			if agencyBytes, err := readN(buf, int(agencyLen)); err == nil {
 				agencyID = string(agencyBytes)
 			}
 		}
@@ -965,8 +983,8 @@ func ParseAuthChallengeRequestPacket(data []byte) (*AuthChallengeRequestPacket, 
 	if usernameLen <= 0 || usernameLen > 256 {
 		return nil, errors.New("invalid username length")
 	}
-	usernameBytes := make([]byte, usernameLen)
-	if _, err := io.ReadFull(buf, usernameBytes); err != nil {
+	usernameBytes, err := readN(buf, int(usernameLen))
+	if err != nil {
 		return nil, err
 	}
 
@@ -975,8 +993,7 @@ func ParseAuthChallengeRequestPacket(data []byte) (*AuthChallengeRequestPacket, 
 	if buf.Len() >= 2 {
 		var agencyLen int16
 		if err := binary.Read(buf, binary.BigEndian, &agencyLen); err == nil && agencyLen > 0 && agencyLen <= 256 {
-			agencyBytes := make([]byte, agencyLen)
-			if _, err := io.ReadFull(buf, agencyBytes); err == nil {
+			if agencyBytes, err := readN(buf, int(agencyLen)); err == nil {
 				agencyID = string(agencyBytes)
 			}
 		}
