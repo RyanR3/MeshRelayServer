@@ -212,42 +212,45 @@ func (s *Server) handleShareMyLMRBridge(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	s.mu.Lock()
-	b := s.lmrBridges[id]
-	if b == nil {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusNotFound, "bridge not found")
-		return
-	}
-	if !b.ownedBy(mine) && !isSuper {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusForbidden, "only the owning agency can share this bridge")
-		return
-	}
-	if b.servesAgency(req.AgencyID) {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusConflict, "that agency already has access")
-		return
-	}
-	target := s.agencies[req.AgencyID]
-	if target == nil || !target.Discoverable {
-		// Refuse rather than confirm a hidden agency exists.
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusNotFound, "agency not found")
-		return
-	}
-	if !isSuper {
-		if me := s.agencies[mine]; me == nil || !me.Discoverable {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{"error": "make your agency discoverable before sharing a bridge"})
-			return
+	// All checks and the grant happen in one critical section with a
+	// deferred unlock: an early return used to leave s.mu held (the
+	// "make your agency discoverable" refusal), freezing the whole server.
+	var channel int
+	var chName string
+	var enabled bool
+	code, msg := func() (int, string) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		b := s.lmrBridges[id]
+		if b == nil {
+			return http.StatusNotFound, "bridge not found"
 		}
+		if !b.ownedBy(mine) && !isSuper {
+			return http.StatusForbidden, "only the owning agency can share this bridge"
+		}
+		if b.servesAgency(req.AgencyID) {
+			return http.StatusConflict, "that agency already has access"
+		}
+		target := s.agencies[req.AgencyID]
+		if target == nil || !target.Discoverable {
+			// Refuse rather than confirm a hidden agency exists.
+			return http.StatusNotFound, "agency not found"
+		}
+		if !isSuper {
+			if me := s.agencies[mine]; me == nil || !me.Discoverable {
+				return http.StatusForbidden, "make your agency discoverable before sharing a bridge"
+			}
+		}
+		b.Agencies = append(b.Agencies, req.AgencyID)
+		// The channel must exist in the new agency or its audio has nowhere to land.
+		s.ensureLMRChannel(req.AgencyID, b.Channel, b.displayName())
+		channel, chName, enabled = b.Channel, b.displayName(), b.Enabled
+		return 0, ""
+	}()
+	if code != 0 {
+		writeJSONError(w, code, msg)
+		return
 	}
-	b.Agencies = append(b.Agencies, req.AgencyID)
-	// The channel must exist in the new agency or its audio has nowhere to land.
-	s.ensureLMRChannel(req.AgencyID, b.Channel, b.displayName())
-	channel, chName, enabled := b.Channel, b.displayName(), b.Enabled
-	s.mu.Unlock()
 
 	if enabled {
 		go s.notifyLMRChannel([]string{req.AgencyID}, channel, chName, true)

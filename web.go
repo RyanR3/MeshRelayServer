@@ -39,6 +39,61 @@ type WebSocketMessage struct {
 }
 
 func (s *Server) StartWeb() error {
+	handler := s.webHandler()
+	addr := fmt.Sprintf(":%d", s.config.WebPort)
+
+	// pprof: only start if explicitly enabled, and bind to loopback only
+	if s.config.DebugPprof {
+		go func() {
+			log.Printf("pprof debug server on 127.0.0.1:6060 (loopback only)")
+			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+				log.Printf("pprof server error: %v", err)
+			}
+		}()
+	}
+
+	// Use http.Server with timeouts to prevent stuck connections from blocking the server
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// TLS: if cert and key are configured, serve HTTPS. The certificate is
+	// re-read from disk when the files change, so a Let's Encrypt renewal
+	// takes effect without a restart (the dashboard went down on 2026-09-25
+	// serving a certificate that had been renewed a month earlier).
+	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+		reloader, err := newCertReloader(s.config.TLSCertFile, s.config.TLSKeyFile)
+		if err != nil {
+			return err
+		}
+		srv.TLSConfig = &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: reloader.get,
+		}
+		log.Printf("Web GUI server starting on https://localhost%s (TLS enabled)", addr)
+		return srv.ListenAndServeTLS("", "")
+	}
+
+	// No TLS — warn if binding to non-loopback
+	log.Printf("WARNING: Web dashboard running without TLS on %s — admin credentials transmitted in cleartext", addr)
+	log.Printf("WARNING: Set tls_cert_file and tls_key_file in config.json to enable TLS")
+	log.Printf("Web GUI server starting on http://localhost%s", addr)
+	return srv.ListenAndServe()
+}
+
+// webHandler builds the dashboard's HTTP handler: routes, the role matrix,
+// session checks and security headers. Split out of StartWeb so tests can
+// drive the real router.
+func (s *Server) webHandler() http.Handler {
+	return securityHeaders(s.authMiddleware(s.webRouter()))
+}
+
+// webRouter registers every dashboard / console route.
+func (s *Server) webRouter() *mux.Router {
 	// Initialize WebSocket upgrader with proper origin checking
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -60,18 +115,20 @@ func (s *Server) StartWeb() error {
 	r.HandleFunc("/api/login", s.handleLogin).Methods("POST")
 	r.HandleFunc("/api/session", s.handleSession).Methods("GET")
 
-	// Authenticated API routes
+	// Authenticated API routes. Every /api route goes through the role
+	// matrix in web_security.go (deny-by-default: unlisted = super_admin).
 	api := r.PathPrefix("/api").Subrouter()
+	api.Use(s.rolePolicyMiddleware)
 	api.HandleFunc("/logout", s.handleLogout).Methods("POST")
 	api.HandleFunc("/stats", s.handleStats).Methods("GET")
 	api.HandleFunc("/clients", s.handleClients).Methods("GET")
 	api.HandleFunc("/channels", s.handleChannels).Methods("GET")
-	api.HandleFunc("/groups", s.handleGroups).Methods("GET")
+	api.HandleFunc("/groups", s.requireSuperAdmin(s.handleGroups)).Methods("GET")
 	// MCX Step 4: get/set a channel's MCX group type.
 	api.HandleFunc("/channel-group-types", s.handleGetChannelGroupTypes).Methods("GET")
 	api.HandleFunc("/channel-group-types", s.handleSetChannelGroupType).Methods("POST")
-	api.HandleFunc("/config", s.handleGetConfig).Methods("GET")
-	api.HandleFunc("/config", s.handleUpdateConfig).Methods("POST")
+	api.HandleFunc("/config", s.requireSuperAdmin(s.handleGetConfig)).Methods("GET")
+	api.HandleFunc("/config", s.requireSuperAdmin(s.handleUpdateConfig)).Methods("POST")
 	api.HandleFunc("/users", s.handleGetUsers).Methods("GET")
 	api.HandleFunc("/users", s.handleCreateUser).Methods("POST")
 	api.HandleFunc("/users/template", s.handleUserCsvTemplate).Methods("GET")
@@ -87,7 +144,7 @@ func (s *Server) StartWeb() error {
 	api.HandleFunc("/version", s.handleVersion).Methods("GET")
 	api.HandleFunc("/update/check", s.requireSuperAdmin(s.handleUpdateCheck)).Methods("POST")
 	api.HandleFunc("/update/apply", s.requireSuperAdmin(s.handleUpdateApply)).Methods("POST")
-	api.HandleFunc("/update/status", s.handleUpdateStatus).Methods("GET")
+	api.HandleFunc("/update/status", s.requireSuperAdmin(s.handleUpdateStatus)).Methods("GET")
 	api.HandleFunc("/github-token", s.requireSuperAdmin(s.handleGetGitHubToken)).Methods("GET")
 	api.HandleFunc("/github-token", s.requireSuperAdmin(s.handleSetGitHubToken)).Methods("POST")
 
@@ -164,6 +221,7 @@ func (s *Server) StartWeb() error {
 
 	// Guest Event management (super_admin sees all; agency_admin scoped to own agency)
 	api.HandleFunc("/guest-events", s.requireAdmin(s.handleGetGuestEvents)).Methods("GET")
+	api.HandleFunc("/guest-events/agencies", s.requireAdmin(s.handleGetGuestEventAgencies)).Methods("GET")
 	api.HandleFunc("/guest-events", s.requireAdmin(s.handleCreateGuestEvent)).Methods("POST")
 	api.HandleFunc("/guest-events/{id}", s.requireAdmin(s.handleDeleteGuestEvent)).Methods("DELETE")
 
@@ -200,49 +258,7 @@ func (s *Server) StartWeb() error {
 	r.HandleFunc("/dispatch.html", toCommand)
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./web")))
 
-	addr := fmt.Sprintf(":%d", s.config.WebPort)
-
-	// pprof: only start if explicitly enabled, and bind to loopback only
-	if s.config.DebugPprof {
-		go func() {
-			log.Printf("pprof debug server on 127.0.0.1:6060 (loopback only)")
-			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-				log.Printf("pprof server error: %v", err)
-			}
-		}()
-	}
-
-	// Use http.Server with timeouts to prevent stuck connections from blocking the server
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      s.authMiddleware(r),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	// TLS: if cert and key are configured, serve HTTPS. The certificate is
-	// re-read from disk when the files change, so a Let's Encrypt renewal
-	// takes effect without a restart (the dashboard went down on 2026-09-25
-	// serving a certificate that had been renewed a month earlier).
-	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
-		reloader, err := newCertReloader(s.config.TLSCertFile, s.config.TLSKeyFile)
-		if err != nil {
-			return err
-		}
-		srv.TLSConfig = &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: reloader.get,
-		}
-		log.Printf("Web GUI server starting on https://localhost%s (TLS enabled)", addr)
-		return srv.ListenAndServeTLS("", "")
-	}
-
-	// No TLS — warn if binding to non-loopback
-	log.Printf("WARNING: Web dashboard running without TLS on %s — admin credentials transmitted in cleartext", addr)
-	log.Printf("WARNING: Set tls_cert_file and tls_key_file in config.json to enable TLS")
-	log.Printf("Web GUI server starting on http://localhost%s", addr)
-	return srv.ListenAndServe()
+	return r
 }
 
 // authMiddleware checks for valid session cookie on all requests
@@ -261,9 +277,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check session cookie
-		cookie, err := r.Cookie("session")
-		if err != nil || !s.validateWebSession(cookie.Value) {
+		// Check session cookie (expiry, revocation and the account's current
+		// role are all resolved in sessionFor).
+		session := s.sessionFor(sessionToken(r))
+		if session == nil {
 			// API requests get 401 JSON
 			if strings.HasPrefix(path, "/api/") || path == "/ws" {
 				w.Header().Set("Content-Type", "application/json")
@@ -278,13 +295,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Enforce MustChangePassword server-side: block all privileged
 		// API calls until the admin has changed their password
+		// Looked up by the session's stored account key, never by the typed
+		// username: a login as "ADMIN" used to miss the "admin" entry here
+		// and skip the forced change.
 		s.mu.RLock()
-		session := s.webSessions[cookie.Value]
 		var mustChange bool
-		if session != nil {
-			if admin, exists := s.webAdmins[userKey(session.AgencyID, session.Username)]; exists {
-				mustChange = admin.MustChangePassword
-			}
+		if admin, exists := s.webAdmins[session.adminKey]; exists {
+			mustChange = admin.MustChangePassword
 		}
 		s.mu.RUnlock()
 
@@ -326,21 +343,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	req.AgencyID = strings.TrimSpace(req.AgencyID)
 
 	s.mu.RLock()
-	admin, exists := s.webAdmins[userKey(req.AgencyID, req.Username)]
+	adminKey := userKey(req.AgencyID, req.Username)
+	admin, exists := s.webAdmins[adminKey]
 	if !exists {
 		// The login page's Agency ID and username are free text. Store keys
 		// are case-sensitive ("dev" vs "DEV"), which read as "wrong password"
 		// with no way to tell. Fall back to a case-insensitive match.
 		for k, a := range s.webAdmins {
 			if strings.EqualFold(k, userKey(req.AgencyID, req.Username)) {
-				admin, exists = a, true
+				admin, exists, adminKey = a, true, k
 				break
 			}
 		}
 	}
+	// Work from a copy: the stored entry may be edited concurrently.
+	var snap WebAdmin
+	if exists {
+		snap = *admin
+	}
 	s.mu.RUnlock()
 
-	if !exists || !checkPassword(req.Password, admin.PasswordHash) {
+	if !exists || !checkPassword(req.Password, snap.PasswordHash) {
 		// Say WHICH half failed in the journal (never to the client): a
 		// missing account and a wrong password are different problems.
 		if !exists {
@@ -355,45 +378,41 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Transparently migrate legacy SHA-256 hashes to bcrypt on successful login
-	if !strings.HasPrefix(admin.PasswordHash, "$2a$") && !strings.HasPrefix(admin.PasswordHash, "$2b$") {
+	if !strings.HasPrefix(snap.PasswordHash, "$2a$") && !strings.HasPrefix(snap.PasswordHash, "$2b$") {
 		if newHash, err := hashPasswordSecure(req.Password); err == nil {
 			s.mu.Lock()
 			admin.PasswordHash = newHash
 			s.mu.Unlock()
+			snap.PasswordHash = newHash
 			s.saveWebAdmins()
 			log.Printf("Upgraded password hash to bcrypt for user: %s", req.Username)
 		}
 	}
 
-	// Create session with role info
-	token := s.generateSessionToken()
-	s.mu.Lock()
-	s.webSessions[token] = &WebSession{
-		Username: req.Username,
-		Role:     admin.Role,
-		AgencyID: admin.AgencyID,
-	}
-	s.mu.Unlock()
+	// Create the session against the STORED account (canonical case): the
+	// name typed at login may differ in case from the account's.
+	token := s.createWebSession(adminKey, &snap)
+	req.Username = snap.Username
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session",
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		MaxAge:   86400, // 24 hours
+		MaxAge:   int(webSessionMaxLifetime / time.Second),
 		Secure:   s.config.TLSCertFile != "",
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, admin.Role, r.RemoteAddr)
-	s.activityLog.Add("admin_login", req.Username, fmt.Sprintf("Web dashboard login (role: %s)", admin.Role), admin.AgencyID)
+	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, snap.Role, r.RemoteAddr)
+	s.activityLog.Add("admin_login", req.Username, fmt.Sprintf("Web dashboard login (role: %s)", snap.Role), snap.AgencyID)
 	w.Header().Set("Content-Type", "application/json")
-	mustChange := admin.MustChangePassword
+	mustChange := snap.MustChangePassword
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":               "ok",
 		"username":             req.Username,
-		"role":                 admin.Role,
-		"agency_id":            admin.AgencyID,
+		"role":                 snap.Role,
+		"agency_id":            snap.AgencyID,
 		"must_change_password": mustChange,
 	})
 }
@@ -422,8 +441,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("session")
-	if err != nil || !s.validateWebSession(cookie.Value) {
+	session := s.sessionFor(sessionToken(r))
+	if session == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"not authenticated"}`))
@@ -431,8 +450,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	session := s.webSessions[cookie.Value]
-	admin, exists := s.webAdmins[userKey(session.AgencyID, session.Username)]
+	admin, exists := s.webAdmins[session.adminKey]
 	mustChange := exists && admin.MustChangePassword
 	s.mu.RUnlock()
 
@@ -447,15 +465,10 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getSession extracts the WebSession from the request cookie.
+// getSession returns a snapshot of the request's session with the account's
+// current role and agency, or nil if there is no valid session.
 func (s *Server) getSession(r *http.Request) *WebSession {
-	cookie, err := r.Cookie("session")
-	if err != nil {
-		return nil
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.webSessions[cookie.Value]
+	return s.sessionFor(sessionToken(r))
 }
 
 // requireSuperAdmin wraps a handler to require super_admin role.
@@ -489,7 +502,7 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	agencyFilter := ""
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyFilter = session.AgencyID
 	}
 	stats := s.GetStats(agencyFilter)
@@ -499,7 +512,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	agencyFilter := r.URL.Query().Get("agency")
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyFilter = session.AgencyID
 	}
 	clients := s.GetClients(agencyFilter)
@@ -509,7 +522,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 	agencyFilter := r.URL.Query().Get("agency")
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyFilter = session.AgencyID
 	}
 	channels := s.GetChannels(agencyFilter)
@@ -521,11 +534,25 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(groups)
 }
 
+// handleGetConfig / handleUpdateConfig: super_admin only (routed through
+// requireSuperAdmin and the role matrix; checked here again because the
+// config holds the GitHub token and the auth switch).
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if !isSuperAdmin(s.getSession(r)) {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusForbidden, "super admin access required")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.config)
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if !isSuperAdmin(s.getSession(r)) {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusForbidden, "super admin access required")
+		return
+	}
 	var newConfig Config
 	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -548,16 +575,29 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // users, so the dashboard can display/edit them.
 func (s *Server) handleGetChannelGroupTypes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Keys are "agency:channel"; an agency admin sees only its own.
+	prefix := ""
+	if session := s.getSession(r); !isSuperAdmin(session) {
+		if session == nil {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		prefix = session.AgencyID + ":"
+	}
+	types := map[string]string{}
+	bcast := map[string]string{}
 	s.mu.RLock()
-	types := s.config.ChannelGroupTypes
-	bcast := s.config.BroadcastUsers
+	for k, v := range s.config.ChannelGroupTypes {
+		if strings.HasPrefix(k, prefix) {
+			types[k] = v
+		}
+	}
+	for k, v := range s.config.BroadcastUsers {
+		if strings.HasPrefix(k, prefix) {
+			bcast[k] = v
+		}
+	}
 	s.mu.RUnlock()
-	if types == nil {
-		types = map[string]string{}
-	}
-	if bcast == nil {
-		bcast = map[string]string{}
-	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"channel_group_types": types,
 		"broadcast_users":     bcast,
@@ -580,7 +620,7 @@ func (s *Server) handleSetChannelGroupType(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// Agency admins can only edit their own agency.
-	if session := s.getSession(r); session != nil && session.Role == "agency_admin" {
+	if session := s.getSession(r); !isSuperAdmin(session) {
 		req.AgencyID = session.AgencyID
 	}
 	if req.AgencyID == "" {
@@ -681,9 +721,24 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Capture the session BEFORE upgrading: the dashboard socket carries a
 	// per-agency mutual-aid signal, and after the upgrade there is no request
 	// to read cookies from.
-	wsAgency := ""
-	if session := s.getSession(r); session != nil {
-		wsAgency = session.AgencyID
+	token := sessionToken(r)
+	session := s.sessionFor(token)
+	if session == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// The dashboard feed is for admins; the /command console has its own
+	// socket (/ws/dispatch).
+	if session.Role != "super_admin" && session.Role != "agency_admin" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	wsAgency := session.AgencyID
+	// What this socket may see: everything for a super admin, otherwise the
+	// session's own agency only.
+	scope := wsAgency
+	if isSuperAdmin(session) {
+		scope = ""
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -715,7 +770,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Send initial data
-	s.sendWebSocketUpdate(conn, wsAgency)
+	s.sendWebSocketUpdate(conn, wsAgency, scope)
 
 	// Send updates every 2 seconds, ping every 30 seconds
 	ticker := time.NewTicker(2 * time.Second)
@@ -728,13 +783,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case <-s.shutdown:
 			return
 		case <-pingTicker.C:
+			// An open dashboard counts as activity (keeps the session from
+			// idling out), and a revoked/expired session closes the feed.
+			if cur := s.sessionFor(token); cur == nil || cur.Role != session.Role || cur.AgencyID != session.AgencyID {
+				log.Printf("WebSocket closed: session for %s ended", session.Username)
+				return
+			}
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				log.Printf("WebSocket ping error: %v", err)
 				return
 			}
 		case <-ticker.C:
-			if err := s.sendWebSocketUpdate(conn, wsAgency); err != nil {
+			if err := s.sendWebSocketUpdate(conn, wsAgency, scope); err != nil {
 				log.Printf("WebSocket send error: %v", err)
 				return
 			}
@@ -742,36 +803,43 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) sendWebSocketUpdate(conn *websocket.Conn, agencyID string) error {
-	// WebSocket sends unfiltered data; the frontend filters by role
+// sendWebSocketUpdate pushes one dashboard update. scope is the agency the
+// session may see ("" = all, super admin only); agencyID drives the
+// mutual-aid revision signal.
+func (s *Server) sendWebSocketUpdate(conn *websocket.Conn, agencyID, scope string) error {
 	msg := WebSocketMessage{
 		Type: "update",
-		Data: map[string]interface{}{
-			"stats":              s.GetStats(""),
-			"clients":            s.GetClients(""),
-			"channels":           s.GetChannels(""),
-			"network_timeseries": s.networkTimeSeries.GetPoints(),
-			"health":             s.CheckHealth(),
-			"activity":           s.activityLog.GetRecent(20),
-			// A cheap fingerprint of everything this agency's pages show:
-			// mutual aid plus the Zello and LMR bridges it owns or has been
-			// granted. The dashboard reloads the open page only when this
-			// CHANGES, so a request arriving, a bridge being shared, or one
-			// being deleted appears without the operator hitting refresh —
-			// and without polling those endpoints every two seconds.
-			"mutual_aid_rev": s.agencyRevision(agencyID),
-		},
+		Data: s.dashboardUpdate(agencyID, scope),
 	}
 
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteJSON(msg)
 }
 
+// dashboardUpdate builds the /ws payload, filtered server-side to scope.
+func (s *Server) dashboardUpdate(agencyID, scope string) map[string]interface{} {
+	return map[string]interface{}{
+		"stats":              s.GetStats(scope),
+		"clients":            s.GetClients(scope),
+		"channels":           s.GetChannels(scope),
+		"network_timeseries": s.networkTimeSeries.GetPoints(),
+		"health":             s.CheckHealth(),
+		"activity":           s.activityLog.GetRecentForAgency(20, scope),
+		// A cheap fingerprint of everything this agency's pages show:
+		// mutual aid plus the Zello and LMR bridges it owns or has been
+		// granted. The dashboard reloads the open page only when this
+		// CHANGES, so a request arriving, a bridge being shared, or one
+		// being deleted appears without the operator hitting refresh —
+		// and without polling those endpoints every two seconds.
+		"mutual_aid_rev": s.agencyRevision(agencyID),
+	}
+}
+
 func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	session := s.getSession(r)
 	agencyFilter := ""
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyFilter = session.AgencyID
 	}
 	events := s.activityLog.GetRecentForAgency(50, agencyFilter)
@@ -781,17 +849,19 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	session := s.getSession(r)
+	if session == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	agencyFilter := r.URL.Query().Get("agency")
-	callerRole := "super_admin"
-	callerAgency := ""
-	callerUsername := ""
-	if session != nil {
-		callerRole = session.Role
-		callerAgency = session.AgencyID
-		callerUsername = session.Username
-		if session.Role == "agency_admin" {
-			agencyFilter = session.AgencyID
-		}
+	callerRole := session.Role
+	callerAgency := session.AgencyID
+	callerUsername := session.Username
+	if !isSuperAdmin(session) {
+		// GetUsers' own visibility rules key off "agency_admin"; anyone who
+		// is not a super admin is treated as one and pinned to their agency.
+		callerRole = "agency_admin"
+		agencyFilter = session.AgencyID
 	}
 	users := s.GetUsers(agencyFilter, callerRole, callerAgency, callerUsername)
 	json.NewEncoder(w).Encode(users)
@@ -819,10 +889,27 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"username and password required"}`))
 		return
 	}
+	if err := validateAccountName(req.Username); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateDisplayName("name", req.Name); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	switch req.Role {
+	case "", "user", "admin", "super_admin", "dispatch":
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, "role must be user, admin, dispatch or super_admin")
+		return
+	}
 
 	// Determine agency based on session role
 	session := s.getSession(r)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		req.AgencyID = session.AgencyID
 		// Agency admins can create "user" or "admin" but not "super_admin"
 		if req.Role == "super_admin" {
@@ -846,6 +933,15 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	if req.Role == "" {
 		req.Role = "user"
+	}
+
+	s.mu.RLock()
+	taken := s.accountNameTakenLocked(req.AgencyID, req.Username, "")
+	s.mu.RUnlock()
+	if taken {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusConflict, "a user with that name (in any letter case) already exists in this agency")
+		return
 	}
 
 	// Dispatch users are web-only (no PTT account needed) — create a WebAdmin entry directly
@@ -1004,9 +1100,26 @@ func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
 		if role == "" {
 			role = "user"
 		}
+		if err := validateAccountName(username); err != nil {
+			failed++
+			results = append(results, rowResult{line, username, "error", err.Error(), ""})
+			continue
+		}
+		if err := validateDisplayName("name", name); err != nil {
+			failed++
+			results = append(results, rowResult{line, username, "error", err.Error(), ""})
+			continue
+		}
+		switch role {
+		case "user", "admin", "super_admin", "dispatch":
+		default:
+			failed++
+			results = append(results, rowResult{line, username, "error", "role must be user, admin, dispatch or super_admin", ""})
+			continue
+		}
 
 		// Enforce the same agency/role scoping as single create.
-		if session != nil && session.Role == "agency_admin" {
+		if !isSuperAdmin(session) {
 			agencyID = session.AgencyID
 			if role == "super_admin" {
 				failed++
@@ -1021,6 +1134,14 @@ func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		if agencyID == "" {
 			agencyID = "default"
+		}
+		s.mu.RLock()
+		taken := s.accountNameTakenLocked(agencyID, username, "")
+		s.mu.RUnlock()
+		if taken {
+			skipped++
+			results = append(results, rowResult{line, username, "skipped", "already exists (name matches in a different letter case)", ""})
+			continue
 		}
 
 		if role == "dispatch" {
@@ -1080,26 +1201,20 @@ func (s *Server) handleGenerateEnrollToken(w http.ResponseWriter, r *http.Reques
 	agencyID := r.URL.Query().Get("agency")
 
 	session := s.getSession(r)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyID = session.AgencyID
 	}
 	if agencyID == "" {
 		agencyID = "default"
 	}
 
+	// Exact agency + username only. There used to be a username-only
+	// fallback across all agencies, which handed an agency admin a login
+	// token for another agency's account of the same name.
 	s.mu.Lock()
-	key := userKey(agencyID, username)
-	user, exists := s.users[key]
-	if !exists {
-		// Try finding by username alone
-		for k, u := range s.users {
-			if u.Username == username {
-				user = u
-				key = k
-				exists = true
-				break
-			}
-		}
+	user, exists := s.users[userKey(agencyID, username)]
+	if exists && !isSuperAdmin(session) && (user.AgencyID != session.AgencyID || user.Role == "super_admin") {
+		exists = false
 	}
 	if !exists {
 		s.mu.Unlock()
@@ -1127,7 +1242,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	agencyID := r.URL.Query().Get("agency")
 
 	session := s.getSession(r)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyID = session.AgencyID
 	}
 	if agencyID == "" {
@@ -1146,6 +1261,20 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"invalid request"}`))
 		return
 	}
+	if req.NewUsername != nil && *req.NewUsername != "" && *req.NewUsername != username {
+		if err := validateAccountName(*req.NewUsername); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.Name != nil {
+		if err := validateDisplayName("name", *req.Name); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1160,7 +1289,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Agency admins can only edit users in their agency (not super_admin)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		if user.AgencyID != session.AgencyID || user.Role == "super_admin" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -1217,7 +1346,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	// If key changed, check for conflicts and re-key
 	if newKey != oldKey {
-		if _, conflict := s.users[newKey]; conflict {
+		if _, conflict := s.users[newKey]; conflict || s.accountNameTakenLocked(newAgency, newUsername, oldKey) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(`{"error":"a user with that username already exists in the target agency"}`))
@@ -1244,6 +1373,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	// hash — the admin "password stopped working" again (seen on the AWS
 	// server: reset at 19:00, update/restart at 19:07, locked out at 19:07:29).
 	if adminPasswordChanged {
+		// A password reset, rename or agency move ends the account's
+		// dashboard sessions (they are keyed to the old account/password).
+		s.revokeWebSessionsLocked(oldKey, "")
 		if err := s.saveWebAdmins(); err != nil {
 			log.Printf("Edit user: failed to save web admins for %s: %v", oldKey, err)
 		}
@@ -1267,19 +1399,36 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// agencyAdminMayManage reports whether an agency admin of agency may delete
+// or reset the password of username in that agency: a PTT account that is not
+// a super admin, or a web-only dispatch login of the same agency.
+func (s *Server) agencyAdminMayManage(agency, username string) bool {
+	if agency == "" {
+		return false
+	}
+	key := userKey(agency, username)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if user, ok := s.users[key]; ok {
+		return user.AgencyID == agency && user.Role != "super_admin"
+	}
+	if admin, ok := s.webAdmins[key]; ok {
+		return admin.Role == "dispatch" && admin.AgencyID == agency
+	}
+	return false
+}
+
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
 	agencyID := r.URL.Query().Get("agency")
 
 	session := s.getSession(r)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyID = session.AgencyID
-		// Agency admins can delete "user" and "admin" role accounts (not super_admin)
-		s.mu.RLock()
-		user, exists := s.users[userKey(agencyID, username)]
-		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID || user.Role == "super_admin" {
+		// Agency admins can delete "user" and "admin" role accounts and
+		// their own agency's dispatch logins (not super_admin)
+		if !s.agencyAdminMayManage(session.AgencyID, username) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"cannot delete this user"}`))
@@ -1293,6 +1442,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
 	}
+	s.revokeWebSessions(userKey(agencyID, username), "")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -1305,13 +1455,11 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	agencyID := r.URL.Query().Get("agency")
 
 	session := s.getSession(r)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyID = session.AgencyID
-		// Agency admins can edit "user" and "admin" passwords (not super_admin)
-		s.mu.RLock()
-		user, exists := s.users[userKey(agencyID, username)]
-		s.mu.RUnlock()
-		if !exists || user.AgencyID != session.AgencyID || user.Role == "super_admin" {
+		// Agency admins can edit "user", "admin" and own-agency dispatch
+		// passwords (not super_admin)
+		if !s.agencyAdminMayManage(session.AgencyID, username) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"cannot edit this user"}`))
@@ -1343,6 +1491,7 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.revokeWebSessions(userKey(agencyID, username), "")
 	log.Printf("Password updated for user: %s [%s]", username, agencyID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -1357,7 +1506,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	session := s.getSession(r)
 
 	// Agency admins can change roles of "user" and "admin" accounts in their agency (not super_admin)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		agencyID = session.AgencyID
 		s.mu.RLock()
 		user, exists := s.users[userKey(agencyID, username)]
@@ -1395,11 +1544,22 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mu.RLock()
+	oldRole := ""
+	if u, ok := s.users[userKey(agencyID, username)]; ok {
+		oldRole = u.Role
+	}
+	s.mu.RUnlock()
 	if err := s.UpdateUserRole(agencyID, username, req.Role); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
+	}
+	// A real role change ends the account's dashboard sessions; re-saving
+	// the same role does not.
+	if oldRole != req.Role {
+		s.revokeWebSessions(userKey(agencyID, username), "")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1472,7 +1632,7 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.mu.Lock()
-	admin, exists := s.webAdmins[userKey(session.AgencyID, username)]
+	admin, exists := s.webAdmins[session.adminKey]
 	if !exists {
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -1491,11 +1651,19 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	admin.PasswordHash = newHash
 	admin.MustChangePassword = false
 
+	// End every OTHER session of this account (a stolen cookie dies with the
+	// old password); this one carries on under the new hash.
+	token := sessionToken(r)
+	s.revokeWebSessionsLocked(session.adminKey, token)
+	if cur := s.webSessions[token]; cur != nil {
+		cur.pwHash = newHash
+	}
+
 	// Keep the PTT account in step. An agency_admin usually has a users.json
 	// entry too, and changing only the dashboard hash leaves the app unable to
 	// log in with the new password — the two stores must not drift apart.
 	pttSynced := false
-	if user, ok := s.users[userKey(session.AgencyID, username)]; ok {
+	if user, ok := s.users[session.adminKey]; ok {
 		user.PasswordHash = hashPassword(req.NewPassword)
 		pttSynced = true
 	}
@@ -1582,6 +1750,14 @@ func (s *Server) handleCreateAgency(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"id and name required"}`))
 		return
 	}
+	if err := validateAgencyID(req.ID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateDisplayName("agency name", req.Name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if req.MaxUsers <= 0 {
 		req.MaxUsers = 100
@@ -1637,6 +1813,10 @@ func (s *Server) handleUpdateAgency(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid request"}`))
+		return
+	}
+	if err := validateDisplayName("agency name", req.Name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1743,6 +1923,10 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 		w.Write([]byte(`{"error":"username and password required"}`))
 		return
 	}
+	if err := validateAccountName(req.Username); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	s.mu.Lock()
 	if _, exists := s.agencies[agencyID]; !exists {
@@ -1753,7 +1937,13 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 	}
 
 	key := userKey(agencyID, req.Username)
-	if _, exists := s.webAdmins[key]; exists {
+	dup := false
+	for k := range s.webAdmins {
+		if strings.EqualFold(k, key) {
+			dup = true // "Admin" next to "admin" would be ambiguous at login
+		}
+	}
+	if dup {
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusConflict)
 		w.Write([]byte(`{"error":"admin username already exists in this agency"}`))
@@ -1961,7 +2151,7 @@ func (s *Server) handleGetGuestEvents(w http.ResponseWriter, r *http.Request) {
 	// Agency admins only see events their agency created; super_admins see all.
 	session := s.getSession(r)
 	ownerFilter := ""
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		ownerFilter = session.AgencyID
 	}
 
@@ -2025,6 +2215,10 @@ func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) 
 		w.Write([]byte(`{"error":"event name is required"}`))
 		return
 	}
+	if err := validateDisplayName("event name", req.Name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var expiresAt *time.Time
 	if req.ExpiresIn != "" {
@@ -2039,13 +2233,30 @@ func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) 
 	}
 
 	session := s.getSession(r)
-	createdBy := ""
+	if session == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	createdBy := session.Username
 	ownerAgencyID := ""
-	if session != nil {
-		createdBy = session.Username
-		// Agency admins own the events they create; super_admin events are unscoped.
-		if session.Role == "agency_admin" {
-			ownerAgencyID = session.AgencyID
+	// Agency admins own the events they create; super_admin events are unscoped.
+	if !isSuperAdmin(session) {
+		ownerAgencyID = session.AgencyID
+		// Bridging an agency into the event channel patches every one of its
+		// members in, so it needs that agency's consent: a standing
+		// agreement or an approved mutual-aid patch with the creator.
+		s.mu.RLock()
+		var refused []string
+		for _, aid := range req.Agencies {
+			if aid != "" && !s.guestIncludeAllowedLocked(ownerAgencyID, aid) {
+				refused = append(refused, aid)
+			}
+		}
+		s.mu.RUnlock()
+		if len(refused) > 0 {
+			writeJSONError(w, http.StatusForbidden,
+				"these agencies have no mutual-aid agreement with yours and cannot be included: "+strings.Join(refused, ", "))
+			return
 		}
 	}
 
@@ -2071,6 +2282,69 @@ func (s *Server) handleCreateGuestEvent(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(resp)
 }
 
+// guestIncludeAllowedLocked reports whether an event created by agency owner
+// may bridge agency target into its channel: its own agency, an agency that
+// trusts owner (standing agreement), or one with a live mutual-aid patch with
+// owner that is not itself a guest-event bridge. Unknown and event-* agencies
+// are refused. Caller holds s.mu.
+func (s *Server) guestIncludeAllowedLocked(owner, target string) bool {
+	if owner == "" || target == "" {
+		return false
+	}
+	t := s.agencies[target]
+	if t == nil || strings.HasPrefix(target, "event-") {
+		return false
+	}
+	if target == owner || t.trustsAgency(owner) {
+		return true
+	}
+	eventLinks := make(map[string]bool, len(s.guestEvents))
+	for _, ev := range s.guestEvents {
+		if ev.MutualAidLinkID != "" {
+			eventLinks[ev.MutualAidLinkID] = true
+		}
+	}
+	for id, l := range s.mutualAidLinks {
+		if !l.Active || eventLinks[id] {
+			continue
+		}
+		var hasOwner, hasTarget bool
+		for _, a := range l.Agencies {
+			hasOwner = hasOwner || a == owner
+			hasTarget = hasTarget || a == target
+		}
+		if hasOwner && hasTarget {
+			return true
+		}
+	}
+	return false
+}
+
+// handleGetGuestEventAgencies lists the agencies the caller may bridge into a
+// guest event: all of them for a super admin, otherwise the caller's own and
+// those with an agreement (see guestIncludeAllowedLocked).
+func (s *Server) handleGetGuestEventAgencies(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	session := s.getSession(r)
+	if session == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	s.mu.RLock()
+	out := make([]map[string]string, 0)
+	for id, a := range s.agencies {
+		if strings.HasPrefix(id, "event-") {
+			continue
+		}
+		if !isSuperAdmin(session) && !s.guestIncludeAllowedLocked(session.AgencyID, id) {
+			continue
+		}
+		out = append(out, map[string]string{"id": id, "name": a.Name})
+	}
+	s.mu.RUnlock()
+	json.NewEncoder(w).Encode(out)
+}
+
 func (s *Server) handleDeleteGuestEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	vars := mux.Vars(r)
@@ -2078,7 +2352,7 @@ func (s *Server) handleDeleteGuestEvent(w http.ResponseWriter, r *http.Request) 
 
 	// Agency admins may only delete events their own agency created.
 	session := s.getSession(r)
-	if session != nil && session.Role == "agency_admin" {
+	if !isSuperAdmin(session) {
 		s.mu.RLock()
 		ev, ok := s.guestEvents[id]
 		owner := ""
@@ -2174,7 +2448,8 @@ func (s *Server) handleDispatchSetChannel(w http.ResponseWriter, r *http.Request
 // Binary audio frames from PTT clients → pushed to dispatch browser.
 // JSON frames from browser → handle channel switch.
 func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
+	token := sessionToken(r)
+	session := s.sessionFor(token)
 	if session == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -2390,6 +2665,12 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		case <-pingTicker.C:
+			// An open console keeps its session alive (a dispatcher on shift
+			// is never idled out); a revoked or expired session disconnects.
+			if cur := s.sessionFor(token); cur == nil || cur.Role != session.Role || cur.AgencyID != session.AgencyID {
+				log.Printf("Dispatch console closed: session for %s [%s] ended", session.Username, session.AgencyID)
+				return
+			}
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return

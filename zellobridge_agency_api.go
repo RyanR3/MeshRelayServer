@@ -136,63 +136,56 @@ func (s *Server) handleShareZelloBridge(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	s.mu.Lock()
-	b := s.zelloBridges[id]
-	if b == nil {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusNotFound, "bridge not found")
-		return
-	}
-	if !b.ownedBy(mine) && !isSuper {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusForbidden, "only the owning agency can share this bridge")
-		return
-	}
-	if req.AgencyID == b.OwnerAgencyID {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusBadRequest, "that agency already owns this bridge")
-		return
-	}
-	target := s.agencies[req.AgencyID]
-	if target == nil || !target.Discoverable {
-		// Refuse rather than confirm a hidden agency exists.
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusNotFound, "agency not found")
-		return
-	}
-	if !isSuper {
-		if me := s.agencies[mine]; me == nil || !me.Discoverable {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{"error": "make your agency discoverable before sharing a bridge"})
-			return
+	// All checks and the grant happen in one critical section with a
+	// deferred unlock: an early return used to leave s.mu held (the
+	// "make your agency discoverable" refusal), freezing the whole server.
+	b, enabled, code, msg := func() (*ZelloBridge, bool, int, string) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		b := s.zelloBridges[id]
+		if b == nil {
+			return nil, false, http.StatusNotFound, "bridge not found"
 		}
-	}
-
-	// A bridge with no channels mapped yet has nothing to grant: access is
-	// expressed per-mapping, so there is nowhere to record it. Say that plainly
-	// rather than reporting "already has access", which is what an empty loop
-	// used to produce.
-	if len(b.Mappings) == 0 {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusConflict,
-			"map a Zello channel to this bridge before sharing it")
-		return
-	}
-	added := false
-	for i := range b.Mappings {
-		if b.Mappings[i].servesAgency(req.AgencyID) {
-			continue
+		if !b.ownedBy(mine) && !isSuper {
+			return nil, false, http.StatusForbidden, "only the owning agency can share this bridge"
 		}
-		b.Mappings[i].ExtraAgencies = append(b.Mappings[i].ExtraAgencies, req.AgencyID)
-		added = true
-	}
-	if !added {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusConflict, "that agency already has access")
+		if req.AgencyID == b.OwnerAgencyID {
+			return nil, false, http.StatusBadRequest, "that agency already owns this bridge"
+		}
+		target := s.agencies[req.AgencyID]
+		if target == nil || !target.Discoverable {
+			// Refuse rather than confirm a hidden agency exists.
+			return nil, false, http.StatusNotFound, "agency not found"
+		}
+		if !isSuper {
+			if me := s.agencies[mine]; me == nil || !me.Discoverable {
+				return nil, false, http.StatusForbidden, "make your agency discoverable before sharing a bridge"
+			}
+		}
+		// A bridge with no channels mapped yet has nothing to grant: access
+		// is expressed per-mapping, so there is nowhere to record it. Say
+		// that plainly rather than reporting "already has access", which is
+		// what an empty loop used to produce.
+		if len(b.Mappings) == 0 {
+			return nil, false, http.StatusConflict, "map a Zello channel to this bridge before sharing it"
+		}
+		added := false
+		for i := range b.Mappings {
+			if b.Mappings[i].servesAgency(req.AgencyID) {
+				continue
+			}
+			b.Mappings[i].ExtraAgencies = append(b.Mappings[i].ExtraAgencies, req.AgencyID)
+			added = true
+		}
+		if !added {
+			return nil, false, http.StatusConflict, "that agency already has access"
+		}
+		return b, b.Enabled, 0, ""
+	}()
+	if code != 0 {
+		writeJSONError(w, code, msg)
 		return
 	}
-	enabled := b.Enabled
-	s.mu.Unlock()
 
 	// Push the channels so they appear for the new agency immediately.
 	if enabled {

@@ -202,10 +202,18 @@ type UpdateStatus struct {
 	mu         sync.RWMutex
 }
 
+// WebSession is one dashboard / console login. Role and AgencyID are
+// re-resolved from webAdmins on every request (see sessionFor in web.go);
+// the copies here are the values at login, used to detect a role change.
 type WebSession struct {
 	Username string
 	Role     string
 	AgencyID string
+
+	adminKey  string       // webAdmins key of the account (canonical case)
+	pwHash    string       // dashboard hash at login; a change revokes the session
+	createdAt time.Time    // absolute lifetime starts here
+	lastSeen  atomic.Int64 // unix nanos of the last authenticated activity
 }
 
 // DispatchConn represents an active dispatch browser WebSocket connection.
@@ -3048,13 +3056,7 @@ func (s *Server) generateSessionToken() string {
 }
 
 func (s *Server) validateWebSession(token string) bool {
-	if token == "" {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.webSessions[token]
-	return ok
+	return s.sessionFor(token) != nil
 }
 
 // --- Agency Management ---

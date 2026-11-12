@@ -292,7 +292,7 @@ func TestDiscoverableDirectoryHiddenUntilSelfDiscoverable(t *testing.T) {
 	s.agencies["dpw"] = &Agency{ID: "dpw", Name: "DPW", Discoverable: false}
 
 	dir := func(agency, role string) []map[string]interface{} {
-		s.webSessions["tok-"+agency] = &WebSession{Username: "admin", Role: role, AgencyID: agency}
+		addTestSession(s, "tok-"+agency, "admin", role, agency)
 		req := httptest.NewRequest("GET", "/api/agencies/discoverable", nil)
 		req.AddCookie(&http.Cookie{Name: "session", Value: "tok-" + agency})
 		rec := httptest.NewRecorder()

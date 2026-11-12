@@ -565,8 +565,8 @@ function updateChannels(channels) {
         const agencyLabel = currentRole === 'super_admin' && channel.agency_id ? ` <span class="agency-badge">${escapeHtml(channel.agency_id)}</span>` : '';
         return `
             <div class="channel-item">
-                <div class="channel-name">Channel ${channel.id}${agencyLabel}</div>
-                <div class="channel-count">${channel.client_count} ${channel.client_count === 1 ? 'client' : 'clients'}</div>
+                <div class="channel-name">Channel ${escapeHtml(channel.id)}${agencyLabel}</div>
+                <div class="channel-count">${escapeHtml(channel.client_count)} ${channel.client_count === 1 ? 'client' : 'clients'}</div>
             </div>
         `;
     }).join('');
@@ -594,10 +594,10 @@ function updateClients(clients) {
             <div class="client-item">
                 <div class="client-username">
                     ${escapeHtml(client.username)}${agencyLabel}
-                    <span class="client-channel">Ch ${client.channel}</span>
+                    <span class="client-channel">Ch ${escapeHtml(client.channel)}</span>
                 </div>
                 <div class="client-info">
-                    ${client.address} • Connected ${connectedTime}
+                    ${escapeHtml(client.address)} • Connected ${escapeHtml(connectedTime)}
                 </div>
             </div>
         `;
@@ -667,10 +667,26 @@ function timeSince(date) {
     return 'just now';
 }
 
+// Escape text for HTML element content AND attribute values (both quote
+// styles). The old textContent/innerHTML trick left " and ' alone, so a name
+// could break out of an attribute.
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text == null ? '' : text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Encode a value as a JavaScript literal for an inline handler written in a
+// DOUBLE-quoted attribute, e.g. onclick="fn(${jsArg(name)})". JSON.stringify
+// produces a valid JS literal; escapeAttr then protects the attribute. The
+// browser decodes the entities before running the handler, so the function
+// receives the original value exactly. Never wrap the result in quotes, and
+// never use it inside a single-quoted attribute.
+function jsArg(v) {
+    return escapeAttr(JSON.stringify(v === undefined ? null : v));
 }
 
 // Avatar color based on username hash
@@ -989,7 +1005,7 @@ function renderUsersTable(items) {
             const g = item.group;
             const n = g.users.length;
             return `
-            <tr class="user-group-row" onclick="toggleUserGroup('${escapeHtml(g.id).replace(/'/g, '&#39;')}')">
+            <tr class="user-group-row" onclick="toggleUserGroup(${jsArg(g.id)})">
                 <td colspan="${colCount}">
                     <span class="group-caret">${item.collapsed ? '▸' : '▾'}</span>
                     <span class="group-label">${escapeHtml(g.label)}</span>
@@ -1029,19 +1045,19 @@ function renderUsersTable(items) {
             : '';
         const roleCell = isDispatch
             ? `<span class="link-status" style="background:rgba(99,102,241,0.15);color:#818CF8;border-color:rgba(99,102,241,0.3);">Dispatch</span>`
-            : `<select class="role-select" onchange="updateUserRole('${safeUsername}', this.value, '${safeAgency}')" data-current="${role}">
+            : `<select class="role-select" onchange="updateUserRole(${jsArg(user.username)}, this.value, ${jsArg(user.agency_id || 'default')})" data-current="${escapeHtml(role)}">
                     <option value="user" ${role === 'user' ? 'selected' : ''}>User</option>
                     <option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin</option>
                     ${superAdminOpt}
                </select>`;
         const actionButtons = isDispatch
-            ? `<button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>`
-            : `<button class="btn-action qr" onclick="showQRCode('${safeUsername}', '${safeAgency}')">QR Code</button>
-               <button class="btn-action edit" onclick="showEditUser('${safeUsername}', '${safeAgency}')">Edit</button>
-               <button class="btn-action delete" onclick="deleteUser('${safeUsername}', '${safeAgency}')">Delete</button>`;
+            ? `<button class="btn-action delete" onclick="deleteUser(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Delete</button>`
+            : `<button class="btn-action qr" onclick="showQRCode(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">QR Code</button>
+               <button class="btn-action edit" onclick="showEditUser(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Edit</button>
+               <button class="btn-action delete" onclick="deleteUser(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Delete</button>`;
         return `
             <tr>
-                <td><div class="user-avatar" style="background: ${avatarColor};">${initial}</div></td>
+                <td><div class="user-avatar" style="background: ${avatarColor};">${escapeHtml(initial)}</div></td>
                 <td class="user-name-cell">${safeName || '<span style="color:#8B949E;">—</span>'}</td>
                 <td class="nowrap"><strong>${safeUsername}</strong>${guestBadge}</td>
                 <td style="text-align: center;">${statusDot}</td>
@@ -1980,7 +1996,7 @@ function renderPatches(links) {
             return `<div class="ma-patch-card ma-patch-existing">
                 <div class="ma-patch-card-head">
                     <span class="ma-patch-title">${escapeHtml(link.channel_name || ('Channel ' + link.channel))}</span>
-                    <button class="ma-patch-remove" onclick="deleteMutualAidLink('${safeId}')" title="Remove patch">&times;</button>
+                    <button class="ma-patch-remove" onclick="deleteMutualAidLink(${jsArg(link.id)})" title="Remove patch">&times;</button>
                 </div>
                 <div class="ma-patch-chips">${chips}</div>
                 <div class="ma-patch-meta">Channel ${link.channel} &middot; ${(link.agencies||[]).length} agencies${created ? ' &middot; ' + created : ''}</div>
@@ -2061,7 +2077,7 @@ function maDrop(e, builderId) {
     chip.className = 'ma-chip ma-chip-removable';
     chip.dataset.agencyId = agencyId;
     chip.innerHTML = escapeHtml(agencyName) +
-        ` <span class="ma-chip-x" onclick="removeFromPatch('${builderId}','${escapeAttr(agencyId)}',this)">&times;</span>`;
+        ` <span class="ma-chip-x" onclick="removeFromPatch('${builderId}',${jsArg(agencyId)},this)">&times;</span>`;
     items.appendChild(chip);
     refreshBuilderState(builderId);
 }
@@ -2195,7 +2211,7 @@ function fetchZelloBridges() {
 // channel dropdowns (and any unsaved selection) untouched.
 function updateZelloStatusInPlace(bridges) {
     bridges.forEach(b => {
-        const card = document.querySelector(`[data-zbid="${b.id}"]`);
+        const card = document.querySelector(`[data-zbid="${CSS.escape(String(b.id))}"]`);
         if (!card) return;
         const dot = zelloStatusColor(b.status);
         const dotEl = card.querySelector('.zb-dot');
@@ -2237,8 +2253,8 @@ function renderZelloBridges(bridges) {
             <div class="zb-maps" id="zbmaps-${safeId}" data-agency="${escapeAttr(b.agency_id || '')}">
                 ${rowsHtml || '<div class="zb-map-empty">No channels mapped yet. Add one below.</div>'}
                 <div class="zb-map-controls">
-                    <button class="btn-secondary zb-addmap" onclick="addMappingRow('${safeId}')">+ Add channel</button>
-                    <button class="btn-primary zb-apply" onclick="applyZelloMapping('${safeId}')">Apply</button>
+                    <button class="btn-secondary zb-addmap" onclick="addMappingRow(${jsArg(b.id)})">+ Add channel</button>
+                    <button class="btn-primary zb-apply" onclick="applyZelloMapping(${jsArg(b.id)})">Apply</button>
                 </div>
             </div>` : '';
 
@@ -2254,9 +2270,9 @@ function renderZelloBridges(bridges) {
                 ${err}
             </div>
             <div class="zb-actions">
-                <button class="btn-secondary zb-toggle" onclick="toggleZelloBridge('${safeId}')">${b.enabled ? 'Disable' : 'Enable'}</button>
-                <button class="btn-action" onclick='editZelloBridge(${JSON.stringify(b).replace(/'/g,"&#39;")})'>Edit</button>
-                <button class="btn-action delete" onclick="deleteZelloBridge('${safeId}')">Delete</button>
+                <button class="btn-secondary zb-toggle" onclick="toggleZelloBridge(${jsArg(b.id)})">${b.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn-action" onclick="editZelloBridge(${jsArg(b)})">Edit</button>
+                <button class="btn-action delete" onclick="deleteZelloBridge(${jsArg(b.id)})">Delete</button>
             </div>
         </div>`;
     }).join('');
@@ -2621,23 +2637,18 @@ function renderGuestEventsTable(events) {
 
     tbody.innerHTML = events.map(ev => {
         const created = new Date(ev.created_at).toLocaleDateString();
-        const safeId = ev.id.replace(/'/g, "\\'");
-        const safeName = ev.name.replace(/'/g, "\\'");
-        const safeUsername = ev.username.replace(/'/g, "\\'");
-        const safeToken = ev.token.replace(/'/g, "\\'");
-        const safeAgency = (ev.agency_id || '').replace(/'/g, "\\'");
         const expiresText = ev.expires_at ? new Date(ev.expires_at).toLocaleString() : 'Never';
         const connected = ev.connected || 0;
         return `<tr>
-            <td><strong>${ev.name}</strong></td>
-            <td>${ev.agency_name || ev.agency_id} <span class="agency-badge">${ev.agency_id}</span></td>
-            <td>Ch ${ev.channel}</td>
-            <td><span class="${connected > 0 ? 'status-active' : ''}">${connected} online</span></td>
-            <td>${expiresText}</td>
-            <td>${created}</td>
+            <td><strong>${escapeHtml(ev.name)}</strong></td>
+            <td>${escapeHtml(ev.agency_name || ev.agency_id)} <span class="agency-badge">${escapeHtml(ev.agency_id)}</span></td>
+            <td>Ch ${escapeHtml(ev.channel)}</td>
+            <td><span class="${connected > 0 ? 'status-active' : ''}">${escapeHtml(connected)} online</span></td>
+            <td>${escapeHtml(expiresText)}</td>
+            <td>${escapeHtml(created)}</td>
             <td class="actions-cell">
-                <button class="btn-action qr" onclick="showGuestEventQR('${safeId}', '${safeName}', '${safeUsername}', '${safeToken}', ${JSON.stringify(ev.expires_at || null)}, '${safeAgency}')">QR Code</button>
-                <button class="btn-action delete" onclick="deleteGuestEvent('${safeId}', '${safeName}')">End Event</button>
+                <button class="btn-action qr" onclick="showGuestEventQR(${jsArg(ev.id)}, ${jsArg(ev.name)}, ${jsArg(ev.username)}, ${jsArg(ev.token)}, ${jsArg(ev.expires_at || null)}, ${jsArg(ev.agency_id || '')})">QR Code</button>
+                <button class="btn-action delete" onclick="deleteGuestEvent(${jsArg(ev.id)}, ${jsArg(ev.name)})">End Event</button>
             </td>
         </tr>`;
     }).join('');
@@ -2654,12 +2665,15 @@ function showCreateGuestEventModal() {
     const list = document.getElementById('guestEventAgencyList');
     if (list) {
         list.innerHTML = '<div style="color:#6E7681;padding:8px 0;font-size:13px;">Loading agencies…</div>';
-        fetch('/api/agencies').then(r => r.json()).then(agencies => {
-            agenciesList = agencies || [];
-            // Exclude auto-created event agencies from the list.
-            const selectable = agenciesList.filter(a => !String(a.id).startsWith('event-'));
+        // Only agencies the server will let this account bridge in: all for a
+        // super admin; for an agency admin, its own plus those with a
+        // standing agreement or an approved mutual-aid patch.
+        fetch('/api/guest-events/agencies').then(r => r.json()).then(agencies => {
+            const selectable = (Array.isArray(agencies) ? agencies : [])
+                .filter(a => !String(a.id).startsWith('event-'))
+                .sort((a, b) => String(a.name).localeCompare(String(b.name)));
             if (!selectable.length) {
-                list.innerHTML = '<div style="color:#6E7681;padding:8px 0;font-size:13px;">No agencies to include.</div>';
+                list.innerHTML = '<div style="color:#6E7681;padding:8px 0;font-size:13px;">No agencies to include. Agencies appear here once they have a mutual-aid agreement with yours.</div>';
                 return;
             }
             list.innerHTML = selectable.map(a => `
@@ -2754,7 +2768,7 @@ function deleteGuestEvent(id, name) {
         return;
     }
 
-    fetch('/api/guest-events/' + id, { method: 'DELETE' })
+    fetch('/api/guest-events/' + encodeURIComponent(id), { method: 'DELETE' })
     .then(r => r.json())
     .then(data => {
         if (data.error) {
@@ -2804,7 +2818,13 @@ function checkSession() {
         })
         .then(data => {
             if (!data) return false;
-            currentRole = data.role || 'super_admin';
+            // Dispatch accounts use the /command console; the dashboard's
+            // APIs are closed to them.
+            if (data.role === 'dispatch') {
+                window.location.href = '/command';
+                return false;
+            }
+            currentRole = data.role || '';
             currentAgencyId = data.agency_id || '';
             pttPort = data.ptt_port || 5000;
             if (data.must_change_password) {
@@ -2946,7 +2966,7 @@ function renderAgenciesTable(agencies) {
                 <td><code>${safeId}</code></td>
                 <td>${agency.user_count || 0}</td>
                 <td>
-                    <select onchange="setAgencyFloorControl('${safeId}', this.value, this)" style="margin-bottom: 0; width: auto;">
+                    <select onchange="setAgencyFloorControl(${jsArg(agency.id)}, this.value, this)" style="margin-bottom: 0; width: auto;">
                         <option value="open" ${policy === 'open' ? 'selected' : ''}>Open</option>
                         <option value="busy" ${policy === 'busy' ? 'selected' : ''}>Busy tone</option>
                         <option value="queue" ${policy === 'queue' ? 'selected' : ''}>Queue and replay</option>
@@ -2954,7 +2974,7 @@ function renderAgenciesTable(agencies) {
                 </td>
                 <td>
                     <div class="actions-cell">
-                        ${!isDefault ? `<button class="btn-action delete" onclick="deleteAgency('${safeId}')">Delete</button>` : ''}
+                        ${!isDefault ? `<button class="btn-action delete" onclick="deleteAgency(${jsArg(agency.id)})">Delete</button>` : ''}
                     </div>
                 </td>
             </tr>
@@ -3135,7 +3155,7 @@ function checkForUpdates() {
                 latestRelease = data;
                 if (resultEl) {
                     resultEl.className = 'status-message warning';
-                    resultEl.innerHTML = `Update available: <strong>${data.latest_version}</strong> (current: ${data.current_version})`;
+                    resultEl.innerHTML = `Update available: <strong>${escapeHtml(data.latest_version)}</strong> (current: ${escapeHtml(data.current_version)})`;
                 }
 
                 const versionText = `${data.current_version} → ${data.latest_version}`;
@@ -3534,7 +3554,7 @@ function renderLmrBridges(bridges) {
             // card is itself a dropzone for adding more agencies.
             const chips = (b.agencies || []).map((aid, i) =>
                 `<span class="ma-chip">${escapeHtml(names[i] || aid)}<button class="ma-chip-x"
-                    onclick="lmrRemoveAgency('${safeId}','${escapeAttr(aid)}')"
+                    onclick="lmrRemoveAgency(${jsArg(b.id)},${jsArg(aid)})"
                     title="Remove agency">&times;</button></span>`).join('');
             const dot = b.online ? 'lmr-dot-on' : 'lmr-dot-off';
             const state = b.enabled ? 'Enabled' : 'Disabled';
@@ -3544,22 +3564,22 @@ function renderLmrBridges(bridges) {
                         <span class="lmr-dot ${dot}" title="${b.online ? 'Gateway connected' : 'Gateway offline'}"></span>
                         ${escapeHtml(b.channel_name || b.name || 'LMR Bridge')}
                     </span>
-                    <button class="ma-patch-remove" onclick="deleteLmrBridge('${safeId}')" title="Remove bridge">&times;</button>
+                    <button class="ma-patch-remove" onclick="deleteLmrBridge(${jsArg(b.id)})" title="Remove bridge">&times;</button>
                 </div>
                 <div class="ma-dropzone lmr-edit-zone"
                      ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
-                     ondrop="lmrDropExisting(event,'${safeId}')">
+                     ondrop="lmrDropExisting(event,${jsArg(b.id)})">
                     <div class="ma-patch-chips">${chips}</div>
                     <div class="ma-dropzone-hint lmr-edit-hint">Drop an agency here to add it</div>
                 </div>
                 <div class="ma-patch-meta">
                     Channel ${b.channel} &middot; gateway login <code>${escapeHtml(b.username || '')}</code>
                     &middot; ${(b.agencies || []).length} agencies
-                    &middot; <a href="#" onclick="toggleLmrBridge('${safeId}');return false;">${state}</a>
+                    &middot; <a href="#" onclick="toggleLmrBridge(${jsArg(b.id)});return false;">${state}</a>
                 </div>
                 <div class="lmr-actions">
                     <button class="btn-secondary lmr-qr-btn"
-                            onclick="showLmrBridgeQr('${escapeAttr(b.username || '')}','${escapeAttr(b.agencies && b.agencies[0] || '')}')">
+                            onclick="showLmrBridgeQr(${jsArg(b.username || '')},${jsArg(b.agencies && b.agencies[0] || '')})">
                         Enrollment QR
                     </button>
                 </div>
@@ -3629,7 +3649,7 @@ function lmrDrop(e, builderId) {
     if (items) {
         items.insertAdjacentHTML('beforeend',
             `<span class="ma-chip" data-agency-id="${escapeAttr(agencyId)}">${escapeHtml(agencyName)}<button
-                class="ma-chip-x" onclick="lmrUndrop('${builderId}','${escapeAttr(agencyId)}')">&times;</button></span>`);
+                class="ma-chip-x" onclick="lmrUndrop('${builderId}',${jsArg(agencyId)})">&times;</button></span>`);
     }
     refreshLmrBuilderState(builderId);
 }
@@ -3898,9 +3918,9 @@ function renderDirectoryPool(agencies, query) {
                     : a.state === 'requested' ? 'Requested'
                     : a.state === 'awaiting_you' ? 'Awaiting you' : '';
         const trust = a.we_trust_them
-            ? `<button class="ma-trust-btn ma-trust-on" onclick="toggleTrust(event,'${escapeAttr(a.id)}',false)"
+            ? `<button class="ma-trust-btn ma-trust-on" onclick="toggleTrust(event,${jsArg(a.id)},false)"
                  title="You auto-accept their requests. Click to stop.">Trusted</button>`
-            : `<button class="ma-trust-btn" onclick="toggleTrust(event,'${escapeAttr(a.id)}',true)"
+            : `<button class="ma-trust-btn" onclick="toggleTrust(event,${jsArg(a.id)},true)"
                  title="Auto-accept future requests from this agency.">Trust</button>`;
         return `<div class="ma-agency-card${busy ? ' ma-agency-busy' : ''}"
                      ${busy ? '' : 'draggable="true"'}
@@ -3932,9 +3952,9 @@ function renderAgencyPatches() {
             const who = inbound ? r.from_name : r.to_name;
             const safeId = escapeAttr(r.id);
             const actions = inbound
-                ? `<button class="btn-primary" onclick="approveMaRequest('${safeId}')">Approve</button>
-                   <button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Decline</button>`
-                : `<button class="ma-patch-cancel" onclick="declineMaRequest('${safeId}')">Withdraw</button>`;
+                ? `<button class="btn-primary" onclick="approveMaRequest(${jsArg(r.id)})">Approve</button>
+                   <button class="ma-patch-cancel" onclick="declineMaRequest(${jsArg(r.id)})">Decline</button>`
+                : `<button class="ma-patch-cancel" onclick="declineMaRequest(${jsArg(r.id)})">Withdraw</button>`;
             return `<div class="ma-patch-card">
                 <div class="ma-patch-card-head">
                     <span class="ma-patch-title">${escapeHtml(r.channel_name || 'Mutual Aid')}</span>
@@ -3955,7 +3975,7 @@ function renderAgencyPatches() {
             return `<div class="ma-patch-card ma-patch-existing">
                 <div class="ma-patch-card-head">
                     <span class="ma-patch-title">${escapeHtml(l.channel_name || 'Mutual Aid')}</span>
-                    <button class="ma-patch-remove" onclick="leavePatch('${escapeAttr(l.id)}')"
+                    <button class="ma-patch-remove" onclick="leavePatch(${jsArg(l.id)})"
                             title="Leave this patch">&times;</button>
                 </div>
                 <div class="ma-patch-chips">${chips}</div>
@@ -4293,7 +4313,7 @@ function zbRenderBridges() {
                         <span class="zb-dot" style="background:${dot}"></span>
                         ${escapeHtml(b.name)}
                     </span>
-                    <button class="ma-patch-remove" onclick="zbLeave('${safeId}')"
+                    <button class="ma-patch-remove" onclick="zbLeave(${jsArg(b.id)})"
                             title="Leave this bridge">&times;</button>
                 </div>
                 <div class="ma-patch-chips">${chans}</div>
@@ -4305,7 +4325,7 @@ function zbRenderBridges() {
         // Owner: the bridge is a drop target for granting access.
         const shared = (b.shared_with || []).map(a =>
             `<span class="ma-chip">${escapeHtml(a.name)}<button class="ma-chip-x"
-                onclick="zbUnshare('${safeId}','${escapeAttr(a.id)}')"
+                onclick="zbUnshare(${jsArg(b.id)},${jsArg(a.id)})"
                 title="Revoke access">&times;</button></span>`).join('');
         const maps = (b.mappings || []).map(m =>
             `<div class="zb-map">${escapeHtml(m.zello_channel || '(unmapped)')}
@@ -4318,7 +4338,7 @@ function zbRenderBridges() {
                     <span class="zb-dot" style="background:${dot}"></span>
                     ${escapeHtml(b.name)}
                 </span>
-                <button class="ma-patch-remove" onclick="zbDelete('${safeId}','${escapeAttr(b.name)}')"
+                <button class="ma-patch-remove" onclick="zbDelete(${jsArg(b.id)},${jsArg(b.name)})"
                         title="Delete this bridge">&times;</button>
             </div>
             <div class="ma-patch-meta">${escapeHtml(b.network || '')}
@@ -4328,7 +4348,7 @@ function zbRenderBridges() {
             <div class="zb-maps">${maps}</div>
             <div class="ma-dropzone zb-share-zone"
                  ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
-                 ondrop="zbShareDrop(event,'${safeId}')">
+                 ondrop="zbShareDrop(event,${jsArg(b.id)})">
                 <div class="ma-patch-chips">${shared}</div>
                 <div class="ma-dropzone-hint ma-edit-hint">Drag an agency here to share this bridge</div>
             </div>
@@ -4537,7 +4557,7 @@ function lmrRenderAgencyBridges() {
             return `<div class="ma-patch-card ma-patch-existing">
                 <div class="ma-patch-card-head">
                     <span class="ma-patch-title">${escapeHtml(b.channel_name || 'LMR Bridge')}</span>
-                    <button class="ma-patch-remove" onclick="lmrLeave('${safeId}')"
+                    <button class="ma-patch-remove" onclick="lmrLeave(${jsArg(b.id)})"
                             title="Leave this bridge">&times;</button>
                 </div>
                 <div class="ma-patch-meta">Channel ${b.channel}
@@ -4548,7 +4568,7 @@ function lmrRenderAgencyBridges() {
         const dot = b.online ? 'lmr-dot-on' : 'lmr-dot-off';
         const shared = (b.shared_with || []).map(a =>
             `<span class="ma-chip">${escapeHtml(a.name)}<button class="ma-chip-x"
-                onclick="lmrUnshare('${safeId}','${escapeAttr(a.id)}')"
+                onclick="lmrUnshare(${jsArg(b.id)},${jsArg(a.id)})"
                 title="Revoke access">&times;</button></span>`).join('');
         const paused = b.enabled === false;
         return `<div class="ma-patch-card${paused ? ' lmr-paused' : ''}">
@@ -4559,20 +4579,20 @@ function lmrRenderAgencyBridges() {
                     ${paused ? '<span class="ma-chip" style="margin-left:8px;background:#7a1f1f;color:#fff">PAUSED — radio will not transmit</span>' : ''}
                 </span>
                 <button class="btn-action${paused ? '' : ' delete'}" style="margin-right:8px"
-                        onclick="lmrToggle('${safeId}', ${paused ? 'true' : 'false'})"
+                        onclick="lmrToggle(${jsArg(b.id)}, ${paused ? 'true' : 'false'})"
                         title="${paused ? 'Resume: the gateway may transmit again' : 'Pause: stop all audio to the gateway so the radio cannot be keyed'}">
                     ${paused ? 'Resume' : 'Pause'}
                 </button>
-                <button class="ma-patch-remove" onclick="lmrDelete('${safeId}','${escapeAttr(b.channel_name || b.name)}')"
+                <button class="ma-patch-remove" onclick="lmrDelete(${jsArg(b.id)},${jsArg(b.channel_name || b.name)})"
                         title="Delete this bridge">&times;</button>
             </div>
             <div class="ma-patch-meta">
                 Channel ${b.channel} &middot; gateway login <code>${escapeHtml(b.username || '')}</code>
-                &middot; <a href="#" onclick="showLmrBridgeQr('${escapeAttr(b.username || '')}','');return false;">Enrollment QR</a>
+                &middot; <a href="#" onclick="showLmrBridgeQr(${jsArg(b.username || '')},'');return false;">Enrollment QR</a>
             </div>
             <div class="ma-dropzone zb-share-zone"
                  ondragover="maDragOver(event)" ondragleave="maDragLeave(event)"
-                 ondrop="lmrShareDrop(event,'${safeId}')">
+                 ondrop="lmrShareDrop(event,${jsArg(b.id)})">
                 <div class="ma-patch-chips">${shared}</div>
                 <div class="ma-dropzone-hint ma-edit-hint">Drag an agency here to share this bridge</div>
             </div>
@@ -4696,7 +4716,7 @@ function lmrNewDrop(e) {
     if (items) {
         items.insertAdjacentHTML('beforeend',
             `<span class="ma-chip" data-agency-id="${escapeAttr(id)}">${escapeHtml(name)}<button
-                class="ma-chip-x" onclick="lmrNewUndrop('${escapeAttr(id)}')">&times;</button></span>`);
+                class="ma-chip-x" onclick="lmrNewUndrop(${jsArg(id)})">&times;</button></span>`);
     }
     if (hint) hint.style.display = 'none';
 }
