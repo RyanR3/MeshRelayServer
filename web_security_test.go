@@ -191,6 +191,7 @@ func TestRolePolicyDispatchAllowListIsExact(t *testing.T) {
 	sort.Strings(got)
 	want := []string{
 		"GET /api/dispatch/clients",
+		"GET /api/dispatch/maps", // read-only: the console's map layers
 		"GET /api/recordings",
 		"GET /api/recordings/{id}/audio",
 		"POST /api/admin/change-password",

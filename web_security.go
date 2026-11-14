@@ -155,6 +155,7 @@ var apiRolePolicy = map[string]int{
 	"GET /api/recordings":             allowAll,
 	"GET /api/recordings/{id}/audio":  allowAll,
 	"GET /api/dispatch/clients":       allowAll,
+	"GET /api/dispatch/maps":          allowAll,
 	"POST /api/dispatch/channel":      allowAll,
 
 	// Dashboard: super_admin and agency_admin (handlers scope by agency).
@@ -178,6 +179,11 @@ var apiRolePolicy = map[string]int{
 
 	"GET /api/my-agency/discovery":                   allowAdmins,
 	"PUT /api/my-agency/discovery":                   allowAdmins,
+	"GET /api/my-agency/maps":                        allowAdmins,
+	"POST /api/my-agency/maps":                       allowAdmins,
+	"DELETE /api/my-agency/maps/{id}":                allowAdmins,
+	"GET /api/my-agency/channels":                    allowAdmins,
+	"PUT /api/my-agency/channels":                    allowAdmins,
 	"GET /api/my-agency/floor-control":               allowAdmins,
 	"PUT /api/my-agency/floor-control":               allowAdmins,
 	"GET /api/my-agency/tak/groups":                  allowAdmins,

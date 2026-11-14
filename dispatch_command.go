@@ -151,12 +151,9 @@ func (s *Server) dispatchDirectory(agencyFilter string) ([]map[string]string, []
 	for _, id := range agencyIDs {
 		a := s.agencies[id]
 		agencies = append(agencies, map[string]string{"id": id, "name": a.Name})
-		n := a.MaxChannels
-		if n <= 0 || n > MaxAgencyTalkgroups {
-			n = 10
-		}
+		n := a.talkgroupCount()
 		for ch := 0; ch < n; ch++ {
-			out = append(out, dispatchChannel{id, a.Name, ch, "Talkgroup " + strconv.Itoa(ch+1), "talkgroup", units(id, ch)})
+			out = append(out, dispatchChannel{id, a.Name, ch, a.talkgroupName(ch), "talkgroup", units(id, ch)})
 		}
 		seen := map[int]bool{}
 		add := func(ch int, name, kind string) {

@@ -85,6 +85,10 @@ function navigateTo(pageName) {
             document.getElementById('ma-agency-view').style.display = '';
             fetchAgencyMutualAid();
         }
+    } else if (pageName === 'maps') {
+        initMapsPage();
+    } else if (pageName === 'channels') {
+        fetchAgencyChannels();
     } else if (pageName === 'guest-events') {
         fetchGuestEvents();
     } else if (pageName === 'zello-bridges') {
@@ -565,7 +569,7 @@ function updateChannels(channels) {
         const agencyLabel = currentRole === 'super_admin' && channel.agency_id ? ` <span class="agency-badge">${escapeHtml(channel.agency_id)}</span>` : '';
         return `
             <div class="channel-item">
-                <div class="channel-name">Channel ${escapeHtml(channel.id)}${agencyLabel}</div>
+                <div class="channel-name">${escapeHtml(channel.label || ('Channel ' + channel.id))}${agencyLabel}</div>
                 <div class="channel-count">${escapeHtml(channel.client_count)} ${channel.client_count === 1 ? 'client' : 'clients'}</div>
             </div>
         `;
@@ -690,7 +694,7 @@ function jsArg(v) {
 }
 
 // Avatar color based on username hash
-const avatarColors = ['#7C3AED', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#06B6D4'];
+const avatarColors = ['#1F6FEB', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#06B6D4'];
 
 function getAvatarColor(username) {
     let hash = 0;
@@ -1044,7 +1048,7 @@ function renderUsersTable(items) {
             ? `<div><span class="guest-badge" title="Guest of ${escapeHtml(user.invited_by || '?')} until ${escapeHtml(new Date(user.guest_expires_at).toLocaleString())}">Guest · ${guestLeftText}</span></div>`
             : '';
         const roleCell = isDispatch
-            ? `<span class="link-status" style="background:rgba(99,102,241,0.15);color:#818CF8;border-color:rgba(99,102,241,0.3);">Dispatch</span>`
+            ? `<span class="link-status" style="background:rgba(31,111,235,0.15);color:#58A6FF;border-color:rgba(31,111,235,0.3);">Dispatch</span>`
             : `<select class="role-select" onchange="updateUserRole(${jsArg(user.username)}, this.value, ${jsArg(user.agency_id || 'default')})" data-current="${escapeHtml(role)}">
                     <option value="user" ${role === 'user' ? 'selected' : ''}>User</option>
                     <option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin</option>
@@ -1299,7 +1303,7 @@ function initNetworkChart() {
                 {
                     label: 'Packets Received',
                     data: [],
-                    borderColor: '#A78BFA',
+                    borderColor: '#A78BFA',                  // purple kept for this chart
                     backgroundColor: 'rgba(167, 139, 250, 0.1)',
                     borderWidth: 2,
                     fill: true,
@@ -1371,8 +1375,8 @@ function initActivityChart() {
             datasets: [{
                 label: 'Events',
                 data: [],
-                backgroundColor: 'rgba(124, 58, 237, 0.6)',
-                borderColor: '#7C3AED',
+                backgroundColor: 'rgba(31, 111, 235, 0.6)',
+                borderColor: '#1F6FEB',
                 borderWidth: 1,
                 borderRadius: 4,
             }]
@@ -4777,4 +4781,212 @@ function createMyLmrBridge() {
         fetchAgencyLmrBridges();
     })
     .catch(err => showStatus('lmr-status', 'Failed to create: ' + err.message, 'error'));
+}
+
+
+// --- Channels (agency channel count + names, synced to phones and Command) ---
+// Agency admins edit their own agency; a super admin sees every agency.
+
+let agencyChannelsData = [];
+
+function fetchAgencyChannels() {
+    fetch('/api/my-agency/channels')
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('channels-status', data.error, 'error'); return; }
+            agencyChannelsData = data || [];
+            renderAgencyChannels();
+        })
+        .catch(err => showStatus('channels-status', 'Failed to load: ' + err.message, 'error'));
+}
+
+function renderAgencyChannels() {
+    const box = document.getElementById('channels-agencies');
+    if (!box) return;
+    if (!agencyChannelsData.length) { box.innerHTML = '<div class="empty-state">No agencies</div>'; return; }
+    box.innerHTML = agencyChannelsData.map((a, i) => {
+        const rows = a.names.map((n, ch) => `
+            <div class="chn-row">
+                <span class="chn-num">${ch + 1}</span>
+                <input type="text" maxlength="32" class="chn-input" data-agency="${i}" data-ch="${ch}"
+                       value="${escapeHtml(n)}" placeholder="e.g. ${ch + 1}-TG${ch + 1}">
+            </div>`).join('');
+        return `
+            <div class="panel chn-panel" style="margin-bottom: 20px;">
+                <div class="chn-head">
+                    <h3>${escapeHtml(a.agency_name)}${currentRole === 'super_admin' ? ` <span class="agency-badge">${escapeHtml(a.agency_id)}</span>` : ''}</h3>
+                    <label class="chn-count">Channels
+                        <input type="number" min="1" max="${a.limit}" value="${a.count}" id="chn-count-${i}"
+                               onchange="resizeAgencyChannels(${i}, this.value)">
+                        <span class="chn-limit">of ${a.limit}</span>
+                    </label>
+                </div>
+                <div class="chn-grid">${rows}</div>
+                <div class="chn-actions">
+                    <button class="btn-primary" onclick="saveAgencyChannels(${i})">Save</button>
+                </div>
+            </div>`;
+    }).join('');
+}
+
+// Change the number of rows before saving (names typed so far are kept).
+function resizeAgencyChannels(i, value) {
+    const a = agencyChannelsData[i];
+    let n = parseInt(value, 10);
+    if (!(n >= 1)) n = 1;
+    if (n > a.limit) n = a.limit;
+    a.names = collectAgencyChannelNames(i);
+    while (a.names.length < n) a.names.push('');
+    a.names.length = n;
+    a.count = n;
+    renderAgencyChannels();
+}
+
+function collectAgencyChannelNames(i) {
+    const names = agencyChannelsData[i].names.slice();
+    document.querySelectorAll(`.chn-input[data-agency="${i}"]`).forEach(el => {
+        names[parseInt(el.dataset.ch, 10)] = el.value.trim();
+    });
+    return names;
+}
+
+function saveAgencyChannels(i) {
+    const a = agencyChannelsData[i];
+    const names = collectAgencyChannelNames(i);
+    const body = { count: names.length, names };
+    if (currentRole === 'super_admin') body.agency_id = a.agency_id;
+    fetch('/api/my-agency/channels', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('channels-status', data.error, 'error'); return; }
+        agencyChannelsData[i] = data;
+        renderAgencyChannels();
+        showStatus('channels-status', `${data.agency_name}: ${data.count} channels saved and sent to its phones and consoles`, 'success');
+    })
+    .catch(err => showStatus('channels-status', 'Failed to save: ' + err.message, 'error'));
+}
+
+
+// --- Maps (custom ZXY tile layers for the Command console) -----------------
+
+function initMapsPage() {
+    const sel = document.getElementById('map-agency');
+    if (currentRole === 'super_admin' && sel) {
+        fetch('/api/agencies').then(r => r.json()).then(agencies => {
+            agenciesList = agencies || [];
+            const current = sel.value;
+            sel.innerHTML = '<option value="">Every agency</option>' + agenciesList
+                .filter(a => !String(a.id).startsWith('event-'))
+                .map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('');
+            sel.value = current;
+            fetchMapLayers();
+        }).catch(() => fetchMapLayers());
+    } else {
+        fetchMapLayers();
+    }
+}
+
+function fetchMapLayers() {
+    fetch('/api/my-agency/maps')
+        .then(r => r.json())
+        .then(list => {
+            if (list.error) { showStatus('maps-status', list.error, 'error'); return; }
+            renderMapLayers(list || []);
+        })
+        .catch(err => showStatus('maps-status', 'Failed to load: ' + err.message, 'error'));
+}
+
+function mapAgencyLabel(id) {
+    if (!id) return 'Every agency';
+    const a = (agenciesList || []).find(x => x.id === id);
+    return a ? a.name : id;
+}
+
+function renderMapLayers(list) {
+    const body = document.getElementById('maps-table-body');
+    document.getElementById('maps-empty').style.display = list.length ? 'none' : 'block';
+    body.innerHTML = list.map(m => {
+        const mine = currentRole === 'super_admin' || (m.agency && m.agency === currentAgencyId);
+        return `<tr>
+            <td><strong>${escapeHtml(m.name)}</strong></td>
+            <td>${m.kind === 'overlay' ? 'Overlay' + (m.opacity < 1 ? ` (${Math.round(m.opacity * 100)}%)` : '') : 'Base map'}</td>
+            <td class="super-admin-only">${escapeHtml(mapAgencyLabel(m.agency))}</td>
+            <td class="map-url-cell" title="${escapeHtml(m.url)}">${escapeHtml(m.url)}</td>
+            <td>${mine ? `<button class="btn-action delete" onclick="deleteMapLayer(${jsArg(m.id)}, ${jsArg(m.name)})">Delete</button>`
+                       : '<span class="map-shared">Added by the server admin</span>'}</td>
+        </tr>`;
+    }).join('');
+    if (currentRole !== 'super_admin') body.querySelectorAll('.super-admin-only').forEach(el => el.style.display = 'none');
+}
+
+function mapKindChanged() {
+    const overlay = document.getElementById('map-kind').value === 'overlay';
+    document.getElementById('map-opacity-wrap').style.display = overlay ? '' : 'none';
+}
+
+// Fill a ZXY template for one tile (z=4 over the eastern US).
+function sampleTileUrl(tpl, subdomains) {
+    const z = 4, x = 4, y = 6;
+    return tpl.replace('{z}', z).replace('{x}', x).replace('{y}', y)
+        .replace('{-y}', (1 << z) - 1 - y).replace('{s}', (subdomains || 'a')[0]).replace('{r}', '');
+}
+
+function previewMapTile() {
+    const url = document.getElementById('map-url').value.trim();
+    document.getElementById('map-subdomains-wrap').style.display = url.includes('{s}') ? '' : 'none';
+    const img = document.getElementById('map-preview-img');
+    const txt = document.getElementById('map-preview-text');
+    if (!/^https:\/\//i.test(url) || !url.includes('{z}') || !url.includes('{x}') || !(url.includes('{y}') || url.includes('{-y}'))) {
+        img.style.display = 'none';
+        txt.style.display = '';
+        txt.textContent = url ? 'Needs https:// and {z}, {x}, {y}' : 'Paste a tile URL to preview one tile';
+        return;
+    }
+    img.referrerPolicy = 'strict-origin-when-cross-origin';
+    img.onload = () => { img.style.display = ''; txt.style.display = 'none'; };
+    img.onerror = () => { img.style.display = 'none'; txt.style.display = ''; txt.textContent = "Couldn't load a tile from this URL"; };
+    img.src = sampleTileUrl(url, document.getElementById('map-subdomains').value.trim());
+}
+
+function addMapLayer() {
+    const body = {
+        name: document.getElementById('map-name').value.trim(),
+        url: document.getElementById('map-url').value.trim(),
+        kind: document.getElementById('map-kind').value,
+        max_zoom: parseInt(document.getElementById('map-maxzoom').value, 10) || 19,
+        opacity: document.getElementById('map-kind').value === 'overlay' ? parseFloat(document.getElementById('map-opacity').value) : 1,
+        subdomains: document.getElementById('map-subdomains').value.trim(),
+        attribution: document.getElementById('map-attribution').value.trim(),
+    };
+    if (currentRole === 'super_admin') body.agency_id = document.getElementById('map-agency').value;
+    fetch('/api/my-agency/maps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('maps-status', data.error, 'error'); return; }
+        showStatus('maps-status', `"${data.name}" added. Consoles pick it up when they next load the page.`, 'success');
+        ['map-name', 'map-url', 'map-attribution', 'map-subdomains'].forEach(id => document.getElementById(id).value = '');
+        previewMapTile();
+        fetchMapLayers();
+    })
+    .catch(err => showStatus('maps-status', 'Failed to add: ' + err.message, 'error'));
+}
+
+function deleteMapLayer(id, name) {
+    if (!confirm(`Remove the map "${name}" from every console?`)) return;
+    fetch('/api/my-agency/maps/' + encodeURIComponent(id), { method: 'DELETE' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('maps-status', data.error, 'error'); return; }
+            showStatus('maps-status', `"${name}" removed`, 'success');
+            fetchMapLayers();
+        })
+        .catch(err => showStatus('maps-status', 'Failed to remove: ' + err.message, 'error'));
 }

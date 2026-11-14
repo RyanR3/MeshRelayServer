@@ -120,6 +120,12 @@ type Agency struct {
 
 	// NoRecording stops recording this agency's radio traffic (recorder.go).
 	NoRecording bool `json:"no_recording,omitempty"`
+
+	// ChannelCount is how many talkgroups the agency uses (0 = the default,
+	// DefaultAgencyChannels) and ChannelNames what they are called, by wire
+	// channel number. Synced to every phone and console (channel_names.go).
+	ChannelCount int            `json:"channel_count,omitempty"`
+	ChannelNames map[int]string `json:"channel_names,omitempty"`
 }
 
 // Floor modes kept in Server.floorOn (lock-free, read per audio packet).
@@ -726,6 +732,7 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadMutualAidRequests()
 	s.loadGuestEvents()
 	s.loadZelloBridges()
+	s.loadMapLayers()
 
 	// Migrate to agency model if needed (creates default agency, backfills users/admins)
 	s.migrateToAgencies()
@@ -1611,6 +1618,12 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
 	}
 
+	// The agency's channel count and names (phones lock and show these).
+	if a := s.agencies[agencyID]; a != nil {
+		toSend = append(toSend, pendingPacket{buildChannelNames(a), addr,
+			fmt.Sprintf("Sent channel names (%d) to %s [%s]", a.talkgroupCount(), packet.Username, agencyID)})
+	}
+
 	// Channels to announce to the joining client (mutual aid, Zello, LMR).
 	for _, a := range s.joinAnnouncements(agencyID, packet.Username, packet.Channel) {
 		pkt := SerializeChannelSwitch(&ChannelSwitchPacket{Channel: a.channel, ChannelName: a.name, Active: true})
@@ -2111,10 +2124,15 @@ func (s *Server) GetChannels(agencyFilter string) []map[string]interface{} {
 		if agencyFilter != "" && chAgencyID != agencyFilter {
 			continue
 		}
+		label := channel.Name
+		if channel.ID >= 0 && channel.ID < MaxAgencyTalkgroups {
+			label = s.agencies[chAgencyID].talkgroupName(channel.ID) // nil-safe
+		}
 		channel.mu.RLock()
 		channels = append(channels, map[string]interface{}{
 			"id":           channel.ID,
 			"name":         channel.Name,
+			"label":        label,
 			"agency_id":    chAgencyID,
 			"client_count": len(channel.Clients),
 		})

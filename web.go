@@ -165,6 +165,11 @@ func (s *Server) webRouter() *mux.Router {
 	// the caller's own agency; super_admin sees everything.
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleGetMyDiscovery)).Methods("GET")
 	api.HandleFunc("/my-agency/discovery", s.requireAdmin(s.handleUpdateMyDiscovery)).Methods("PUT")
+	api.HandleFunc("/my-agency/maps", s.requireAdmin(s.handleGetMapLayers)).Methods("GET")
+	api.HandleFunc("/my-agency/maps", s.requireAdmin(s.handleAddMapLayer)).Methods("POST")
+	api.HandleFunc("/my-agency/maps/{id}", s.requireAdmin(s.handleDeleteMapLayer)).Methods("DELETE")
+	api.HandleFunc("/my-agency/channels", s.requireAdmin(s.handleGetAgencyChannels)).Methods("GET")
+	api.HandleFunc("/my-agency/channels", s.requireAdmin(s.handleUpdateAgencyChannels)).Methods("PUT")
 	api.HandleFunc("/my-agency/floor-control", s.requireAdmin(s.handleGetFloorControl)).Methods("GET")
 	api.HandleFunc("/my-agency/floor-control", s.requireAdmin(s.handleUpdateFloorControl)).Methods("PUT")
 	api.HandleFunc("/recordings", s.requireDispatchOrAdmin(s.handleListRecordings)).Methods("GET")
@@ -227,6 +232,7 @@ func (s *Server) webRouter() *mux.Router {
 
 	// Dispatch console API
 	api.HandleFunc("/dispatch/clients", s.requireDispatchOrAdmin(s.handleDispatchClients)).Methods("GET")
+	api.HandleFunc("/dispatch/maps", s.requireDispatchOrAdmin(s.handleDispatchMapLayers)).Methods("GET")
 	api.HandleFunc("/dispatch/channel", s.requireDispatchOrAdmin(s.handleDispatchSetChannel)).Methods("POST")
 
 	// Activity log

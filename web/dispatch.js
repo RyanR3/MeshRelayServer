@@ -20,7 +20,6 @@ let txKey = loadPref('cmd.tx', '');            // "agency:channel" we transmit o
 const monitored = new Set(loadPref('cmd.monitor', []));
 // Agency groups start closed; this remembers the ones the dispatcher opened.
 const expandedAgencies = new Set(loadPref('cmd.expanded', []));
-const channelNames = loadPref('cmd.names', {});
 
 const talkState = new Map();    // "agency|channel|user" -> { agency, channel, user, start, last, entry }
 const radioLog = [];            // newest first
@@ -46,24 +45,33 @@ function agencyName(id) {
     const a = directory.agencies.find(x => x.id === id);
     return a ? a.name : id;
 }
-const AGENCY_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#EC4899', '#14B8A6', '#A78BFA', '#F97316', '#84CC16', '#06B6D4', '#EAB308'];
+const AGENCY_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#EC4899', '#14B8A6', '#58A6FF', '#F97316', '#84CC16', '#06B6D4', '#EAB308'];
 function agencyColor(id) {
     const i = directory.agencies.findIndex(x => x.id === id);
     if (i >= 0) return AGENCY_COLORS[i % AGENCY_COLORS.length];
     let h = 0; for (const c of id || '') h = (h * 31 + c.charCodeAt(0)) | 0;
     return AGENCY_COLORS[Math.abs(h) % AGENCY_COLORS.length];
 }
+// The phone app's channel colours (res/values/colors.xml channel_1..10): a
+// talkgroup gets colour (number % 10); bridge / mutual-aid rows use channel_1,
+// as on the phone.
+const APP_CHANNEL_COLORS = ['#4CAF50', '#2196F3', '#FFC107', '#FF5722', '#9C27B0',
+                            '#00BCD4', '#E91E63', '#8BC34A', '#FF9800', '#3F51B5'];
+function channelColor(c) {
+    return c.kind === 'talkgroup' ? APP_CHANNEL_COLORS[c.channel % APP_CHANNEL_COLORS.length] : APP_CHANNEL_COLORS[0];
+}
+
 function channelInfo(agency, ch) {
     return directory.channels.find(c => c.agency === agency && c.channel === ch);
 }
 function channelLabel(agency, ch) {
     if (ch === 'all') return 'All Call';
     if (typeof ch === 'number' && ch < 0) return 'TAK';
-    const custom = channelNames[chKey(agency, ch)];
-    if (custom) return custom;
+    // Names come from the agency (dashboard → Channels), the same on every
+    // phone and console; there is no per-console renaming.
     const c = channelInfo(agency, ch);
     if (c) return c.name;
-    return ch < 50 ? `Talkgroup ${ch + 1}` : `Channel ${ch}`;
+    return ch < 50 ? `Channel ${ch + 1}` : `Channel ${ch}`;
 }
 function unitLabel(agency, user) {
     return (!currentAgency && directory.agencies.length > 1) ? `${user} (${agencyName(agency)})` : user;
@@ -228,16 +236,6 @@ function toggleAgency(id) {
     renderChannels();
 }
 
-function renameChannel(agency, channel, ev) {
-    if (ev) ev.stopPropagation();
-    const key = chKey(agency, channel);
-    const name = prompt('Label for this channel on this console (blank = default):', channelNames[key] || channelLabel(agency, channel));
-    if (name === null) return;
-    if (name.trim()) channelNames[key] = name.trim(); else delete channelNames[key];
-    savePref('cmd.names', channelNames);
-    renderChannels(); renderTxPanel(); renderLog();
-}
-
 function talkersOn(agency, channel) {
     const out = [];
     for (const t of talkState.values()) if (t.agency === agency && t.channel === channel) out.push(t.user);
@@ -278,9 +276,8 @@ function renderChannels() {
                 const sub = talking.length
                     ? `<span class="talker">● ${escHtml(talking.join(', '))}</span>`
                     : `${c.units} unit${c.units === 1 ? '' : 's'}${monitored.has(key) ? ' · monitoring' : ''}`;
-                html += `<div class="ch-row${key === txKey ? ' tx' : ''}${talking.length ? ' talking' : ''}"
-                        onclick="selectTx('${escAttr(c.agency)}', ${c.channel})" title="Click to transmit here · double-click to rename"
-                        ondblclick="renameChannel('${escAttr(c.agency)}', ${c.channel}, event)">
+                html += `<div class="ch-row${key === txKey ? ' tx' : ''}${talking.length ? ' talking' : ''}" style="--ch:${channelColor(c)}"
+                        onclick="selectTx('${escAttr(c.agency)}', ${c.channel})" title="Click to transmit here">
                     <div class="ch-name">${escHtml(channelLabel(c.agency, c.channel))}${kind}${key === txKey ? '<span class="ch-tx-tag">TX</span>' : ''}</div>
                     <span class="ch-units">${c.units}</span>
                     <button class="ch-mon${monitored.has(key) ? ' on' : ''}" title="Monitor (listen)" onclick="toggleMonitor('${escAttr(c.agency)}', ${c.channel}, event)">🔈</button>
@@ -381,18 +378,28 @@ function initMap() {
             L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
                 { maxZoom: 16 }),
         ]),
+        // OpenStreetMap and OpenTopoMap refuse tiles requested without a
+        // Referer ("Access blocked"), and the page's policy (same-origin) sends
+        // none to other sites. These layers send just the site's address.
         'Streets': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-            { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }),
+            { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors', referrerPolicy: 'strict-origin-when-cross-origin' }),
         'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             { maxZoom: 19, attribution: 'Imagery &copy; Esri' }),
         'Topo': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-            { maxZoom: 17, attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap' }),
+            { maxZoom: 17, attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap', referrerPolicy: 'strict-origin-when-cross-origin' }),
     };
     const base = loadPref('cmd.layer', 'Dark');
     (layers[base] || layers.Dark).addTo(map);
-    L.control.layers(layers, null, { position: 'topleft' }).addTo(map);
+    const layerControl = L.control.layers(layers, null, { position: 'topleft' }).addTo(map);
     map.on('baselayerchange', e => savePref('cmd.layer', e.name));
+    loadCustomMapLayers(layerControl, layers, base);
     map.on('moveend', () => { const c = map.getCenter(); savePref('cmd.view', { lat: c.lat, lon: c.lng, zoom: map.getZoom() }); });
+    // The map's box changes with the layout (panels appearing, the emergency
+    // panel, window resizes Leaflet doesn't see). Without telling Leaflet, it
+    // centres on a stale size and a "located" unit lands off-centre.
+    if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(document.getElementById('map'));
+    }
     if (view) fittedOnce = true;
 }
 
@@ -495,11 +502,68 @@ function unitPopup(key) {
         </div>`;
 }
 
+// Maps the agency added on the dashboard (Maps page): ZXY tile URLs, as base
+// maps or overlays. The last base map and the overlays that were on are
+// remembered per browser.
+function loadCustomMapLayers(control, builtIn, savedBase) {
+    fetch('/api/dispatch/maps').then(r => r.ok ? r.json() : []).then(list => {
+        if (!Array.isArray(list) || !list.length) return;
+        const onOverlays = new Set(loadPref('cmd.overlays', []));
+        const multiAgency = !currentAgency && directory.agencies.length > 1;
+        for (const m of list) {
+            let label = m.name;
+            if (multiAgency && m.agency) label += ` (${agencyName(m.agency)})`;
+            if (builtIn[label]) label += ' (custom)';
+            const opts = {
+                maxZoom: m.max_zoom || 19,
+                opacity: m.opacity || 1,
+                attribution: m.attribution ? escHtml(m.attribution) : '',
+                referrerPolicy: 'strict-origin-when-cross-origin',
+            };
+            if (m.subdomains) opts.subdomains = m.subdomains;
+            const layer = L.tileLayer(m.url, opts);
+            const name = escHtml(label);   // the layer control shows names as HTML
+            if (m.kind === 'overlay') {
+                layer._cmdOverlay = name;
+                control.addOverlay(layer, name);
+                if (onOverlays.has(name)) layer.addTo(map);
+            } else {
+                control.addBaseLayer(layer, name);
+                if (name === savedBase && !builtIn[savedBase]) {
+                    Object.values(builtIn).forEach(l => map.removeLayer(l));
+                    layer.addTo(map);
+                }
+            }
+        }
+        const saveOverlays = () => {
+            const on = [];
+            map.eachLayer(l => { if (l._cmdOverlay) on.push(l._cmdOverlay); });
+            savePref('cmd.overlays', on);
+        };
+        map.on('overlayadd overlayremove', saveOverlays);
+    }).catch(() => {});
+}
+
 function fitAllUnits() {
     if (!map || !markers.size) return;
     const pts = [...markers.values()].map(m => m.marker.getLatLng());
     if (pts.length === 1) map.setView(pts[0], 15);
     else map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 16 });
+}
+
+// Put latlng in the middle of the map (and optionally open marker's popup
+// without letting it pan the map off the unit).
+function centerOn(latlng, zoom, marker) {
+    if (!map) return;
+    map.invalidateSize({ pan: false });
+    map.setView(latlng, zoom, { animate: false });
+    if (marker && marker.getPopup()) {
+        const p = marker.getPopup();
+        const auto = p.options.autoPan;
+        p.options.autoPan = false;
+        marker.openPopup();
+        p.options.autoPan = auto;
+    }
 }
 
 function focusUnit(key) {
@@ -510,8 +574,7 @@ function focusUnit(key) {
     }
     const m = markers.get(key);
     if (m && map) {
-        map.setView(m.marker.getLatLng(), Math.max(map.getZoom(), 15));
-        m.marker.openPopup();
+        centerOn(m.marker.getLatLng(), Math.max(map.getZoom(), 15), m.marker);
     } else {
         const u = units.find(x => unitKey(x) === key);
         if (u) flashMessage(`${u.username} has not shared a position.`);
@@ -704,9 +767,9 @@ function ackEmergency(key) {
 function locateEmergency(key) {
     const e = emergencies.get(key);
     if (!e) return;
-    if (e.tak && e.lat !== undefined && map) { map.setView([e.lat, e.lon], 16); return; }  // where the alert was raised
-    if (markers.has(key) || e.tak) return focusUnit(key);
-    if (e.lat !== undefined && map) map.setView([e.lat, e.lon], 16);
+    if (e.tak && e.lat !== undefined && map) { centerOn([e.lat, e.lon], 16); return; }  // where the alert was raised
+    if (markers.has(key) || e.tak) return focusUnit(key);           // the unit's live position
+    if (e.lat !== undefined && map) centerOn([e.lat, e.lon], 16);
     else flashMessage(`${e.user} has not shared a position.`);
 }
 
@@ -1175,7 +1238,7 @@ function setVolume(val) {
 // ─── Unit status ───────────────────────────────────────────────────────────
 
 const STATUS_NAMES = ['No status', 'Available', 'Busy', 'En route', 'On scene', 'Out of service'];
-const STATUS_COLORS = ['#8B949E', '#22C55E', '#F59E0B', '#3B82F6', '#A78BFA', '#EF4444'];
+const STATUS_COLORS = ['#8B949E', '#22C55E', '#F59E0B', '#3B82F6', '#58A6FF', '#EF4444'];
 function statusColor(code) { return STATUS_COLORS[code] || '#8B949E'; }
 
 function setUnitStatus(agency, user, code) {
@@ -1454,7 +1517,7 @@ function clearViz() {
     const canvas = document.getElementById('audio-visualizer');
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = 'rgba(124,58,237,0.3)';
+    ctx.strokeStyle = 'rgba(31,111,235,0.3)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(0, canvas.height / 2);

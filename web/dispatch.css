@@ -12,8 +12,8 @@
     --text:      #E6EDF3;
     --text2:     #8B949E;
     --text3:     #5C6773;
-    --accent:    #7C3AED;
-    --accent2:   #A78BFA;
+    --accent:    #1F6FEB;
+    --accent2:   #58A6FF;
     --red:       #EF4444;
     --green:     #22C55E;
     --blue:      #3B82F6;
@@ -129,7 +129,15 @@ kbd { background: var(--surface3); border: 1px solid var(--border2); border-radi
     padding: 7px 8px; border-radius: 7px; cursor: pointer; border: 1px solid transparent;
 }
 .ch-row:hover { background: var(--surface2); }
-.ch-row.tx { background: rgba(124,58,237,0.14); border-color: rgba(124,58,237,0.55); }
+/* Each channel in its phone-app colour (--ch, set per row): a bar like the
+   app's indicator, and the selected channel tinted in it. */
+.ch-row[style*="--ch"] { box-shadow: inset 3px 0 0 var(--ch); }
+.ch-row.tx { background: rgba(31,111,235,0.14); border-color: rgba(31,111,235,0.55); }
+.ch-row.tx[style*="--ch"] {
+    background: color-mix(in srgb, var(--ch) 16%, transparent);
+    border-color: color-mix(in srgb, var(--ch) 60%, transparent);
+}
+.ch-row.tx[style*="--ch"] .ch-tx-tag { color: var(--ch); }
 .ch-row.talking { box-shadow: inset 3px 0 0 var(--red); }
 .ch-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ch-kind { font-size: 9px; font-weight: 700; color: var(--text2); background: var(--surface3); border-radius: 4px; padding: 1px 5px; margin-left: 6px; text-transform: uppercase; }

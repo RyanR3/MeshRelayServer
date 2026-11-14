@@ -251,7 +251,10 @@ func (s *Server) consoleSendMessage(console *Client, text string, unit *messageT
 	case channel != "" && allowed(agencyFromKey(channel)):
 		agency = agencyFromKey(channel)
 		_, chNum := splitChannelKey(channel)
-		label = fmt.Sprintf("Channel %d", chNum)
+		label = fmt.Sprintf("Channel %d", chNum+1)
+		if a := s.agencies[agency]; a != nil && chNum < MaxAgencyTalkgroups {
+			label = a.talkgroupName(chNum)
+		}
 		for k, c := range s.clients {
 			if c.AgencyID == agency && c.Channel == chNum && !isConsoleAddr(c.Addr) {
 				rcpts = append(rcpts, rcpt{k, c.Addr})
@@ -442,10 +445,7 @@ func (s *Server) allCallChannels(agencies []string) [][2]interface{} {
 		if ag == nil {
 			continue
 		}
-		n := ag.MaxChannels
-		if n <= 0 || n > MaxAgencyTalkgroups {
-			n = 10
-		}
+		n := ag.talkgroupCount()
 		for ch := 0; ch < n; ch++ {
 			out = append(out, [2]interface{}{a, ch})
 		}
