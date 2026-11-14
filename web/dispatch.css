@@ -259,6 +259,7 @@ kbd { background: var(--surface3); border: 1px solid var(--border2); border-radi
 .emerg-item { padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .emerg-item.active { background: rgba(239,68,68,0.12); }
 .emerg-item.acked { background: none; }
+.warn-icon { width: 1em; height: 1em; vertical-align: -0.125em; margin-right: 5px; flex-shrink: 0; }
 .emerg-head { display: flex; justify-content: space-between; gap: 6px; font-weight: 700; }
 .emerg-item.active .emerg-head { color: #FCA5A5; }
 .emerg-meta { font-size: 11px; color: var(--text2); margin-top: 2px; }

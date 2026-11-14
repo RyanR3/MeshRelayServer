@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"log"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -25,6 +26,8 @@ import (
 //   FloorIdle      (0x24): i32 channel
 //   FloorTaken     (0x25): i32 channel | str holder | u8 priority
 //   EmergencyAlert (0x26): i32 channel | str user | u8 active(1=set,0=cancel)
+//                          [| f64 lat | f64 lon]  (server→client, set only, when
+//                          the unit's position is known; older clients ignore it)
 
 // ---- wire helpers ----
 
@@ -152,6 +155,32 @@ func buildEmergencyAlert(channel int, user string, active bool) []byte {
 		buf.WriteByte(0)
 	}
 	return buf.Bytes()
+}
+
+// emergencyAlertPacket builds the 0x26 broadcast for an emergency on the
+// channel at key, with the alerting unit's last reported position appended
+// when it is set and known, so phones can show where the unit is.
+func (s *Server) emergencyAlertPacket(key string, channel int, user string, active bool) []byte {
+	pkt := buildEmergencyAlert(channel, user, active)
+	if !active || s == nil {
+		return pkt
+	}
+	agency := key
+	if i := strings.LastIndexByte(key, ':'); i >= 0 {
+		agency = key[:i]
+	}
+	s.mu.RLock()
+	var loc *UnitLocation
+	if c := s.clients[userKey(agency, user)]; c != nil && c.Loc != nil {
+		l := *c.Loc
+		loc = &l
+	}
+	s.mu.RUnlock()
+	if loc == nil {
+		return pkt
+	}
+	pkt = binary.BigEndian.AppendUint64(pkt, math.Float64bits(loc.Lat))
+	return binary.BigEndian.AppendUint64(pkt, math.Float64bits(loc.Lon))
 }
 
 // ---- floor state machine ----
@@ -540,7 +569,7 @@ func (fc *FloorController) Emergency(key string, channel int, user string, activ
 			fc.server.sendFloorToUserIn(key, c.holder.user, buildFloorPreempted(channel, user, PriorityEmergency))
 		}
 		fc.grant(key, channel, user, PriorityEmergency)
-		fc.server.broadcastFloorToChannel(key, buildEmergencyAlert(channel, user, true))
+		fc.server.broadcastFloorToChannel(key, fc.server.emergencyAlertPacket(key, channel, user, true))
 		log.Printf("Floor %s: EMERGENCY activated by %s", key, user)
 	} else {
 		// Only the originator or a supervisor can cancel.
@@ -784,10 +813,13 @@ func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) 
 	}
 	// Consoles see every emergency in their agency, floor control or not.
 	s.notifyDispatchEmergency(client.AgencyID, client.Channel, alert.User, alert.Active)
+	key := channelKey(client.AgencyID, client.Channel)
 	if !s.floorEnabledForAgency(client.AgencyID) {
+		// No floor state to keep: still tell everyone on the channel, so the
+		// units around the caller see it too, not only dispatch.
+		s.broadcastFloorToChannel(key, s.emergencyAlertPacket(key, client.Channel, alert.User, alert.Active))
 		return
 	}
-	key := channelKey(client.AgencyID, client.Channel)
 	s.floor.Emergency(key, client.Channel, alert.User, alert.Active, isSupervisor)
 	// MCX Step 5: propagate an emergency set to the external MCX platform.
 	if s.sipGateway != nil && alert.Active {

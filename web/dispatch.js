@@ -18,7 +18,8 @@ let units = [];                 // field units (consoles filtered out)
 let takUnits = [];              // TAK users from the agency's TAK Server (tak.go)
 let txKey = loadPref('cmd.tx', '');            // "agency:channel" we transmit on
 const monitored = new Set(loadPref('cmd.monitor', []));
-const collapsedAgencies = new Set(loadPref('cmd.collapsed', []));
+// Agency groups start closed; this remembers the ones the dispatcher opened.
+const expandedAgencies = new Set(loadPref('cmd.expanded', []));
 const channelNames = loadPref('cmd.names', {});
 
 const talkState = new Map();    // "agency|channel|user" -> { agency, channel, user, start, last, entry }
@@ -27,6 +28,9 @@ const emergencies = new Map();  // "agency|user" -> { agency, channel, user, at,
 const MAX_LOG = 300, KEEP_AUDIO = 40, TALK_GAP_MS = 1500;
 
 // ─── Prefs / helpers ───────────────────────────────────────────────────────
+
+// Warning triangle for emergencies (inline SVG, takes the text colour; no emoji).
+const WARN_ICON = '<svg class="warn-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>';
 
 function loadPref(key, fallback) {
     try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (_) { return fallback; }
@@ -219,8 +223,8 @@ function toggleMonitor(agency, channel, ev) {
 }
 
 function toggleAgency(id) {
-    if (collapsedAgencies.has(id)) collapsedAgencies.delete(id); else collapsedAgencies.add(id);
-    savePref('cmd.collapsed', [...collapsedAgencies]);
+    if (expandedAgencies.has(id)) expandedAgencies.delete(id); else expandedAgencies.add(id);
+    savePref('cmd.expanded', [...expandedAgencies]);
     renderChannels();
 }
 
@@ -256,7 +260,7 @@ function renderChannels() {
         });
         if (!rows.length && (q || !activeOnly)) continue;   // keep the agency (and All Call) when merely quiet
         const total = rows.reduce((n, c) => n + c.units, 0);
-        const collapsed = collapsedAgencies.has(a.id) && !q;
+        const collapsed = !expandedAgencies.has(a.id) && !q;   // a search opens every group
         html += `<div class="agency-group">
             <div class="agency-head" onclick="toggleAgency('${escAttr(a.id)}')">
                 <span>${collapsed ? '▸' : '▾'}</span><span class="agency-swatch" style="background:${agencyColor(a.id)}"></span>
@@ -589,7 +593,7 @@ function renderLog() {
         const idx = radioLog.indexOf(e);
         const replay = (e.pcmLen || e.recId) ? `<button class="replay-btn" onclick="replay(${idx})">▶ Replay</button>` : '';
         const ch = `${escHtml(channelLabel(e.agency, e.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(e.agency)) : ''}`;
-        const what = e.note ? escHtml(e.note) : e.emergency ? (e.active ? '🚨 EMERGENCY' : 'Emergency cleared') : (live ? 'talking…' : fmtDur(e.end - e.start));
+        const what = e.note ? escHtml(e.note) : e.emergency ? (e.active ? WARN_ICON + 'EMERGENCY' : 'Emergency cleared') : (live ? 'talking…' : fmtDur(e.end - e.start));
         return `<tr class="${live ? 'live' : ''}${e.emergency ? ' emerg' : ''}">
             <td>${fmtTime(e.start)}</td><td class="log-ch" title="${ch}">${ch}</td>
             <td><span class="log-unit" onclick="focusUnit('${escAttr(e.agency + '|' + e.user)}')">${escHtml(e.user)}</span></td>
@@ -680,7 +684,7 @@ function renderEmergencies() {
     el.innerHTML = list.map(e => {
         const k = escAttr(e.agency + '|' + e.user);
         return `<div class="emerg-item${e.active ? ' active' : ''}${e.acked ? ' acked' : ''}">
-            <div class="emerg-head"><span>${e.active ? '🚨 ' : ''}${escHtml(e.user)}</span><span>${e.active ? (e.acked ? 'ACKNOWLEDGED' : 'ACTIVE') : 'Cleared'}</span></div>
+            <div class="emerg-head"><span>${e.active ? WARN_ICON : ''}${escHtml(e.user)}</span><span>${e.active ? (e.acked ? 'ACKNOWLEDGED' : 'ACTIVE') : 'Cleared'}</span></div>
             <div class="emerg-meta">${e.tak ? escHtml(e.alert || 'TAK alert') : escHtml(channelLabel(e.agency, e.channel))} · ${escHtml(agencyName(e.agency))} · ${fmtTime(e.at)} (${ago(e.at)})</div>
             <div class="emerg-actions">
                 <button class="mini-btn" onclick="locateEmergency('${k}')">Locate</button>
