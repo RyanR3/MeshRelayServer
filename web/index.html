@@ -942,15 +942,80 @@
                         <div class="settings-info">
                             <div class="settings-label">Record radio traffic</div>
                             <div class="settings-description">
-                                Every transmission on this agency's channels is saved on the server and can be searched and
-                                replayed from the dispatch console. Recordings are deleted after <span id="recording-retention">30</span> days
-                                (<code>recording_retention_days</code> in the server config).
+                                Every transmission on this agency's channels is saved on the server and can be searched, replayed and
+                                downloaded from the Command console, and caught up on from the app's channel History.
+                                Recordings are deleted after <span id="recording-retention">30</span> days.
                             </div>
                         </div>
                         <label class="toggle-switch">
                             <input type="checkbox" id="recording-toggle" onchange="saveRecordingSetting()">
                             <span class="toggle-slider"></span>
                         </label>
+                    </div>
+                    <div class="settings-row" style="align-items: flex-start;">
+                        <div class="settings-info">
+                            <div class="settings-label">Keep recordings for</div>
+                            <div class="settings-description">How many days this agency's recordings (and their transcripts) stay on the server
+                                before they are deleted automatically. Leave it blank to use the server default of <span id="recording-server-retention">30</span> days.
+                                Set it to match your records-retention policy.</div>
+                            <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                                <input type="number" id="recording-retention-input" min="1" max="3650" placeholder="30" style="width:110px; margin-bottom:0;">
+                                <span style="color: var(--text-secondary, #8B949E);">days</span>
+                                <button class="btn-primary" onclick="saveRecordingRetention()">Save</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">Transcribe recordings</div>
+                            <div class="settings-description">
+                                Each recorded transmission is turned into text on this server (Whisper speech recognition; no audio leaves
+                                the server). The text shows in the console's radio log and recordings, and can be searched.
+                                Transcripts are machine-made and can be wrong — the recording stays the record.
+                                <span id="transcribe-unavailable" style="display:none; color: #E3B341;"><br>Not installed on this server yet — a super admin installs it under Transcription below.</span>
+                            </div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="transcribe-toggle" onchange="saveTranscribeSetting()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-row" id="transcribe-words-row" style="display:none; align-items: flex-start;">
+                        <div class="settings-info">
+                            <div class="settings-label">Words to recognise</div>
+                            <div class="settings-description">Optional. Unit names, places and terms your agency uses, so they are spelled right
+                                (e.g. <em>Engine 41, Medic 3, Monticello, Route 17B</em>). Keep it short — a long list can make results worse.</div>
+                            <div style="display:flex; gap:8px; margin-top:8px;">
+                                <input type="text" id="transcribe-words" maxlength="400" placeholder="Engine 41, Medic 3, Route 17B" style="flex:1; margin-bottom:0;">
+                                <button class="btn-primary" onclick="saveTranscribeWords()">Save</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Speech-to-text engine (server-wide, super admin) -->
+                <div class="panel super-admin-only" style="margin-bottom: 20px;">
+                    <h3>Transcription</h3>
+                    <div id="transcription-status-msg" class="status-message" style="display: none;"></div>
+                    <div class="settings-row" style="align-items: flex-start;">
+                        <div class="settings-info">
+                            <div class="settings-label">Speech recognition on this server</div>
+                            <div class="settings-description" id="transcription-summary">Checking…</div>
+                            <div style="display:flex; gap:8px; margin-top:10px; flex-wrap: wrap; align-items:center;">
+                                <select id="transcription-model" style="margin-bottom:0; width:auto; min-width:260px;"></select>
+                                <button class="btn-primary" id="transcription-install-btn" onclick="installTranscription()">Install</button>
+                                <button class="btn-secondary" id="transcription-remove-btn" onclick="removeTranscription()" style="display:none;">Remove</button>
+                            </div>
+                            <div id="transcription-progress" style="display:none; margin-top:12px;">
+                                <div class="progress-bar-container"><div class="progress-bar" id="transcription-progress-bar" style="width:0%"></div></div>
+                                <div class="progress-stage" id="transcription-stage"></div>
+                            </div>
+                            <div class="settings-description" style="margin-top:10px;">
+                                Downloads the transcription program from this server's GitHub release and the Whisper model from Hugging Face
+                                (both checked against published checksums), then tests them here. It runs at low priority, one transmission at
+                                a time, so radio traffic is never slowed. Agencies then switch it on under Radio Recording.
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -1240,6 +1305,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=34"></script>
+    <script src="app.js?v=37"></script>
 </body>
 </html>

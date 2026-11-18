@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay Command</title>
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
-    <link rel="stylesheet" href="dispatch.css?v=18">
+    <link rel="stylesheet" href="dispatch.css?v=20">
 </head>
 <body>
     <!-- Click-to-enable-audio banner (browsers block autoplay until a user gesture) -->
@@ -93,7 +93,9 @@
                         <input type="date" id="hist-date" onchange="searchRecordings()">
                         <select id="hist-channel" onchange="searchRecordings()"><option value="">All channels</option></select>
                         <input type="text" id="hist-unit" placeholder="Unit" style="width:90px" onkeydown="if(event.key==='Enter')searchRecordings()">
+                        <input type="text" id="hist-text" placeholder="Words" title="Find recordings whose transcript contains these words" style="width:110px" onkeydown="if(event.key==='Enter')searchRecordings()">
                         <button class="mini-btn" onclick="searchRecordings()">Search</button>
+                        <button class="mini-btn" id="hist-download" onclick="downloadSelectedRecordings()" disabled title="Download the selected recordings as WAV files with transcripts.csv, in one zip">Download</button>
                     </div>
                 </div>
                 <div class="log-table-wrap" id="live-wrap">
@@ -105,7 +107,7 @@
                 </div>
                 <div class="log-table-wrap" id="history-wrap" style="display:none;">
                     <table class="log-table">
-                        <thead><tr><th>Time</th><th>Channel</th><th>Unit</th><th>Length</th><th></th></tr></thead>
+                        <thead><tr><th class="hist-sel"><input type="checkbox" id="hist-all" onchange="toggleHistAll(this.checked)" title="Select all"></th><th>Time</th><th>Channel</th><th>Unit</th><th>Length</th><th></th></tr></thead>
                         <tbody id="hist-body"></tbody>
                     </table>
                     <div class="log-empty" id="hist-empty">Pick a day and search. Recordings are kept on the server for the period set in Settings.</div>
@@ -170,6 +172,6 @@
     </div>
 
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script src="dispatch.js?v=25"></script>
+    <script src="dispatch.js?v=27"></script>
 </body>
 </html>

@@ -32,3 +32,6 @@ recordings/
 
 # Other runtime state
 guest_events.json
+
+# Transcription helper copies (built in transcribe/dist)
+mrtranscribe-linux-*

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -571,5 +572,22 @@ func TestRosterExcludesDispatchConsoles(t *testing.T) {
 	}
 	if bytes.Contains(roster, []byte("WCDRT900")) {
 		t.Fatal("dispatch console listed in the phone roster")
+	}
+}
+
+// The client list goes to every admin's and dispatcher's browser: it must not
+// carry the phones' IP addresses.
+func TestClientListHasNoIPAddresses(t *testing.T) {
+	s, _ := newSecTestServer(t)
+	s.clients[userKey("a1", "u1")] = &Client{Username: "u1", AgencyID: "a1", Addr: udp(7001)}
+	for _, c := range s.GetClients("") {
+		for k, v := range c {
+			if str, ok := v.(string); ok && strings.Contains(str, "10.0.0.1") {
+				t.Fatalf("client list field %q carries the IP address: %q", k, str)
+			}
+		}
+		if _, ok := c["address"]; ok {
+			t.Fatalf("client list still has an address field")
+		}
 	}
 }

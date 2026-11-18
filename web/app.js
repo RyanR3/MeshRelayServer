@@ -147,6 +147,7 @@ function initFloorControlPanel() {
             fetchFloorControl();
             fetchGuestInvites();
             fetchRecordingSetting();
+            fetchTranscription();
             fetchTak();
         }).catch(() => { fetchFloorControl(); fetchGuestInvites(); fetchRecordingSetting(); fetchTak(); });
     } else {
@@ -292,6 +293,20 @@ function fetchRecordingSetting() {
             if (data.error) { showStatus('recording-status', data.error, 'error'); return; }
             toggle.checked = !!data.enabled;
             document.getElementById('recording-retention').textContent = data.retention_days;
+            const ri = document.getElementById('recording-retention-input');
+            if (ri) {
+                ri.value = data.agency_retention_days || '';
+                ri.placeholder = data.server_retention_days;
+                document.getElementById('recording-server-retention').textContent = data.server_retention_days;
+            }
+            const tr = document.getElementById('transcribe-toggle');
+            if (tr) {
+                tr.checked = !!data.transcribe;
+                tr.disabled = !data.enabled || (!data.transcription_available && !data.transcribe);
+                document.getElementById('transcribe-unavailable').style.display = data.transcription_available ? 'none' : 'inline';
+                document.getElementById('transcribe-words-row').style.display = data.transcribe ? 'flex' : 'none';
+                document.getElementById('transcribe-words').value = data.transcribe_words || '';
+            }
         })
         .catch(err => showStatus('recording-status', 'Failed to load: ' + err.message, 'error'));
 }
@@ -308,8 +323,101 @@ function saveRecordingSetting() {
     .then(data => {
         if (data.error) { showStatus('recording-status', data.error, 'error'); fetchRecordingSetting(); return; }
         showStatus('recording-status', toggle.checked ? 'Radio traffic is being recorded' : 'Recording is off for this agency', 'success');
+        fetchRecordingSetting();
     })
     .catch(err => { showStatus('recording-status', 'Failed to save: ' + err.message, 'error'); fetchRecordingSetting(); });
+}
+
+function putRecordingSetting(body, okMsg) {
+    const agency = recordingAgencyId();
+    if (agency) body.agency_id = agency;
+    return fetch('/api/my-agency/recording', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('recording-status', data.error, 'error'); }
+        else showStatus('recording-status', okMsg, 'success');
+        fetchRecordingSetting();
+    })
+    .catch(err => { showStatus('recording-status', 'Failed to save: ' + err.message, 'error'); fetchRecordingSetting(); });
+}
+
+function saveRecordingRetention() {
+    const raw = document.getElementById('recording-retention-input').value.trim();
+    const days = raw === '' ? 0 : parseInt(raw, 10);
+    if (raw !== '' && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+        showStatus('recording-status', 'Enter a number of days from 1 to 3650, or leave it blank for the server default', 'error');
+        return;
+    }
+    if (days && !confirm(`Recordings older than ${days} days will be deleted now and from then on. Continue?`)) return;
+    putRecordingSetting({ retention_days: days }, days ? `Recordings are kept for ${days} days` : 'Recordings use the server default');
+}
+
+function saveTranscribeSetting() {
+    const on = document.getElementById('transcribe-toggle').checked;
+    putRecordingSetting({ transcribe: on }, on ? 'Recordings will be transcribed' : 'Transcription is off for this agency');
+}
+
+function saveTranscribeWords() {
+    putRecordingSetting({ transcribe_words: document.getElementById('transcribe-words').value }, 'Word list saved');
+}
+
+// --- Transcription engine (Settings, super admin) ----------------------------
+
+let transcriptionPoll = null;
+function fetchTranscription() {
+    const sel = document.getElementById('transcription-model');
+    if (!sel || currentRole !== 'super_admin') return;
+    fetch('/api/transcription').then(r => r.json()).then(st => {
+        if (st.error) return;
+        const prev = sel.value;
+        sel.innerHTML = st.models.map(m =>
+            `<option value="${escapeHtml(m.name)}">${escapeHtml(m.label)} (${m.size_mb} MB download, ~${m.ram_mb} MB memory)</option>`).join('');
+        sel.value = prev || st.model || 'base.en';
+        const inst = st.install || {};
+        const busy = !!inst.in_progress;
+        const sum = document.getElementById('transcription-summary');
+        if (st.installed) {
+            const m = st.models.find(x => x.name === st.model);
+            let speed = '';
+            if (st.last_ms && st.last_audio_ms) speed = ` Last transmission: ${(st.last_audio_ms / 1000).toFixed(1)} s of audio in ${(st.last_ms / 1000).toFixed(1)} s.`;
+            sum.innerHTML = `<strong>Installed</strong> — model ${escapeHtml(m ? m.label : st.model)}, ${st.threads} of ${st.cpus} CPU cores (${escapeHtml(st.arch)}).
+                Since the server started: ${st.transcribed} transcribed, ${st.no_speech} without speech, ${st.failed} failed${st.queue ? ', ' + st.queue + ' waiting' : ''}.${speed}`;
+        } else {
+            sum.textContent = `Not installed. Choose a model and press Install (${st.cpus} CPU cores, ${st.arch}). Base suits most servers; Tiny for a Raspberry Pi or a busy server.`;
+        }
+        document.getElementById('transcription-install-btn').textContent = st.installed ? 'Change model' : 'Install';
+        document.getElementById('transcription-install-btn').disabled = busy;
+        document.getElementById('transcription-remove-btn').style.display = st.installed && !busy ? '' : 'none';
+        const prog = document.getElementById('transcription-progress');
+        prog.style.display = (busy || inst.stage === 'error') ? 'block' : 'none';
+        document.getElementById('transcription-progress-bar').style.width = (inst.progress || 0) + '%';
+        document.getElementById('transcription-stage').textContent = inst.error ? 'Failed: ' + inst.error : (inst.message || '');
+        clearTimeout(transcriptionPoll);
+        if (busy) transcriptionPoll = setTimeout(fetchTranscription, 1000);
+        else if (inst.stage === 'done') { showStatus('transcription-status-msg', inst.message, 'success'); fetchRecordingSetting(); }
+    }).catch(() => {});
+}
+
+function installTranscription() {
+    const model = document.getElementById('transcription-model').value;
+    fetch('/api/transcription/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model })
+    }).then(r => r.json()).then(d => {
+        if (d.error) showStatus('transcription-status-msg', d.error, 'error');
+        fetchTranscription();
+    }).catch(err => showStatus('transcription-status-msg', 'Failed: ' + err.message, 'error'));
+}
+
+function removeTranscription() {
+    if (!confirm('Remove speech recognition from this server? Transcripts already made are kept; new recordings will not be transcribed until it is installed again.')) return;
+    fetch('/api/transcription/remove', { method: 'POST' }).then(r => r.json()).then(d => {
+        if (d.error) showStatus('transcription-status-msg', d.error, 'error');
+        else showStatus('transcription-status-msg', 'Transcription removed', 'success');
+        fetchTranscription();
+        fetchRecordingSetting();
+    });
 }
 
 // --- Guest invites from the app (Settings) ---------------------------------
@@ -601,7 +709,7 @@ function updateClients(clients) {
                     <span class="client-channel">Ch ${escapeHtml(client.channel)}</span>
                 </div>
                 <div class="client-info">
-                    ${escapeHtml(client.address)} • Connected ${escapeHtml(connectedTime)}
+                    Connected ${escapeHtml(connectedTime)}
                 </div>
             </div>
         `;
@@ -828,7 +936,7 @@ function renderOnlineClientsModal() {
             <div class="client-item">
                 <div class="client-username">${statusDotHtml(true)} ${escapeHtml(c.username)}${agency}
                     <span class="client-channel">Ch ${escapeHtml(String(c.channel))}</span></div>
-                <div class="client-info">${escapeHtml(c.address || '')}${since ? ' · connected ' + escapeHtml(since) : ''}${account}</div>
+                <div class="client-info">${since ? 'Connected ' + escapeHtml(since) : ''}${account}</div>
             </div>`;
     }).join('');
 }

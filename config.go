@@ -23,9 +23,11 @@ type Config struct {
 	// Radio traffic recording (recorder.go). Days to keep; 0 = default 30.
 	RecordingDir           string `json:"recording_dir,omitempty"`
 	RecordingRetentionDays int    `json:"recording_retention_days,omitempty"`
-	DebugPprof             bool   `json:"debug_pprof,omitempty"`
-	TLSCertFile            string `json:"tls_cert_file,omitempty"`
-	TLSKeyFile             string `json:"tls_key_file,omitempty"`
+	// Speech-to-text helper + model (transcriber.go); default <install dir>/transcribe.
+	TranscribeDir string `json:"transcribe_dir,omitempty"`
+	DebugPprof    bool   `json:"debug_pprof,omitempty"`
+	TLSCertFile   string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile    string `json:"tls_key_file,omitempty"`
 	// MCX Step 2: the MCPTT domain for this deployment. Per-agency MCX identities
 	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. raptor7@sullivan.meshrelayptt.com).
 	// Empty disables MCX id derivation (ids fall back to the plain domain).

@@ -11,7 +11,8 @@ package main
 //
 // A transmission ends after 1.5 s without audio (or at 10 minutes). Agencies
 // can switch recording off (Agency.NoRecording); recordings older than the
-// retention period are deleted. Consoles list and play them through
+// agency's retention period (Agency.RecordingRetentionDays, else the server's
+// recording_retention_days) are deleted. Consoles list and play them through
 // /api/recordings — scoped to the operator's agency.
 
 import (
@@ -51,6 +52,9 @@ type RecordingInfo struct {
 	DurationMs int64  `json:"duration_ms"`
 	Frames     int    `json:"frames"`
 	File       string `json:"file"` // relative to the recording dir
+	// Transcript (transcriber.go), filled in by Query; not stored in the index.
+	Text        string `json:"text,omitempty"`
+	Transcribed bool   `json:"transcribed,omitempty"`
 }
 
 type activeRec struct {
@@ -146,9 +150,16 @@ func (r *Recorder) finish(key string, a *activeRec) {
 	go func() {
 		r.appendIndex(info)
 		if r.s != nil {
+			queued := r.s.queueTranscription(info)
+			// Phones with the channel's History open see it at once.
+			if queued {
+				r.s.pushTranscriptToPhones(info, trStatePending, "")
+			} else {
+				r.s.pushTranscriptToPhones(info, trStatePlain, "")
+			}
 			r.s.sendToConsoles(info.Agency, map[string]interface{}{
 				"type": "recording", "id": info.ID, "agency": info.Agency, "channel": info.Channel,
-				"user": info.User, "start": info.Start, "duration_ms": info.DurationMs,
+				"user": info.User, "start": info.Start, "duration_ms": info.DurationMs, "transcribing": queued,
 			})
 		}
 	}()
@@ -187,36 +198,149 @@ func (r *Recorder) loop() {
 	}
 }
 
-// prune deletes day folders older than the retention period.
+// Retention limits for an agency's own setting (Agency.RecordingRetentionDays).
+const (
+	recMinRetention = 1
+	recMaxRetention = 3650
+)
+
+// retentionFor is how many days an agency keeps its recordings: its own
+// setting, else the server's. Caller holds s.mu (read) or passes nil.
+func (r *Recorder) retentionFor(a *Agency) int {
+	if a != nil && a.RecordingRetentionDays > 0 {
+		return a.RecordingRetentionDays
+	}
+	return r.retention
+}
+
+// prune deletes recordings older than their agency's retention period. Each
+// day folder holds one sub-folder per agency; an agency's folder goes when it
+// is too old for that agency, and the day's index and transcripts are
+// rewritten without its recordings. An empty day folder is removed.
 func (r *Recorder) prune(now time.Time) {
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return
 	}
-	cutoff := now.AddDate(0, 0, -r.retention)
+	// Folder name → retention days (folders are named after the agency id).
+	days := map[string]int{}
+	if r.s != nil {
+		r.s.mu.RLock()
+		for id, a := range r.s.agencies {
+			days[safeName.ReplaceAllString(nonEmpty(id, "_"), "_")] = r.retentionFor(a)
+		}
+		r.s.mu.RUnlock()
+	}
 	for _, e := range entries {
 		d, err := time.ParseInLocation(recDayFmt, e.Name(), time.Local)
 		if err != nil || !e.IsDir() {
 			continue
 		}
-		if d.Before(cutoff) {
-			if err := os.RemoveAll(filepath.Join(r.dir, e.Name())); err == nil {
-				log.Printf("Recorder: deleted recordings from %s (older than %d days)", e.Name(), r.retention)
+		dayDir := filepath.Join(r.dir, e.Name())
+		subs, err := os.ReadDir(dayDir)
+		if err != nil {
+			continue
+		}
+		removed := map[string]bool{}
+		left := 0
+		for _, sub := range subs {
+			if !sub.IsDir() {
+				continue
 			}
+			keep := r.retention
+			if n, ok := days[sub.Name()]; ok {
+				keep = n
+			}
+			if d.Before(now.AddDate(0, 0, -keep)) {
+				if os.RemoveAll(filepath.Join(dayDir, sub.Name())) == nil {
+					removed[sub.Name()] = true
+					log.Printf("Recorder: deleted %s recordings from %s (kept %d days)", sub.Name(), e.Name(), keep)
+					continue
+				}
+			}
+			left++
+		}
+		if left == 0 && len(subs) > 0 {
+			os.RemoveAll(dayDir)
+			continue
+		}
+		if len(removed) > 0 {
+			r.dropFromIndex(e.Name(), removed)
 		}
 	}
 }
 
-// Query lists finished recordings on one day, newest first.
-func (r *Recorder) Query(day string, scopeAgency string, agency string, channel int, user string, limit int) []RecordingInfo {
+// dropFromIndex rewrites a day's index and transcripts without the
+// recordings of the given agency folders.
+func (r *Recorder) dropFromIndex(day string, folders map[string]bool) {
+	r.indexMu.Lock()
+	defer r.indexMu.Unlock()
+	idxPath := filepath.Join(r.dir, day, "index.jsonl")
+	data, err := os.ReadFile(idxPath)
+	if err != nil {
+		return
+	}
+	var keepLines []string
+	gone := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var info RecordingInfo
+		if json.Unmarshal([]byte(line), &info) == nil &&
+			folders[safeName.ReplaceAllString(nonEmpty(info.Agency, "_"), "_")] {
+			gone[info.ID] = true
+			continue
+		}
+		keepLines = append(keepLines, line)
+	}
+	writeLines(idxPath, keepLines)
+	trPath := filepath.Join(r.dir, day, "transcripts.jsonl")
+	if tdata, err := os.ReadFile(trPath); err == nil {
+		var keepT []string
+		for _, line := range strings.Split(string(tdata), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var t transcriptLine
+			if json.Unmarshal([]byte(line), &t) == nil && gone[t.ID] {
+				continue
+			}
+			keepT = append(keepT, line)
+		}
+		writeLines(trPath, keepT)
+	}
+}
+
+func writeLines(path string, lines []string) {
+	tmp := path + ".tmp"
+	body := strings.Join(lines, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	if err := os.WriteFile(tmp, []byte(body), 0o640); err != nil {
+		log.Printf("Recorder: %v", err)
+		return
+	}
+	os.Rename(tmp, path)
+}
+
+// Query lists finished recordings on one day, newest first, with their
+// transcripts. text ("" = any) keeps recordings whose transcript contains it.
+func (r *Recorder) Query(day string, scopeAgency string, agency string, channel int, user string, limit int, text ...string) []RecordingInfo {
 	var out []RecordingInfo
 	r.indexMu.Lock()
 	data, err := os.ReadFile(filepath.Join(r.dir, day, "index.jsonl"))
+	trs := r.transcripts(day)
 	r.indexMu.Unlock()
 	if err != nil {
 		return out
 	}
 	user = strings.ToLower(user)
+	words := ""
+	if len(text) > 0 {
+		words = strings.ToLower(strings.TrimSpace(text[0]))
+	}
 	for _, line := range strings.Split(string(data), "\n") {
 		var info RecordingInfo
 		if json.Unmarshal([]byte(line), &info) != nil {
@@ -224,6 +348,12 @@ func (r *Recorder) Query(day string, scopeAgency string, agency string, channel 
 		}
 		if (scopeAgency != "" && info.Agency != scopeAgency) || (agency != "" && info.Agency != agency) ||
 			(channel >= 0 && info.Channel != channel) || (user != "" && !strings.Contains(strings.ToLower(info.User), user)) {
+			continue
+		}
+		if t, ok := trs[info.ID]; ok {
+			info.Text, info.Transcribed = t, true
+		}
+		if words != "" && !strings.Contains(strings.ToLower(info.Text), words) {
 			continue
 		}
 		out = append(out, info)
@@ -290,7 +420,7 @@ func (s *Server) handleListRecordings(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 1000 {
 		limit = 300
 	}
-	list := s.recorder.Query(day, session.AgencyID, q.Get("agency"), channel, q.Get("user"), limit)
+	list := s.recorder.Query(day, session.AgencyID, q.Get("agency"), channel, q.Get("user"), limit, q.Get("text"))
 	if list == nil {
 		list = []RecordingInfo{}
 	}
@@ -334,19 +464,46 @@ func (s *Server) handleGetRecordingSetting(w http.ResponseWriter, r *http.Reques
 	if s.recorder != nil {
 		retention = s.recorder.retention
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"agency_id": agencyID, "enabled": !a.NoRecording, "retention_days": retention})
+	avail, _ := s.transcriber.ready()
+	s.mu.RLock()
+	if s.recorder != nil {
+		retention = s.recorder.retentionFor(a)
+	}
+	resp := map[string]interface{}{"agency_id": agencyID, "enabled": !a.NoRecording, "retention_days": retention,
+		"agency_retention_days": a.RecordingRetentionDays, "server_retention_days": s.recorderRetention(),
+		"retention_min": recMinRetention, "retention_max": recMaxRetention,
+		"transcribe": a.Transcribe, "transcribe_words": a.TranscribeWords, "transcription_available": avail}
+	s.mu.RUnlock()
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleUpdateRecordingSetting(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	agencyID, isSuper := s.callerAgency(r)
 	var req struct {
-		AgencyID *string `json:"agency_id"`
-		Enabled  *bool   `json:"enabled"`
+		AgencyID        *string `json:"agency_id"`
+		Enabled         *bool   `json:"enabled"`
+		Transcribe      *bool   `json:"transcribe"`
+		TranscribeWords *string `json:"transcribe_words"`
+		RetentionDays   *int    `json:"retention_days"` // 0 = the server's default
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Enabled == nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+		(req.Enabled == nil && req.Transcribe == nil && req.TranscribeWords == nil && req.RetentionDays == nil) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request")
 		return
+	}
+	if req.RetentionDays != nil && *req.RetentionDays != 0 &&
+		(*req.RetentionDays < recMinRetention || *req.RetentionDays > recMaxRetention) {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("keep recordings for %d to %d days (or leave it blank for the server default)", recMinRetention, recMaxRetention))
+		return
+	}
+	if req.TranscribeWords != nil {
+		words := strings.Join(strings.Fields(*req.TranscribeWords), " ")
+		if len(words) > trMaxWords {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("the word list is too long (%d characters max)", trMaxWords))
+			return
+		}
+		req.TranscribeWords = &words
 	}
 	if isSuper && req.AgencyID != nil && *req.AgencyID != "" {
 		agencyID = *req.AgencyID
@@ -354,7 +511,18 @@ func (s *Server) handleUpdateRecordingSetting(w http.ResponseWriter, r *http.Req
 	s.mu.Lock()
 	a := s.agencies[agencyID]
 	if a != nil {
-		a.NoRecording = !*req.Enabled
+		if req.Enabled != nil {
+			a.NoRecording = !*req.Enabled
+		}
+		if req.Transcribe != nil {
+			a.Transcribe = *req.Transcribe
+		}
+		if req.TranscribeWords != nil {
+			a.TranscribeWords = *req.TranscribeWords
+		}
+		if req.RetentionDays != nil {
+			a.RecordingRetentionDays = *req.RetentionDays
+		}
 	}
 	s.mu.Unlock()
 	if a == nil {
@@ -365,6 +533,20 @@ func (s *Server) handleUpdateRecordingSetting(w http.ResponseWriter, r *http.Req
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("Recording for agency %s: %v", agencyID, *req.Enabled)
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "enabled": *req.Enabled})
+	s.mu.RLock()
+	enabled, transcribe := !a.NoRecording, a.Transcribe
+	s.mu.RUnlock()
+	if req.RetentionDays != nil && s.recorder != nil {
+		go s.recorder.prune(time.Now()) // a shorter period takes effect now, not in an hour
+	}
+	log.Printf("Recording for agency %s: %v, transcription %v", agencyID, enabled, transcribe)
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "enabled": enabled, "transcribe": transcribe})
+}
+
+// recorderRetention is the server-wide default retention in days.
+func (s *Server) recorderRetention() int {
+	if s.recorder != nil {
+		return s.recorder.retention
+	}
+	return recDefaultRetention
 }

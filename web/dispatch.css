@@ -225,6 +225,13 @@ kbd { background: var(--surface3); border: 1px solid var(--border2); border-radi
 .log-table tr.emerg td { background: rgba(239,68,68,0.12); }
 .log-ch { color: var(--text2); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
 .log-unit { font-weight: 600; cursor: pointer; }
+.log-table tr.trx td { border-top: none; padding-top: 0; }
+.log-table tr:has(+ tr.trx) td { border-bottom: none; }
+.trx-text { white-space: normal !important; color: var(--text2); font-size: 0.92em; line-height: 1.35; padding-bottom: 7px !important; }
+.hist-sel { width: 28px; padding-right: 0 !important; }
+.hist-sel input { margin: 0; accent-color: var(--accent, #1F6FEB); cursor: pointer; }
+#hist-download:disabled { opacity: 0.45; cursor: default; }
+.trx-text.pending { font-style: italic; opacity: 0.7; }
 .log-unit:hover { text-decoration: underline; }
 .replay-btn { background: none; border: 1px solid var(--border2); color: var(--text2); border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 11px; }
 .replay-btn:hover { color: var(--text); border-color: var(--blue); }

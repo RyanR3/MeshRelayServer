@@ -120,6 +120,13 @@ type Agency struct {
 
 	// NoRecording stops recording this agency's radio traffic (recorder.go).
 	NoRecording bool `json:"no_recording,omitempty"`
+	// Transcribe turns this agency's recordings into text (transcriber.go);
+	// TranscribeWords are names and terms given to the model as a hint.
+	Transcribe      bool   `json:"transcribe,omitempty"`
+	TranscribeWords string `json:"transcribe_words,omitempty"`
+	// RecordingRetentionDays: how long this agency keeps its recordings;
+	// 0 = the server's recording_retention_days (recorder.go).
+	RecordingRetentionDays int `json:"recording_retention_days,omitempty"`
 
 	// ChannelCount is how many talkgroups the agency uses (0 = the default,
 	// DefaultAgencyChannels) and ChannelNames what they are called, by wire
@@ -277,8 +284,9 @@ type Server struct {
 	authAccounts           map[string]string       // addr string -> userKey of the LOGIN account (the joined callsign can differ)
 	dispatchOps            *dispatchOps            // unit status, dispatch messages (dispatch_ops.go)
 	opsOnce                sync.Once
-	recorder               *Recorder   // radio traffic recording (recorder.go)
-	takMgr                 *takManager // TAK Server connectors per agency (tak.go)
+	recorder               *Recorder    // radio traffic recording (recorder.go)
+	transcriber            *Transcriber // speech-to-text of recordings (transcriber.go)
+	takMgr                 *takManager  // TAK Server connectors per agency (tak.go)
 	takOnce                sync.Once
 	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
@@ -890,6 +898,10 @@ func (s *Server) StartPTT() error {
 	log.Printf("MeshRelay server listening on UDP port %d", s.config.PTTPort)
 	s.recorder = NewRecorder(s, s.config.RecordingDir, s.config.RecordingRetentionDays)
 	log.Printf("Recording radio traffic to %s/ (kept %d days)", s.recorder.dir, s.recorder.retention)
+	s.transcriber = NewTranscriber(s, s.config.TranscribeDir)
+	if ok, m := s.transcriber.ready(); ok {
+		log.Printf("Transcription available (model %s)", m.Name)
+	}
 	s.loadTakConnections()
 
 	// Start heartbeat checker
@@ -961,6 +973,10 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handleLocationReport(payload.(*LocationReport), addr)
 	case PacketTypeUnitStatus:
 		s.handleUnitStatus(payload.(*UnitStatusPacket), addr)
+	case PacketTypeTranscriptRequest:
+		s.handleTranscriptRequest(payload.(*TranscriptRequest), addr)
+	case PacketTypeRecordingAudioReq:
+		s.handleRecordingAudioRequest(payload.(*RecordingAudioRequest), addr)
 	case PacketTypeDispatchMessage:
 		s.handleDispatchMessage(payload.(*DispatchMessagePacket), addr)
 	case PacketTypeDirectAudio:
@@ -2086,10 +2102,11 @@ func (s *Server) GetClients(agencyFilter string) []map[string]interface{} {
 			}
 		}
 		clients = append(clients, map[string]interface{}{
-			"username":       client.Username,
-			"account":        account,
-			"agency_id":      client.AgencyID,
-			"address":        client.Addr.String(),
+			"username":  client.Username,
+			"account":   account,
+			"agency_id": client.AgencyID,
+			// No IP address: the list reaches every admin's and dispatcher's
+			// browser, and a phone's public IP is nobody else's business.
 			"channel":        client.Channel,
 			"connected_at":   client.ConnectedAt,
 			"last_heartbeat": client.LastHeartbeat,

@@ -343,6 +343,12 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 	case PacketTypeUnitStatus:
 		pkt, err := ParseUnitStatus(payload)
 		return packetType, pkt, err
+	case PacketTypeTranscriptRequest:
+		pkt, err := ParseTranscriptRequest(payload)
+		return packetType, pkt, err
+	case PacketTypeRecordingAudioReq:
+		pkt, err := ParseRecordingAudioRequest(payload)
+		return packetType, pkt, err
 	case PacketTypeDispatchMessage:
 		pkt, err := ParseDispatchMessage(payload)
 		return packetType, pkt, err

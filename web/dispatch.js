@@ -176,6 +176,7 @@ function connectDispatchWS() {
         else if (msg.type === 'messages') { messages.length = 0; (msg.list || []).forEach(m => onMessage(m, false)); markVisibleMessagesRead(); renderMessages(); }
         else if (msg.type === 'message_read') onMessageRead(msg.id);
         else if (msg.type === 'recording') onRecording(msg);
+        else if (msg.type === 'transcript') onTranscript(msg);
     };
 }
 
@@ -660,7 +661,7 @@ function renderLog() {
         return `<tr class="${live ? 'live' : ''}${e.emergency ? ' emerg' : ''}">
             <td>${fmtTime(e.start)}</td><td class="log-ch" title="${ch}">${ch}</td>
             <td><span class="log-unit" onclick="focusUnit('${escAttr(e.agency + '|' + e.user)}')">${escHtml(e.user)}</span></td>
-            <td>${what}</td><td>${replay}</td></tr>`;
+            <td>${what}</td><td>${replay}</td></tr>${transcriptRow(e.text, e.transcribing)}`;
     }).join('');
 }
 
@@ -685,10 +686,10 @@ function replay(idx) {
 function clearLog() { radioLog.length = 0; renderLog(); }
 
 function exportLog() {
-    const lines = [['time', 'agency', 'channel', 'unit', 'seconds', 'note']];
+    const lines = [['time', 'agency', 'channel', 'unit', 'seconds', 'note', 'transcript']];
     for (const e of [...radioLog].reverse()) {
         lines.push([new Date(e.start).toISOString(), agencyName(e.agency), channelLabel(e.agency, e.channel), e.user,
-            e.emergency ? '' : Math.round((e.end - e.start) / 1000), e.emergency ? (e.active ? 'EMERGENCY' : 'emergency cleared') : '']);
+            e.emergency ? '' : Math.round((e.end - e.start) / 1000), e.emergency ? (e.active ? 'EMERGENCY' : 'emergency cleared') : '', e.text || '']);
     }
     const csv = lines.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = document.createElement('a');
@@ -1411,10 +1412,29 @@ function onRecording(r) {
             && (e.channel === r.channel || e.channel === 'all')
             && Math.abs(e.start - r.start) < 3000) {
             e.recId = r.id;
+            e.transcribing = !!r.transcribing;
             break;
         }
     }
     renderLog();
+}
+
+// A transcript of a recording (server-side speech recognition).
+function onTranscript(t) {
+    for (const e of radioLog) {
+        if (e.recId === t.id) { e.text = t.text || ''; e.transcribing = false; break; }
+    }
+    renderLog();
+    const h = historyRows.find(r => r.id === t.id);
+    if (h) { h.text = t.text || ''; h.transcribed = true; renderHistory(); }
+}
+
+// The transcript line shown under a transmission.
+function transcriptRow(text, pending, cols = 5) {
+    const lead = '<td></td>'.repeat(cols - 4);
+    if (pending) return `<tr class="trx">${lead}<td colspan="4" class="trx-text pending">transcribing…</td></tr>`;
+    if (!text) return '';
+    return `<tr class="trx">${lead}<td colspan="4" class="trx-text" title="Machine transcript — may contain mistakes">${escHtml(text)}</td></tr>`;
 }
 
 function showLogTab(name) {
@@ -1441,34 +1461,42 @@ async function searchRecordings() {
     const date = document.getElementById('hist-date').value;
     const ch = document.getElementById('hist-channel').value;
     const unit = document.getElementById('hist-unit').value.trim();
+    const words = document.getElementById('hist-text').value.trim();
     const q = new URLSearchParams({ date, limit: 500 });
     if (ch) { const [a, n] = ch.split('|'); q.set('agency', a); q.set('channel', n); }
     if (unit) q.set('user', unit);
-    const body = document.getElementById('hist-body');
+    if (words) q.set('text', words);
     try {
         const r = await fetch('/api/recordings?' + q.toString(), { credentials: 'same-origin' });
         historyRows = await r.json();
     } catch (e) { historyRows = []; }
+    histSelected.clear();
     document.getElementById('hist-empty').style.display = historyRows.length ? 'none' : 'block';
-    document.getElementById('hist-empty').textContent = historyRows.length ? '' : `No recordings on ${date}${ch || unit ? ' matching that filter' : ''}.`;
+    document.getElementById('hist-empty').textContent = historyRows.length ? '' : `No recordings on ${date}${ch || unit || words ? ' matching that filter' : ''}.`;
+    renderHistory();
+}
+
+function renderHistory() {
+    const body = document.getElementById('hist-body');
     body.innerHTML = historyRows.map((r, i) => `<tr>
+        <td class="hist-sel"><input type="checkbox" class="hist-check" ${histSelected.has(r.id) ? 'checked' : ''} onchange="toggleHistRow('${escAttr(r.id)}', this.checked)" title="Select for download"></td>
         <td>${fmtTime(r.start)}</td>
         <td class="log-ch" title="${escHtml(channelLabel(r.agency, r.channel))}">${escHtml(channelLabel(r.agency, r.channel))}${!currentAgency && directory.agencies.length > 1 ? ' · ' + escHtml(agencyName(r.agency)) : ''}</td>
         <td><span class="log-unit">${escHtml(r.user)}</span></td>
         <td>${fmtDur(r.duration_ms)}</td>
-        <td><button class="replay-btn" onclick="playRecording('${escAttr(r.id)}')">▶ Play</button></td></tr>`).join('');
+        <td><button class="replay-btn" onclick="playRecording('${escAttr(r.id)}')">▶ Play</button></td></tr>${transcriptRow(r.text, false, 6)}`).join('');
+    updateHistSelection();
 }
 
-// Fetch a recording, decode its Opus frames, and play it (gaps preserved).
-async function playRecording(id) {
-    if (!audioSupported()) return;
-    await ensureAudio();
-    let buf;
-    try {
-        const r = await fetch(`/api/recordings/${encodeURIComponent(id)}/audio`, { credentials: 'same-origin' });
-        if (!r.ok) throw new Error(r.status);
-        buf = await r.arrayBuffer();
-    } catch (e) { console.warn('[dispatch] recording fetch failed', e); return; }
+// Fetch a recording's .mrr file ([u32 ms][u16 len][Opus] frames).
+async function fetchRecording(id) {
+    const r = await fetch(`/api/recordings/${encodeURIComponent(id)}/audio`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.arrayBuffer();
+}
+
+// Decode a recording to mono PCM at `rate`, pauses preserved.
+async function decodeRecording(buf, rate) {
     const v = new DataView(buf);
     const frames = [];
     for (let o = 0; o + 6 <= buf.byteLength;) {
@@ -1478,8 +1506,7 @@ async function playRecording(id) {
         frames.push({ at, data: new Uint8Array(buf, o, n) });
         o += n;
     }
-    if (!frames.length) return;
-    const rate = audioCtx.sampleRate;
+    if (!frames.length) return new Float32Array(0);
     const total = Math.ceil((frames[frames.length - 1].at + 40) / 1000 * rate);
     const out = new Float32Array(total);
     await new Promise((resolve) => {
@@ -1501,13 +1528,170 @@ async function playRecording(id) {
         }
         dec.flush().then(() => { dec.close(); resolve(); }).catch(() => resolve());
     });
+    return out;
+}
+
+// Fetch a recording, decode its Opus frames, and play it (gaps preserved).
+async function playRecording(id) {
+    if (!audioSupported()) return;
+    await ensureAudio();
+    let buf;
+    try { buf = await fetchRecording(id); } catch (e) { console.warn('[dispatch] recording fetch failed', e); return; }
+    const rate = audioCtx.sampleRate;
+    const out = await decodeRecording(buf, rate);
+    if (!out.length) return;
     if (replaySource) { try { replaySource.stop(); } catch (_) {} }
-    const ab = audioCtx.createBuffer(1, total, rate);
+    const ab = audioCtx.createBuffer(1, out.length, rate);
     ab.getChannelData(0).set(out);
     replaySource = audioCtx.createBufferSource();
     replaySource.buffer = ab;
     replaySource.connect(playGain || audioCtx.destination);
     replaySource.start();
+}
+
+// ─── Download recordings as a zip ─────────────────────────────────────────────
+//
+// The selected recordings become WAV files (16 kHz mono — plays anywhere)
+// plus transcripts.csv, zipped in the browser.
+
+const histSelected = new Set();
+
+function toggleHistRow(id, on) {
+    if (on) histSelected.add(id); else histSelected.delete(id);
+    updateHistSelection();
+}
+
+function toggleHistAll(on) {
+    histSelected.clear();
+    if (on) historyRows.forEach(r => histSelected.add(r.id));
+    document.querySelectorAll('.hist-check').forEach(c => { c.checked = on; });
+    updateHistSelection();
+}
+
+function updateHistSelection() {
+    const btn = document.getElementById('hist-download');
+    const n = histSelected.size;
+    if (btn) {
+        btn.disabled = n === 0 || histDownloading;
+        btn.textContent = histDownloading ? btn.textContent : (n ? `Download (${n})` : 'Download');
+    }
+    const all = document.getElementById('hist-all');
+    if (all) {
+        all.checked = n > 0 && n === historyRows.length;
+        all.indeterminate = n > 0 && n < historyRows.length;
+    }
+}
+
+function wavFile(pcm, rate) {
+    const b = new ArrayBuffer(44 + pcm.length * 2);
+    const v = new DataView(b);
+    const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVE');
+    str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, pcm.length * 2, true);
+    for (let i = 0; i < pcm.length; i++) {
+        const x = Math.max(-1, Math.min(1, pcm[i]));
+        v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true);
+    }
+    return new Uint8Array(b);
+}
+
+const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+        t[n] = c >>> 0;
+    }
+    return t;
+})();
+function crc32(data) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// A plain (stored, uncompressed) zip — what every OS opens natively.
+function makeZip(files) {
+    const enc = new TextEncoder();
+    const parts = [], central = [];
+    let offset = 0;
+    const now = new Date();
+    const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    for (const f of files) {
+        const name = enc.encode(f.name);
+        const crc = crc32(f.data);
+        const h = new DataView(new ArrayBuffer(30));
+        h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true);
+        h.setUint16(10, dosTime, true); h.setUint16(12, dosDate, true); h.setUint32(14, crc, true);
+        h.setUint32(18, f.data.length, true); h.setUint32(22, f.data.length, true); h.setUint16(26, name.length, true);
+        parts.push(new Uint8Array(h.buffer), name, f.data);
+        const c = new DataView(new ArrayBuffer(46));
+        c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+        c.setUint16(12, dosTime, true); c.setUint16(14, dosDate, true); c.setUint32(16, crc, true);
+        c.setUint32(20, f.data.length, true); c.setUint32(24, f.data.length, true); c.setUint16(28, name.length, true);
+        c.setUint32(42, offset, true);
+        central.push(new Uint8Array(c.buffer), name);
+        offset += 30 + name.length + f.data.length;
+    }
+    const cdSize = central.reduce((n, p) => n + p.length, 0);
+    const e = new DataView(new ArrayBuffer(22));
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+    e.setUint32(12, cdSize, true); e.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, new Uint8Array(e.buffer)], { type: 'application/zip' });
+}
+
+function fileSafe(s) { return String(s).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'x'; }
+
+let histDownloading = false;
+async function downloadSelectedRecordings() {
+    const rows = historyRows.filter(r => histSelected.has(r.id)).sort((a, b) => a.start - b.start);
+    if (!rows.length || histDownloading) return;
+    if (typeof AudioDecoder === 'undefined') { alert('This browser cannot decode the recordings. Use a current Chrome, Edge, Firefox or Safari.'); return; }
+    const totalSec = rows.reduce((n, r) => n + r.duration_ms, 0) / 1000;
+    if (totalSec > 4 * 3600) { alert('That is more than 4 hours of audio. Select fewer recordings and download them in parts.'); return; }
+    histDownloading = true;
+    const btn = document.getElementById('hist-download');
+    const RATE = 16000;
+    const files = [];
+    const csv = [['time', 'agency', 'channel', 'unit', 'seconds', 'file', 'transcript']];
+    const used = new Set();
+    let failed = 0;
+    try {
+        for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            btn.textContent = `Preparing ${i + 1}/${rows.length}…`;
+            const d = new Date(r.start);
+            const pad = (n) => String(n).padStart(2, '0');
+            const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+            let name = `${stamp}_${fileSafe(channelLabel(r.agency, r.channel))}_${fileSafe(r.user)}`;
+            while (used.has(name)) name += '_';
+            used.add(name);
+            try {
+                const pcm = await decodeRecording(await fetchRecording(r.id), RATE);
+                files.push({ name: name + '.wav', data: wavFile(pcm, RATE) });
+            } catch (e) {
+                failed++;
+                name = '';
+            }
+            csv.push([d.toISOString(), agencyName(r.agency), channelLabel(r.agency, r.channel), r.user,
+                (r.duration_ms / 1000).toFixed(1), name ? name + '.wav' : '(could not be downloaded)', r.text || '']);
+        }
+        const csvText = '\ufeff' + csv.map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+        files.push({ name: 'transcripts.csv', data: new TextEncoder().encode(csvText) });
+        const date = document.getElementById('hist-date').value || new Date().toISOString().slice(0, 10);
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(makeZip(files));
+        a.download = `recordings-${date}.zip`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        if (failed) alert(`${failed} recording(s) could not be downloaded; they are listed in transcripts.csv.`);
+    } finally {
+        histDownloading = false;
+        updateHistSelection();
+    }
 }
 
 // ─── Visualizer ────────────────────────────────────────────────────────────
