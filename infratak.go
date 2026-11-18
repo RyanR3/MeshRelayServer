@@ -15,7 +15,8 @@ package main
 //	MESHRELAY_WEB_BIND          dashboard listen address, e.g. 127.0.0.1
 //	MESHRELAY_TRUST_PROXY       1 = honour X-Forwarded-For/-Proto from a trusted proxy
 //	MESHRELAY_TRUSTED_PROXIES   addresses/CIDRs the proxy connects from
-//	                            (default loopback; in Docker the network gateway)
+//	                            (default loopback); the word "gateway" means
+//	                            this container's default gateway (Docker)
 //	MESHRELAY_MANAGED           platform name ("infratak"): no self-update
 //	MESHRELAY_WEB_DIR           dashboard files (./web)
 //	MESHRELAY_RECORDING_DIR     radio recordings
@@ -99,6 +100,15 @@ func (c *Config) trustedProxyNets() []*net.IPNet {
 	}
 	var out []*net.IPNet
 	for _, e := range list {
+		if strings.EqualFold(e, "gateway") {
+			gw := defaultGateway("/proc/net/route")
+			if gw == nil {
+				log.Printf("Trusted proxy \"gateway\": no default gateway found")
+				continue
+			}
+			log.Printf("Trusted proxy: container gateway %s", gw)
+			e = gw.String()
+		}
 		if !strings.Contains(e, "/") {
 			if ip := net.ParseIP(e); ip != nil {
 				bits := 32
@@ -195,4 +205,27 @@ func managedUpdateMessage(platform string) string {
 		return "This server is managed by infra-TAK. Update it from the infra-TAK console (MeshRelay page, Update Now)."
 	}
 	return "This server is managed by " + platform + ", which installs its updates."
+}
+
+// defaultGateway reads the IPv4 default route from a Linux /proc/net/route
+// file. In a Docker container with a published port that is the address the
+// host side (and so the host's proxy) connects from.
+func defaultGateway(routeFile string) net.IP {
+	data, err := os.ReadFile(routeFile)
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(data), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[1] != "00000000" {
+			continue
+		}
+		v, err := strconv.ParseUint(f[2], 16, 32)
+		if err != nil || v == 0 {
+			continue
+		}
+		// Little-endian hex in /proc/net/route.
+		return net.IPv4(byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	}
+	return nil
 }

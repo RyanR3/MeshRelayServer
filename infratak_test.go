@@ -246,3 +246,16 @@ func TestInitialAdminPasswordFromInstaller(t *testing.T) {
 		t.Fatalf("admin = %+v", a)
 	}
 }
+
+func TestDefaultGatewayFromProcRoute(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "route")
+	os.WriteFile(f, []byte("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"+
+		"eth0\t0012A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"+
+		"eth0\t00000000\t0112A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"), 0o644)
+	if gw := defaultGateway(f); gw == nil || gw.String() != "192.168.18.1" {
+		t.Fatalf("gateway = %v", gw)
+	}
+	if defaultGateway(filepath.Join(t.TempDir(), "missing")) != nil {
+		t.Fatal("gateway from a missing file")
+	}
+}

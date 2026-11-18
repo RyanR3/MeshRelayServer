@@ -1,0 +1,12 @@
+*
+!go.mod
+!go.sum
+!*.go
+!web/
+!transcribe/CMakeLists.txt
+!transcribe/mrtranscribe.c
+!THIRD_PARTY_LICENSES.txt
+*_test.go
+web/**/*.bak
+**/.DS_Store
+**/._*
