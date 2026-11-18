@@ -49,6 +49,9 @@ type Config struct {
 	// AdminPassword (environment only, never saved): the initial super
 	// admin password when no dashboard account exists yet.
 	AdminPassword string `json:"-"`
+	// ManageToken (environment only, never saved): lets the managing
+	// platform provision things such as the TAK Server link over loopback.
+	ManageToken string `json:"-"`
 	// MCX Step 2: the MCPTT domain for this deployment. Per-agency MCX identities
 	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. raptor7@sullivan.meshrelayptt.com).
 	// Empty disables MCX id derivation (ids fall back to the plain domain).

@@ -23,6 +23,7 @@ package main
 //	MESHRELAY_TRANSCRIBE_DIR    speech-to-text models and settings
 //	MESHRELAY_TRANSCRIBE_HELPER_DIR bundled speech-to-text helper builds
 //	MESHRELAY_ADMIN_PASSWORD    initial super admin password (first start only)
+//	MESHRELAY_MANAGE_TOKEN      bearer token for the platform's provisioning calls (/api/managed/*)
 
 import (
 	"fmt"
@@ -78,6 +79,10 @@ func applyEnvOverrides(c *Config) {
 		c.AdminPassword = v
 		// Not left in the environment for anything this process starts.
 		os.Unsetenv("MESHRELAY_ADMIN_PASSWORD")
+	}
+	if v := os.Getenv("MESHRELAY_MANAGE_TOKEN"); v != "" {
+		c.ManageToken = v
+		os.Unsetenv("MESHRELAY_MANAGE_TOKEN")
 	}
 }
 

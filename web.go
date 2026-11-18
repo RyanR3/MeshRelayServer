@@ -120,6 +120,8 @@ func (s *Server) webRouter() *mux.Router {
 	r.HandleFunc("/api/oidc/config", s.handleOIDCConfig).Methods("GET")
 	r.HandleFunc("/api/oidc/login", s.handleOIDCLogin).Methods("GET")
 	r.HandleFunc("/api/oidc/callback", s.handleOIDCCallback).Methods("GET")
+	// Platform provisioning: managed mode only, own bearer token (managed_tak.go).
+	r.HandleFunc("/api/managed/tak", s.handleManagedTak).Methods("GET", "POST")
 	r.HandleFunc("/api/login", s.handleLogin).Methods("POST")
 	r.HandleFunc("/api/session", s.handleSession).Methods("GET")
 
@@ -287,6 +289,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Allow unauthenticated access to login-related paths
 		if path == "/api/login" || path == "/api/session" || path == "/health" ||
 			path == "/api/oidc/config" || path == "/api/oidc/login" || path == "/api/oidc/callback" ||
+			path == "/api/managed/tak" ||
 			path == "/login.html" || path == "/dispatch.html" || path == "/dispatch" || path == "/command" ||
 			path == "/dispatch.js" || path == "/dispatch.css" ||
 			path == "/style.css" ||

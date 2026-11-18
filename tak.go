@@ -63,6 +63,9 @@ type TakConfig struct {
 	KeyPEM     string   `json:"key_pem,omitempty"`
 	CAPEMs     []string `json:"ca_pems,omitempty"`
 	EnrolledAt string   `json:"enrolled_at,omitempty"`
+	// Managed: set up by the managing platform (infra-TAK), which renews it.
+	// Saving the connection from the dashboard hands it back to the operator.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // TakUnit is a TAK user seen on the stream.
@@ -154,9 +157,20 @@ var nameEntryRe = regexp.MustCompile(`nameEntry[^>]*name="([A-Z]+)"[^>]*value="(
 // The enrollment port's own certificate is not verified (as in ATAK: the
 // server's CA comes back with the signed certificate and is pinned after).
 func takEnroll(cfg *TakConfig, password string) error {
+	return takEnrollVerified(cfg, password, nil)
+}
+
+// takEnrollVerified enrolls like takEnroll; with trustPEMs set (the TAK CA
+// bundle a co-located platform reads from the TAK box) the enrollment port's
+// certificate chain must verify against those CAs or the public roots.
+func takEnrollVerified(cfg *TakConfig, password string, trustPEMs []string) error {
+	tlsCfg := &tls.Config{InsecureSkipVerify: true}
+	if len(trustPEMs) > 0 {
+		tlsCfg = enrollTLSConfig(trustPEMs)
+	}
 	client := &http.Client{
 		Timeout:   20 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}
 	base := fmt.Sprintf("https://%s:%d", cfg.Host, cfg.EnrollPort)
 	do := func(method, url string, body io.Reader, ctype string) ([]byte, error) {
@@ -820,6 +834,7 @@ func (s *Server) takStatusJSON(agency string) map[string]interface{} {
 	out["username"], out["callsign"], out["enabled"] = cfg.Username, cfg.Callsign, cfg.Enabled
 	out["enrolled"] = cfg.CertPEM != ""
 	out["enrolled_at"] = cfg.EnrolledAt
+	out["managed"] = cfg.Managed
 	if block, _ := pem.Decode([]byte(cfg.CertPEM)); block != nil {
 		if c, err := x509.ParseCertificate(block.Bytes); err == nil {
 			out["cert_expires"] = c.NotAfter.Format(time.RFC3339)
@@ -896,6 +911,7 @@ func (s *Server) handleUpdateTak(w http.ResponseWriter, r *http.Request) {
 	}
 	reEnroll := req.Password != "" || !existed || host != cfg.Host || req.Username != cfg.Username || req.EnrollPort != cfg.EnrollPort
 	cfg.AgencyID, cfg.Host, cfg.Enabled = agencyID, host, req.Enabled
+	cfg.Managed = false
 	cfg.StreamPort, cfg.EnrollPort = req.StreamPort, req.EnrollPort
 	if cfg.StreamPort <= 0 {
 		cfg.StreamPort = 8089
