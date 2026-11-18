@@ -27,6 +27,8 @@ package main
 //	MESHRELAY_TRANSCRIBE_HELPER_DIR bundled speech-to-text helper builds
 //	MESHRELAY_ADMIN_PASSWORD    initial super admin password (first start only)
 //	MESHRELAY_MANAGE_TOKEN      bearer token for the platform's provisioning calls (/api/managed/*)
+//	MESHRELAY_TLS_SELF_SIGNED   "1": self-signed HTTPS dashboard when no certificate is configured
+//	MESHRELAY_TLS_HOSTS         names/addresses for that certificate (comma-separated)
 
 import (
 	"fmt"
@@ -82,6 +84,12 @@ func applyEnvOverrides(c *Config) {
 		c.AdminPassword = v
 		// Not left in the environment for anything this process starts.
 		os.Unsetenv("MESHRELAY_ADMIN_PASSWORD")
+	}
+	if v := os.Getenv("MESHRELAY_TLS_SELF_SIGNED"); v == "1" || strings.EqualFold(v, "true") {
+		c.TLSSelfSigned = true
+	}
+	if v := os.Getenv("MESHRELAY_TLS_HOSTS"); v != "" {
+		c.TLSHosts = strings.Split(v, ",")
 	}
 	if v := os.Getenv("MESHRELAY_MANAGE_TOKEN"); v != "" {
 		c.ManageToken = v

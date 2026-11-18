@@ -43,8 +43,13 @@ services:
       MESHRELAY_OIDC_LABEL: ${MESHRELAY_OIDC_LABEL:-}
       # infra-TAK's loopback provisioning calls (TAK link, managed_tak.go).
       MESHRELAY_MANAGE_TOKEN: ${MESHRELAY_MANAGE_TOKEN:-}
+      # IP mode (no domain, nothing in front): HTTPS with a self-signed
+      # certificate for these addresses (selfsigned.go).
+      MESHRELAY_TLS_SELF_SIGNED: ${MESHRELAY_TLS_SELF_SIGNED:-}
+      MESHRELAY_TLS_HOSTS: ${MESHRELAY_TLS_HOSTS:-}
     ports:
-      - "127.0.0.1:${MESHRELAY_WEB_PORT:-8770}:8770/tcp"
+      # 127.0.0.1 behind Caddy; 0.0.0.0 only in IP mode (self-signed HTTPS).
+      - "${MESHRELAY_WEB_HOST:-127.0.0.1}:${MESHRELAY_WEB_PORT:-8770}:8770/tcp"
       - "${MESHRELAY_PTT_PORT:-5000}:5000/udp"
     volumes:
       - meshrelay-data:/data

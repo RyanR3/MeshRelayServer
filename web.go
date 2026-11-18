@@ -44,6 +44,9 @@ type WebSocketMessage struct {
 func (s *Server) StartWeb() error {
 	handler := s.webHandler()
 	addr := fmt.Sprintf("%s:%d", s.config.WebBind, s.config.WebPort)
+	if err := ensureSelfSignedTLS(s.config); err != nil {
+		return fmt.Errorf("self-signed TLS: %w", err)
+	}
 
 	// pprof: only start if explicitly enabled, and bind to loopback only
 	if s.config.DebugPprof {

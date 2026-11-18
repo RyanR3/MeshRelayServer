@@ -49,6 +49,13 @@ func (s *Server) managedCaller(w http.ResponseWriter, r *http.Request) bool {
 		http.NotFound(w, r)
 		return false
 	}
+	// Only from this box: loopback, or the Docker gateway a host-side call to
+	// the published port arrives from. In IP mode the dashboard port is open
+	// to the LAN with nothing in front, so the token alone is not enough.
+	if ip := remoteIP(r.RemoteAddr); ip == nil || !(ip.IsLoopback() || s.fromTrustedProxy(r)) {
+		http.NotFound(w, r)
+		return false
+	}
 	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if subtle.ConstantTimeCompare([]byte(got), []byte(s.config.ManageToken)) != 1 {
 		w.Header().Set("Content-Type", "application/json")

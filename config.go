@@ -55,6 +55,10 @@ type Config struct {
 	// ManageToken (environment only, never saved): lets the managing
 	// platform provision things such as the TAK Server link over loopback.
 	ManageToken string `json:"-"`
+	// TLSSelfSigned / TLSHosts (environment only): serve the dashboard over
+	// HTTPS with a self-signed certificate for these names (selfsigned.go).
+	TLSSelfSigned bool     `json:"-"`
+	TLSHosts      []string `json:"-"`
 	// MCX Step 2: the MCPTT domain for this deployment. Per-agency MCX identities
 	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. raptor7@sullivan.meshrelayptt.com).
 	// Empty disables MCX id derivation (ids fall back to the plain domain).
