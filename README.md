@@ -11,7 +11,8 @@ sudo ./install.sh
 ```
 
 Dashboard: `http://your-server-ip:8080`
-Default login: `admin` / `admin`
+Login: `admin`, with the one-time password printed in the server log on first start
+(`journalctl -u ptt-server | grep -A1 'INITIAL ADMIN PASSWORD'`). You set a new one at first sign-in.
 
 ### Update
 
@@ -22,6 +23,21 @@ sudo ./install.sh
 ```
 
 Your config, users, and agencies are preserved on update.
+
+## Ways to run it
+
+The same source runs three ways:
+
+- **Standalone (above):** a systemd service, updated from the dashboard.
+- **Docker:** `docker compose up -d --build` with the included `Dockerfile` and
+  `docker-compose.yml`. Non-root, read-only, data in the `meshrelay-data` volume.
+  The dashboard listens on 127.0.0.1:8770 for a reverse proxy in front.
+- **[infra-TAK](https://github.com/takwerx/infra-TAK):** installed and updated by infra-TAK's
+  MeshRelay module. It runs the Docker image in managed mode (`MESHRELAY_MANAGED=infratak`):
+  the dashboard's self-update is off, Caddy fronts the dashboard, sign-in can use Authentik
+  (OpenID Connect), and the module links MeshRelay to the TAK Server on the same box.
+
+Every setting can come from `MESHRELAY_*` environment variables (see `infratak.go`).
 
 ## Features
 
@@ -287,7 +303,17 @@ GOOS=windows GOARCH=amd64 go build -o ptt-server.exe
 
 ## License
 
-This project is provided as-is for use with the PTT Android application.
+Copyright (C) 2026 R3 Systems.
+
+MeshRelay Server is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+See [LICENSE](LICENSE). If you run a modified version for others over a network, the
+AGPL requires you to offer them its source.
+
+Third-party components and their licences are listed in
+[THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt). The MeshRelay phone apps are
+separate programs and are not covered by this licence.
 
 ## Support
 

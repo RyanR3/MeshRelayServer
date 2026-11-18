@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 R3 Systems
+
 package main
 
 // Dispatch operations: unit status, dispatch messages and all-call.

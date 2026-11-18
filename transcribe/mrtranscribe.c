@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 R3 Systems
+
 // mrtranscribe — speech-to-text for MeshRelay radio recordings.
 //
 // The server (transcriber.go) starts one long-running process:

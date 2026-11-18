@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 R3 Systems
+
 package main
 
 // LMR (land-mobile-radio) bridges — VHF/UHF/P25 interop.

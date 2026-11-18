@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 R3 Systems
+
 package main
 
 // Limits on wrong passwords, for the dashboard login and the phones' sign-in.

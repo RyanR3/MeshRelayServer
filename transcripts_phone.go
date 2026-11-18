@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 R3 Systems
+
 package main
 
 // Channel history on the phones (channel ⋮ menu → History): the server's

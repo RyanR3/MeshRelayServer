@@ -1,6 +1,6 @@
 # MeshRelay Server container image (used by the infra-TAK MeshRelay module).
 #
-#   docker build --build-arg VERSION=v4.6.0 -t meshrelay-server .
+#   docker build --build-arg VERSION=v4.7.0 -t meshrelay-server .
 #
 # Multi-arch (linux/amd64 + linux/arm64) is built by CI with buildx; a plain
 # `docker build` produces the image for the machine it runs on.
@@ -11,7 +11,7 @@
 #              commits), two builds per architecture: optimised and basic
 #   runtime  — Alpine, non-root user, data in /data
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.26-alpine AS build
 ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./

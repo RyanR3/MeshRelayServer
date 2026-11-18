@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 R3 Systems
+
 package main
 
 // Dashboard / console access control: session lifetime and revocation, the
