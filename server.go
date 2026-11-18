@@ -270,8 +270,9 @@ type GuestEvent struct {
 type Server struct {
 	proxyNetsOnce sync.Once
 	proxyNets     []*net.IPNet
-	loginLimit    *failLimiter // dashboard logins (ratelimit.go)
-	pttAuthLimit  *failLimiter // phone sign-ins
+	loginLimit    *failLimiter  // dashboard logins (ratelimit.go)
+	oidc          *oidcProvider // dashboard single sign-on (oidc.go); nil = off
+	pttAuthLimit  *failLimiter  // phone sign-ins
 	// rosterSent: last roster sent per agency to low-power clients.
 	rosterMu   sync.Mutex
 	rosterSent map[string]rosterState
@@ -3063,6 +3064,10 @@ type WebAdmin struct {
 	Role               string `json:"role"`                // "super_admin" or "agency_admin"
 	AgencyID           string `json:"agency_id,omitempty"` // empty for super_admin
 	MustChangePassword bool   `json:"must_change_password"`
+	// SSO accounts (oidc.go) sign in through the identity provider only;
+	// Subject is the provider's stable id for the person.
+	SSO     bool   `json:"sso,omitempty"`
+	Subject string `json:"sso_subject,omitempty"`
 }
 
 func (s *Server) loadWebAdmins() {

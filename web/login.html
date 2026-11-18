@@ -100,6 +100,12 @@
         <input type="text" id="username" class="login-input" placeholder="Username" autocomplete="username">
         <input type="password" id="password" class="login-input" placeholder="Password" autocomplete="current-password">
         <button id="loginBtn" class="login-btn" onclick="login()">Sign In</button>
+        <div id="ssoBox" style="display:none">
+            <div style="display:flex;align-items:center;gap:10px;margin:16px 0 8px;color:#8B949E;font-size:12px">
+                <span style="flex:1;height:1px;background:#30363D"></span>or<span style="flex:1;height:1px;background:#30363D"></span>
+            </div>
+            <button id="ssoBtn" class="login-btn" style="background:#21262D;border:1px solid #30363D" onclick="ssoLogin()">Sign in with SSO</button>
+        </div>
     </div>
     <script>
         function login() {
@@ -163,6 +169,27 @@
         document.getElementById('username').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') document.getElementById('password').focus();
         });
+
+        // Single sign-on (infra-TAK's Authentik or another OIDC provider), when
+        // the server has it configured.
+        function ssoLogin() {
+            const next = new URLSearchParams(window.location.search).get('next') || '/';
+            window.location.href = '/api/oidc/login?next=' + encodeURIComponent(next);
+        }
+        fetch('/api/oidc/config', { credentials: 'same-origin' })
+        .then(r => r.ok ? r.json() : null)
+        .then(cfg => {
+            if (!cfg || !cfg.enabled) return;
+            document.getElementById('ssoBtn').textContent = cfg.label || 'Sign in with SSO';
+            document.getElementById('ssoBox').style.display = 'block';
+        })
+        .catch(() => {});
+        const ssoError = new URLSearchParams(window.location.search).get('sso_error');
+        if (ssoError) {
+            const errorEl = document.getElementById('error');
+            errorEl.textContent = ssoError;  // textContent: never HTML
+            errorEl.style.display = 'block';
+        }
 
         // If already logged in, redirect to appropriate page based on role
         fetch('/api/session', { credentials: 'same-origin' })

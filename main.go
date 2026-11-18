@@ -45,6 +45,10 @@ func main() {
 
 	// Create server instance
 	server := NewServer(config, *configFile)
+	if oc := oidcConfigFromEnv(); oc != nil {
+		server.oidc = newOIDCProvider(oc)
+		log.Printf("SSO: dashboard sign-in through %s (groups %s-*)", oc.Issuer, oc.GroupPrefix)
+	}
 
 	// Start PTT UDP server
 	go func() {
