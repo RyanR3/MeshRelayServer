@@ -1,0 +1,248 @@
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestEnvOverrides(t *testing.T) {
+	t.Setenv("MESHRELAY_WEB_PORT", "8770")
+	t.Setenv("MESHRELAY_PTT_PORT", "nope")
+	t.Setenv("MESHRELAY_WEB_BIND", " 127.0.0.1 ")
+	t.Setenv("MESHRELAY_TRUST_PROXY", "true")
+	t.Setenv("MESHRELAY_TRUSTED_PROXIES", "172.31.250.1, 10.0.0.0/8")
+	t.Setenv("MESHRELAY_MANAGED", "infratak")
+	t.Setenv("MESHRELAY_ADMIN_PASSWORD", "s3cret-initial")
+	c := DefaultConfig()
+	applyEnvOverrides(c)
+	if c.WebPort != 8770 || c.PTTPort != 5000 || c.WebBind != "127.0.0.1" || !c.TrustProxy ||
+		!c.isManaged() || c.AdminPassword != "s3cret-initial" || len(c.TrustedProxies) != 2 {
+		t.Fatalf("config after env = %+v", c)
+	}
+	if _, still := os.LookupEnv("MESHRELAY_ADMIN_PASSWORD"); still {
+		t.Fatal("admin password left in the environment")
+	}
+}
+
+func proxyReq(remote, xff, proto string) *http.Request {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = remote
+	if xff != "" {
+		r.Header.Set("X-Forwarded-For", xff)
+	}
+	if proto != "" {
+		r.Header.Set("X-Forwarded-Proto", proto)
+	}
+	return r
+}
+
+func TestForwardedHeadersOnlyFromTrustedProxy(t *testing.T) {
+	s := &Server{config: &Config{TrustProxy: true, TrustedProxies: []string{"172.31.250.1"}}}
+
+	// Through the proxy: the last X-Forwarded-For entry (what Caddy saw).
+	r := proxyReq("172.31.250.1:40000", "6.6.6.6, 203.0.113.9", "https")
+	if ip := s.clientIP(r); ip != "203.0.113.9" {
+		t.Fatalf("clientIP via proxy = %s", ip)
+	}
+	if !s.requestIsHTTPS(r) {
+		t.Fatal("X-Forwarded-Proto https from the proxy not honoured")
+	}
+
+	// Straight to the port from anywhere else: headers ignored.
+	r = proxyReq("198.51.100.7:5555", "1.2.3.4", "https")
+	if ip := s.clientIP(r); ip != "198.51.100.7" || s.requestIsHTTPS(r) {
+		t.Fatalf("spoofed headers honoured: ip=%s https=%v", ip, s.requestIsHTTPS(r))
+	}
+
+	// Proxy mode off: never honoured, even from loopback.
+	s2 := &Server{config: &Config{}}
+	r = proxyReq("127.0.0.1:1", "1.2.3.4", "https")
+	if s2.clientIP(r) != "127.0.0.1" || s2.requestIsHTTPS(r) {
+		t.Fatal("headers honoured with trust_proxy off")
+	}
+
+	// Default trusted list is loopback.
+	s3 := &Server{config: &Config{TrustProxy: true}}
+	if s3.clientIP(proxyReq("127.0.0.1:1", "9.9.9.9", "")) != "9.9.9.9" ||
+		s3.clientIP(proxyReq("10.1.1.1:1", "9.9.9.9", "")) != "10.1.1.1" {
+		t.Fatal("default trusted proxy list is not loopback-only")
+	}
+}
+
+func TestHealthIsPublicAndSaysNothing(t *testing.T) {
+	s := newWebTestServer(t)
+	rec := doReq(s.webHandler(), "GET", "/health", "", "")
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"ok"}` {
+		t.Fatalf("/health = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedServerRefusesSelfUpdate(t *testing.T) {
+	s := newWebTestServer(t)
+	s.config.Managed = "infratak"
+	h := s.webHandler()
+	rec := doReq(h, "POST", "/api/update/apply", "super",
+		`{"binary_url":"https://github.com/RyanR3/MeshRelayServer/releases/download/v1/ptt-server-linux"}`)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "infra-TAK") {
+		t.Fatalf("apply on a managed server = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(h, "POST", "/api/update/check", "super", "")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"managed":"infratak"`) ||
+		!strings.Contains(rec.Body.String(), `"update_available":false`) {
+		t.Fatalf("check on a managed server = %d %s", rec.Code, rec.Body.String())
+	}
+	if s.updateStatus.InProgress {
+		t.Fatal("update started")
+	}
+}
+
+func TestDashboardLoginLockout(t *testing.T) {
+	s := newWebTestServer(t)
+	s.loginLimit = newFailLimiter(30, 3, time.Minute, time.Minute)
+	hash, _ := hashPasswordSecure("right-password")
+	s.webAdmins[userKey("fire", "chief2")] = &WebAdmin{Username: "chief2", AgencyID: "fire", Role: "agency_admin", PasswordHash: hash}
+	h := s.webHandler()
+	try := func(user, pw string) *httptest.ResponseRecorder {
+		return doReq(h, "POST", "/api/login", "", `{"username":"`+user+`","password":"`+pw+`","agency_id":"fire"}`)
+	}
+
+	// Unknown user and wrong password look the same.
+	a, b := try("nobody", "x"), try("chief2", "x")
+	if a.Code != 401 || b.Code != 401 || a.Body.String() != b.Body.String() {
+		t.Fatalf("unknown %d %q vs wrong %d %q", a.Code, a.Body, b.Code, b.Body)
+	}
+	try("chief2", "y")
+	try("chief2", "z") // 3rd wrong password for the account: locked
+	if rec := try("chief2", "right-password"); rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("locked account accepted: %d %s", rec.Code, rec.Body)
+	}
+
+	// Lock expires; a success then clears the count.
+	now := time.Now().Add(2 * time.Minute)
+	s.loginLimit.now = func() time.Time { return now }
+	if rec := try("chief2", "right-password"); rec.Code != 200 {
+		t.Fatalf("login after the lock expired = %d %s", rec.Code, rec.Body)
+	}
+	if rec := try("chief2", "x"); rec.Code != 401 {
+		t.Fatalf("one wrong password after a success = %d", rec.Code)
+	}
+}
+
+func TestPhoneAuthLockoutAndUniformErrors(t *testing.T) {
+	s, sink := newSecTestServer(t)
+	s.pttAuthLimit = newFailLimiter(30, 3, time.Minute, time.Minute)
+	addUser(s, "a1", "medic", "pw")
+	addr := udp(41000)
+
+	reply := func() string {
+		for _, p := range sink.take(addr) {
+			if p[0] == PacketTypeAuthResponse {
+				return string(p)
+			}
+		}
+		return ""
+	}
+	if login(t, s, sink, addr, "ghost", "a1", "pw") {
+		t.Fatal("unknown user signed in")
+	}
+	if !login(t, s, sink, addr, "medic", "a1", "pw") {
+		t.Fatal("right password refused")
+	}
+
+	// Same reply text for an unknown user and a wrong password.
+	s.handleAuthChallengeRequest(&AuthChallengeRequestPacket{Username: "ghost", AgencyID: "a1"}, addr)
+	sink.take(addr)
+	s.handleAuthRequest(&AuthRequestPacket{Username: "ghost", PasswordHash: "00", AgencyID: "a1"}, addr)
+	unknown := reply()
+	s.handleAuthChallengeRequest(&AuthChallengeRequestPacket{Username: "medic", AgencyID: "a1"}, addr)
+	sink.take(addr)
+	s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: "00", AgencyID: "a1"}, addr)
+	wrong := reply()
+	if unknown == "" || unknown != wrong {
+		t.Fatalf("unknown user %q vs wrong password %q", unknown, wrong)
+	}
+
+	// Two more wrong passwords for medic (3 in all) lock the account,
+	// from any address, even with the right password.
+	login(t, s, sink, addr, "medic", "a1", "bad")
+	login(t, s, sink, addr, "medic", "a1", "bad")
+	if login(t, s, sink, udp(41001), "medic", "a1", "pw") {
+		t.Fatal("locked account signed in")
+	}
+	now := time.Now().Add(2 * time.Minute)
+	s.pttAuthLimit.now = func() time.Time { return now }
+	if !login(t, s, sink, udp(41001), "medic", "a1", "pw") {
+		t.Fatal("lock did not expire")
+	}
+}
+
+func TestChallengesExpireAndAreCapped(t *testing.T) {
+	s, _ := newSecTestServer(t)
+	now := time.Now()
+	var n [32]byte
+	n[0] = 7
+	s.storeChallengeLocked("a:1", n, now.Add(-time.Minute))
+	if _, ok := s.takeChallengeLocked("a:1", now); ok {
+		t.Fatal("stale challenge accepted")
+	}
+	if len(s.pendingChallenges) != 0 {
+		t.Fatal("stale challenge not removed")
+	}
+	for i := 0; i < maxChallenge; i++ {
+		s.pendingChallenges[string(rune(i))+"x"] = pendingChallenge{at: now}
+	}
+	if s.storeChallengeLocked("new:1", n, now) {
+		t.Fatal("challenge table grew past its cap with live entries")
+	}
+	// Once they are stale, room is made.
+	if !s.storeChallengeLocked("new:1", n, now.Add(time.Minute)) || len(s.pendingChallenges) != 1 {
+		t.Fatalf("stale challenges not pruned: %d left", len(s.pendingChallenges))
+	}
+}
+
+func TestFailLimiterBoundedMemory(t *testing.T) {
+	l := newFailLimiter(5, 3, time.Minute, time.Minute)
+	l.maxKeys = 100
+	for i := 0; i < 1000; i++ {
+		l.fail("ip:" + string(rune('a'+i%26)) + strings.Repeat("x", i/26))
+	}
+	if l.size() > 100 {
+		t.Fatalf("limiter holds %d keys", l.size())
+	}
+}
+
+func TestBundledTranscribeHelpers(t *testing.T) {
+	want := helperAssets()
+	if want == nil {
+		t.Skip("no helper build for this platform")
+	}
+	bundle, dir := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(bundle, want[0]), []byte("#!/bin/sh\n"), 0o755)
+	tr := &Transcriber{s: &Server{config: &Config{TranscribeHelperDir: bundle}}, dir: dir}
+	got, err := tr.bundledHelpers(bundle)
+	if err != nil || len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("bundled = %v, %v", got, err)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, want[0]+".new")); err != nil || fi.Mode()&0o100 == 0 {
+		t.Fatalf("copied helper missing or not executable: %v", err)
+	}
+	if _, err := tr.bundledHelpers(t.TempDir()); err == nil {
+		t.Fatal("empty bundle accepted")
+	}
+}
+
+func TestInitialAdminPasswordFromInstaller(t *testing.T) {
+	s := newWebTestServer(t)
+	s.webAdmins = map[string]*WebAdmin{}
+	s.config.AdminPassword = "from-infratak"
+	s.createDefaultAdmin()
+	a := s.webAdmins[userKey("", "admin")]
+	if a == nil || a.Role != "super_admin" || !a.MustChangePassword || !checkPassword("from-infratak", a.PasswordHash) {
+		t.Fatalf("admin = %+v", a)
+	}
+}

@@ -524,8 +524,15 @@ func (t *Transcriber) runInstall(modelName string) {
 	// 2. Helper from this release, verified against its SHA256SUMS. A server
 	//    without a matching release (a dev build) keeps a helper that is
 	//    already there.
-	t.setInstall("helper", 75, "Downloading the transcription program…", "")
-	candidates, err := t.fetchHelpers()
+	var candidates []string
+	var err error
+	if dir := t.s.config.TranscribeHelperDir; dir != "" {
+		t.setInstall("helper", 75, "Preparing the transcription program…", "")
+		candidates, err = t.bundledHelpers(dir)
+	} else {
+		t.setInstall("helper", 75, "Downloading the transcription program…", "")
+		candidates, err = t.fetchHelpers()
+	}
 	if err != nil {
 		if _, statErr := os.Stat(t.helperPath()); statErr != nil {
 			t.setInstall("error", 75, "", err.Error())
@@ -647,6 +654,40 @@ func (t *Transcriber) fetchModel(m *transcribeModel, base, span int) error {
 		return fmt.Errorf("%s did not match its published checksum — not installed", m.File)
 	}
 	return os.Rename(tmp, path)
+}
+
+// bundledHelpers copies this machine's helper builds from dir (shipped with
+// the server, e.g. inside the Docker image) as <asset>.new, best first.
+func (t *Transcriber) bundledHelpers(dir string) ([]string, error) {
+	want := helperAssets()
+	if want == nil {
+		return nil, fmt.Errorf("no transcription program is built for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	var got []string
+	for _, name := range want {
+		src, err := os.Open(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		tmp := filepath.Join(t.dir, name+".new")
+		dst, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+		if err == nil {
+			_, err = io.Copy(dst, src)
+			if cerr := dst.Close(); err == nil {
+				err = cerr
+			}
+		}
+		src.Close()
+		if err != nil {
+			os.Remove(tmp)
+			return nil, fmt.Errorf("cannot copy %s: %v", name, err)
+		}
+		got = append(got, name)
+	}
+	if len(got) == 0 {
+		return nil, fmt.Errorf("no transcription program for this server in %s", dir)
+	}
+	return got, nil
 }
 
 // fetchHelpers downloads this machine's helper builds from the release that

@@ -28,6 +28,27 @@ type Config struct {
 	DebugPprof    bool   `json:"debug_pprof,omitempty"`
 	TLSCertFile   string `json:"tls_cert_file,omitempty"`
 	TLSKeyFile    string `json:"tls_key_file,omitempty"`
+	// Running behind a reverse proxy (infra-TAK's Caddy, or any other):
+	// WebBind restricts the dashboard listener to one address ("127.0.0.1");
+	// TrustProxy honours X-Forwarded-For / X-Forwarded-Proto, but only on
+	// requests that arrive from loopback (see infratak.go).
+	WebBind    string `json:"web_bind,omitempty"`
+	TrustProxy bool   `json:"trust_proxy,omitempty"`
+	// TrustedProxies: addresses/CIDRs the proxy connects from (default loopback).
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Managed names the platform that installs and updates this server
+	// ("infratak"). A managed server never replaces its own binary or
+	// downloads helpers; the platform's own update does that.
+	Managed string `json:"managed,omitempty"`
+	// WebDir is where the dashboard files are; default ./web.
+	WebDir string `json:"web_dir,omitempty"`
+	// TranscribeHelperDir holds speech-to-text helper builds shipped with the
+	// server (the Docker image carries them), named like the release assets;
+	// used instead of downloading them.
+	TranscribeHelperDir string `json:"transcribe_helper_dir,omitempty"`
+	// AdminPassword (environment only, never saved): the initial super
+	// admin password when no dashboard account exists yet.
+	AdminPassword string `json:"-"`
 	// MCX Step 2: the MCPTT domain for this deployment. Per-agency MCX identities
 	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. raptor7@sullivan.meshrelayptt.com).
 	// Empty disables MCX id derivation (ids fall back to the plain domain).

@@ -25,6 +25,8 @@ func main() {
 		config = DefaultConfig()
 	}
 
+	applyEnvOverrides(config)
+
 	// Override with command line flags
 	if *pttPort != 5000 {
 		config.PTTPort = *pttPort

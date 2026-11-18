@@ -268,6 +268,10 @@ type GuestEvent struct {
 }
 
 type Server struct {
+	proxyNetsOnce sync.Once
+	proxyNets     []*net.IPNet
+	loginLimit    *failLimiter // dashboard logins (ratelimit.go)
+	pttAuthLimit  *failLimiter // phone sign-ins
 	// rosterSent: last roster sent per agency to low-power clients.
 	rosterMu   sync.Mutex
 	rosterSent map[string]rosterState
@@ -290,7 +294,7 @@ type Server struct {
 	takOnce                sync.Once
 	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
-	pendingChallenges      map[string][32]byte                                          // addr string -> nonce (Phase 4f challenge-response)
+	pendingChallenges      map[string]pendingChallenge                                        // addr string -> nonce (Phase 4f challenge-response)
 	enrollmentTokens       map[string]*EnrollmentToken                                  // token string -> enrollment token
 	guestEvents            map[string]*GuestEvent                                       // eventID -> guest event
 	webAdmins              map[string]*WebAdmin                                         // "agencyID:username" -> admin account (web dashboard)
@@ -709,7 +713,9 @@ func NewServer(config *Config, configFile string) *Server {
 		agencies:           make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]string),
 		authAccounts:       make(map[string]string),
-		pendingChallenges:  make(map[string][32]byte),
+		pendingChallenges:  make(map[string]pendingChallenge),
+		loginLimit:         newFailLimiter(30, 10, 15*time.Minute, 15*time.Minute),
+		pttAuthLimit:       newFailLimiter(30, 10, 5*time.Minute, 5*time.Minute),
 		enrollmentTokens:   make(map[string]*EnrollmentToken),
 		guestEvents:        make(map[string]*GuestEvent),
 		webAdmins:          make(map[string]*WebAdmin),
@@ -2433,8 +2439,15 @@ func (s *Server) handleAuthChallengeRequest(packet *AuthChallengeRequestPacket, 
 		return
 	}
 
-	// Store pending challenge (keyed by address)
-	s.pendingChallenges[addr.String()] = nonce
+	// Store pending challenge (keyed by address). Refused while the address
+	// is locked out for wrong passwords, or during a challenge flood.
+	if locked, _ := s.pttAuthLimit.blocked(pttAuthIPKey(addr)); locked {
+		return
+	}
+	if !s.storeChallengeLocked(addr.String(), nonce, time.Now()) {
+		log.Printf("Auth challenge refused for %s: too many pending challenges", addr)
+		return
+	}
 
 	// Send challenge nonce to client
 	resp := SerializeAuthChallenge(nonce)
@@ -2461,16 +2474,40 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		candidates = s.findUsersByUsername(packet.Username)
 	}
 
-	if len(candidates) == 0 {
-		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
-		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Unknown user"})
+	// Wrong-password limits (ratelimit.go), per address and per account.
+	// Unknown user and wrong password get the same answer, so the reply does
+	// not tell a stranger which usernames exist.
+	ipKey, acctKey := pttAuthIPKey(addr), pttAuthAccountKey(packet.AgencyID, packet.Username)
+	for _, k := range []string{ipKey, acctKey} {
+		if locked, left := s.pttAuthLimit.blocked(k); locked {
+			delete(s.pendingChallenges, addr.String())
+			log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %s from %s",
+				strings.SplitN(k, ":", 2)[0], left.Round(time.Second), packet.Username, addr)
+			resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Too many attempts — try again in a few minutes"})
+			s.sendPacket(resp, addr)
+			return
+		}
+	}
+	authFailed := func() {
+		lockedIP := s.pttAuthLimit.fail(ipKey)
+		lockedAcct := s.pttAuthLimit.fail(acctKey)
+		if lockedIP || lockedAcct {
+			log.Printf("Auth lockout: too many wrong passwords (user %s from %s)", packet.Username, addr)
+		}
+		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid username or password"})
 		s.sendPacket(resp, addr)
+	}
+
+	if len(candidates) == 0 {
+		delete(s.pendingChallenges, addr.String())
+		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
+		authFailed()
 		return
 	}
 
 	// Challenge-response auth is required — legacy static-hash auth has been removed.
 	addrKey := addr.String()
-	nonce, hasPendingChallenge := s.pendingChallenges[addrKey]
+	nonce, hasPendingChallenge := s.takeChallengeLocked(addrKey, time.Now()) // one-time use
 
 	if !hasPendingChallenge {
 		// No challenge issued for this address — challenge-response is required.
@@ -2484,7 +2521,6 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	// Challenge-response: client sends HMAC-SHA256(stored hash, nonce)
-	delete(s.pendingChallenges, addrKey) // consume nonce (one-time use)
 	user, usedEnrollToken, authOk := s.matchCredential(candidates, nonce, packet.PasswordHash)
 	if user == nil {
 		user = candidates[0] // for the log line only
@@ -2492,10 +2528,11 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 
 	if !authOk {
 		log.Printf("Auth failed: wrong password for user %s from %s", packet.Username, addr)
-		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid password"})
-		s.sendPacket(resp, addr)
+		authFailed()
 		return
 	}
+	s.pttAuthLimit.success(acctKey)
+	s.pttAuthLimit.success(ipKey)
 
 	// Enrollment token used — the token becomes the stable PTT password so the
 	// client can reconnect with the stored token indefinitely. This is made
@@ -3053,6 +3090,26 @@ func (s *Server) loadWebAdmins() {
 }
 
 func (s *Server) createDefaultAdmin() {
+	// A platform (infra-TAK) generates the initial password itself, keeps it
+	// in its own protected settings and shows it to its operator, so it is
+	// never written to the log here.
+	if pw := s.config.AdminPassword; pw != "" {
+		bcryptHash, err := hashPasswordSecure(pw)
+		if err != nil {
+			log.Fatalf("FATAL: cannot hash initial password: %v", err)
+		}
+		s.webAdmins[userKey("", "admin")] = &WebAdmin{
+			Username:           "admin",
+			PasswordHash:       bcryptHash,
+			Role:               "super_admin",
+			MustChangePassword: true,
+		}
+		if err := s.saveWebAdmins(); err != nil {
+			log.Printf("Error saving default web admin: %v", err)
+		}
+		log.Printf("Initial super admin 'admin' created with the password provided by the installer (change it at first login)")
+		return
+	}
 	// Generate a cryptographically random initial password
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -3965,4 +4022,15 @@ func (s *Server) refreshPausedGateways() {
 			s.pausedGateways.Store(userKey(b.ownerAgency(), b.Username), true)
 		}
 	}
+}
+
+func pttAuthIPKey(addr *net.UDPAddr) string {
+	if addr == nil {
+		return ""
+	}
+	return "ip:" + addr.IP.String()
+}
+
+func pttAuthAccountKey(agency, user string) string {
+	return "acct:" + strings.ToLower(strings.TrimSpace(agency)) + "/" + strings.ToLower(strings.TrimSpace(user))
 }

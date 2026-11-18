@@ -3263,6 +3263,15 @@ function checkForUpdates() {
                 return;
             }
 
+            if (data.managed) {
+                // infra-TAK (or another platform) installs updates.
+                if (resultEl) {
+                    resultEl.className = 'status-message';
+                    resultEl.textContent = data.message || 'Updates are installed by the platform that manages this server.';
+                }
+                return;
+            }
+
             if (data.update_available) {
                 latestRelease = data;
                 if (resultEl) {

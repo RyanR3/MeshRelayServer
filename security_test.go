@@ -73,7 +73,7 @@ func newSecTestServer(t *testing.T) (*Server, *secSink) {
 		authenticatedAddrs: map[string]string{},
 		authAccounts:       map[string]string{},
 		lastChannel:        map[string]int{},
-		pendingChallenges:  map[string][32]byte{},
+		pendingChallenges:  map[string]pendingChallenge{},
 		enrollmentTokens:   map[string]*EnrollmentToken{},
 		guestEvents:        map[string]*GuestEvent{},
 		webAdmins:          map[string]*WebAdmin{},

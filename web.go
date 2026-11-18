@@ -40,7 +40,7 @@ type WebSocketMessage struct {
 
 func (s *Server) StartWeb() error {
 	handler := s.webHandler()
-	addr := fmt.Sprintf(":%d", s.config.WebPort)
+	addr := fmt.Sprintf("%s:%d", s.config.WebBind, s.config.WebPort)
 
 	// pprof: only start if explicitly enabled, and bind to loopback only
 	if s.config.DebugPprof {
@@ -78,6 +78,10 @@ func (s *Server) StartWeb() error {
 		return srv.ListenAndServeTLS("", "")
 	}
 
+	if s.config.TrustProxy {
+		log.Printf("Web GUI server starting on http://%s (HTTPS terminated by the reverse proxy)", addr)
+		return srv.ListenAndServe()
+	}
 	// No TLS — warn if binding to non-loopback
 	log.Printf("WARNING: Web dashboard running without TLS on %s — admin credentials transmitted in cleartext", addr)
 	log.Printf("WARNING: Set tls_cert_file and tls_key_file in config.json to enable TLS")
@@ -112,6 +116,7 @@ func (s *Server) webRouter() *mux.Router {
 	r := mux.NewRouter()
 
 	// Unauthenticated routes
+	r.HandleFunc("/health", s.handleHealth).Methods("GET", "HEAD")
 	r.HandleFunc("/api/login", s.handleLogin).Methods("POST")
 	r.HandleFunc("/api/session", s.handleSession).Methods("GET")
 
@@ -254,7 +259,7 @@ func (s *Server) webRouter() *mux.Router {
 	// The dispatch console lives at /command; older addresses forward there
 	// so existing bookmarks keep working.
 	r.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "./web/dispatch.html")
+		http.ServeFile(w, r, filepath.Join(s.config.webDir(), "dispatch.html"))
 	})
 	toCommand := func(w http.ResponseWriter, r *http.Request) {
 		target := "/command"
@@ -265,7 +270,7 @@ func (s *Server) webRouter() *mux.Router {
 	}
 	r.HandleFunc("/dispatch", toCommand)
 	r.HandleFunc("/dispatch.html", toCommand)
-	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./web")))
+	r.PathPrefix("/").Handler(http.FileServer(http.Dir(s.config.webDir())))
 
 	return r
 }
@@ -277,7 +282,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		path := r.URL.Path
 
 		// Allow unauthenticated access to login-related paths
-		if path == "/api/login" || path == "/api/session" ||
+		if path == "/api/login" || path == "/api/session" || path == "/health" ||
 			path == "/login.html" || path == "/dispatch.html" || path == "/dispatch" || path == "/command" ||
 			path == "/dispatch.js" || path == "/dispatch.css" ||
 			path == "/style.css" ||
@@ -355,6 +360,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	req.Username = strings.TrimSpace(req.Username)
 	req.AgencyID = strings.TrimSpace(req.AgencyID)
 
+	// Wrong-password limits (ratelimit.go): per browser address and per account.
+	ipKey := "ip:" + s.clientIP(r)
+	acctKey := pttAuthAccountKey(req.AgencyID, req.Username)
+	for _, k := range []string{ipKey, acctKey} {
+		if locked, left := s.loginLimit.blocked(k); locked {
+			mins := int(left.Minutes()) + 1
+			log.Printf("Web login refused (locked %s more after too many wrong passwords): %s [%s] from %s",
+				left.Round(time.Second), req.Username, req.AgencyID, s.clientIP(r))
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", strconv.Itoa(int(left.Seconds())+1))
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprintf(w, `{"error":"too many attempts, try again in %d minute(s)"}`, mins)
+			return
+		}
+	}
+
 	s.mu.RLock()
 	adminKey := userKey(req.AgencyID, req.Username)
 	admin, exists := s.webAdmins[adminKey]
@@ -376,19 +397,35 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
-	if !exists || !checkPassword(req.Password, snap.PasswordHash) {
+	ok := false
+	if exists {
+		ok = checkPassword(req.Password, snap.PasswordHash)
+	} else {
+		// Same bcrypt cost as a real account, so the response time does not
+		// reveal which usernames exist.
+		checkPassword(req.Password, dummyPasswordHash())
+	}
+	if !ok {
+		lockedIP := s.loginLimit.fail(ipKey)
+		lockedAcct := s.loginLimit.fail(acctKey)
+		if lockedIP || lockedAcct {
+			log.Printf("Web login lockout: too many wrong passwords for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
+		}
 		// Say WHICH half failed in the journal (never to the client): a
 		// missing account and a wrong password are different problems.
 		if !exists {
-			log.Printf("Failed web login: no dashboard account for %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
+			log.Printf("Failed web login: no dashboard account for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
 		} else {
-			log.Printf("Failed web login: wrong password for %s [%s] from %s", req.Username, req.AgencyID, r.RemoteAddr)
+			log.Printf("Failed web login: wrong password for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"invalid username or password"}`))
 		return
 	}
+
+	s.loginLimit.success(acctKey)
+	s.loginLimit.success(ipKey)
 
 	// Transparently migrate legacy SHA-256 hashes to bcrypt on successful login
 	if !strings.HasPrefix(snap.PasswordHash, "$2a$") && !strings.HasPrefix(snap.PasswordHash, "$2b$") {
@@ -413,11 +450,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		MaxAge:   int(webSessionMaxLifetime / time.Second),
-		Secure:   s.config.TLSCertFile != "",
+		Secure:   s.config.TLSCertFile != "" || s.requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, snap.Role, r.RemoteAddr)
+	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, snap.Role, s.clientIP(r))
 	s.activityLog.Add("admin_login", req.Username, fmt.Sprintf("Web dashboard login (role: %s)", snap.Role), snap.AgencyID)
 	w.Header().Set("Content-Type", "application/json")
 	mustChange := snap.MustChangePassword
@@ -445,7 +482,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		MaxAge:   -1,
-		Secure:   s.config.TLSCertFile != "",
+		Secure:   s.config.TLSCertFile != "" || s.requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -763,7 +800,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&s.wsConnCount, 1)
 	defer atomic.AddInt64(&s.wsConnCount, -1)
 
-	log.Printf("New WebSocket connection from %s", r.RemoteAddr)
+	log.Printf("New WebSocket connection from %s", s.clientIP(r))
 
 	// Set up ping/pong to detect dead connections
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -2729,6 +2766,17 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if s.config.isManaged() {
+		// Installed and updated by a platform (infra-TAK): it owns updates.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"current_version":  Version,
+			"latest_version":   Version,
+			"update_available": false,
+			"managed":          s.config.Managed,
+			"message":          managedUpdateMessage(s.config.Managed),
+		})
+		return
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	ghReq, _ := http.NewRequest("GET", "https://api.github.com/repos/RyanR3/MeshRelayServer/releases/latest", nil)
@@ -2816,6 +2864,11 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if s.config.isManaged() {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": managedUpdateMessage(s.config.Managed)})
+		return
+	}
 
 	s.updateStatus.mu.RLock()
 	if s.updateStatus.InProgress {
