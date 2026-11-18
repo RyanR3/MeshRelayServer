@@ -294,7 +294,7 @@ type Server struct {
 	takOnce                sync.Once
 	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
-	pendingChallenges      map[string]pendingChallenge                                        // addr string -> nonce (Phase 4f challenge-response)
+	pendingChallenges      map[string]pendingChallenge                                  // addr string -> nonce (Phase 4f challenge-response)
 	enrollmentTokens       map[string]*EnrollmentToken                                  // token string -> enrollment token
 	guestEvents            map[string]*GuestEvent                                       // eventID -> guest event
 	webAdmins              map[string]*WebAdmin                                         // "agencyID:username" -> admin account (web dashboard)
