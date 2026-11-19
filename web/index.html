@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=21">
+    <link rel="stylesheet" href="style.css?v=22">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -51,6 +51,10 @@
                 <li class="nav-item admin-only" data-page="channels">
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span>
                     <span class="nav-label">Channels</span>
+                </li>
+                <li class="nav-item admin-only" data-page="emergency">
+                    <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                    <span class="nav-label">Emergency Alerts</span>
                 </li>
                 <li class="nav-item admin-only" data-page="maps">
                     <span class="nav-icon"><svg viewBox="0 0 24 24"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg></span>
@@ -564,6 +568,20 @@
                 </p>
                 <div id="channels-status" class="status-message" style="display: none;"></div>
                 <div id="channels-agencies"></div>
+            </div>
+
+            <div class="page" id="page-emergency">
+                <div class="page-header">
+                    <h2>Emergency Alerts</h2>
+                </div>
+                <p class="page-intro" style="color: var(--text-secondary, #8b949e); margin: -8px 0 16px; max-width: 760px;">
+                    Every phone and Command console of your agency always hears the EMERGENCY channel. Nobody can talk on it,
+                    dispatch included, except a unit that has raised an emergency alert: from the alert until it is cleared, all
+                    of that unit's audio goes to the EMERGENCY channel instead of the channel it is on, so its working channel
+                    stays clear. A second emergency at the same time is recorded and played after the first is cleared.
+                </p>
+                <div id="emergency-status" class="status-message" style="display: none;"></div>
+                <div id="emergency-agencies"></div>
             </div>
 
             <div class="page" id="page-maps">
@@ -1305,6 +1323,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=37"></script>
+    <script src="app.js?v=38"></script>
 </body>
 </html>

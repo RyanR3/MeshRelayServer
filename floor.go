@@ -305,7 +305,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 	// Queue mode: accept the transmission, record it, replay it after the
 	// current talker. The client sees FLOOR_GRANTED with a queue position > 0
 	// and keeps sending; those frames land in RecordDeferred.
-	if fc.server.floorQueueForAgency(agencyFromKey(key)) {
+	if fc.server.floorQueueForKey(key) {
 		if d := c.recording[req.User]; d != nil {
 			fc.server.sendFloorToUserIn(key, req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(fc.deferredPos(c, d))))
 			return
@@ -420,7 +420,11 @@ func (fc *FloorController) RecordDeferred(key, user string, packet *AudioPacket,
 		return
 	}
 	d := c.recording[user]
-	if d == nil || len(d.frames) >= deferredMaxFrames {
+	limit := deferredMaxFrames
+	if isEmergencyKey(key) {
+		limit = emergencyDeferredMaxFrames
+	}
+	if d == nil || len(d.frames) >= limit {
 		return
 	}
 	d.frames = append(d.frames, deferredFrame{packet: packet, audioData: audioData})
@@ -542,6 +546,14 @@ func (fc *FloorController) NoteAudio(key, user string) {
 	if c != nil && c.holder != nil && c.holder.user == user {
 		c.holder.lastAudio = time.Now()
 	}
+}
+
+// IsRecording reports whether `user` is being recorded for a queued replay.
+func (fc *FloorController) IsRecording(key, user string) bool {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	c := fc.channels[key]
+	return c != nil && c.recording[user] != nil
 }
 
 // HasFloor reports whether `user` currently holds the floor on `key`. When floor
@@ -739,6 +751,26 @@ func (s *Server) handleFloorRequest(req *FloorRequest, addr *net.UDPAddr) {
 	if client == nil {
 		return
 	}
+	// A unit in emergency talks on the EMERGENCY channel: its PTT asks for
+	// that channel's floor, whatever channel it is on.
+	if s.emergencyActiveFor(client.AgencyID, req.User) {
+		ekey := channelKey(client.AgencyID, EmergencyChannel)
+		if req.Priority == 0 {
+			s.floor.Release(ekey, EmergencyChannel, req.User)
+		} else {
+			s.touchEmergency(client.AgencyID, req.User)
+			s.floor.Request(ekey, &FloorRequest{Channel: EmergencyChannel, User: req.User, Priority: PriorityEmergency}, PriorityEmergency)
+		}
+		return
+	}
+	// Nobody else talks on the EMERGENCY channel.
+	if client.Channel == EmergencyChannel {
+		if req.Priority != 0 {
+			s.sendFloorToUserIn(channelKey(client.AgencyID, EmergencyChannel), req.User,
+				buildFloorDenied(req.Channel, FloorDenyNoPermission, 0, ""))
+		}
+		return
+	}
 	if !s.floorEnabledForAgency(client.AgencyID) {
 		// Floor control off for this agency: auto-grant so clients that gate on
 		// grant still work (open-PTT semantics preserved).
@@ -814,18 +846,28 @@ func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) 
 	if client == nil {
 		return
 	}
-	// Consoles see every emergency in their agency, floor control or not.
-	s.notifyDispatchEmergency(client.AgencyID, client.Channel, alert.User, alert.Active)
+	// The EMERGENCY channel (emergency_channel.go): the alert goes to the
+	// whole agency and dispatch, and the unit's audio moves to that channel
+	// until the emergency is cleared. The working channel is left alone.
 	key := channelKey(client.AgencyID, client.Channel)
-	if !s.floorEnabledForAgency(client.AgencyID) {
-		// No floor state to keep: still tell everyone on the channel, so the
-		// units around the caller see it too, not only dispatch.
-		s.broadcastFloorToChannel(key, s.emergencyAlertPacket(key, client.Channel, alert.User, alert.Active))
+	if alert.Active {
+		first := !s.emergencyActiveFor(client.AgencyID, alert.User)
+		s.raiseEmergency(client.AgencyID, alert.User, client.Channel)
+		// MCX Step 5: propagate an emergency set to the external MCX platform.
+		if first && s.sipGateway != nil {
+			s.sipGateway.OnEmergencyAlert(key, userMCXID(alert.User, client.AgencyID, s.config.McpttDomain))
+		}
 		return
 	}
-	s.floor.Emergency(key, client.Channel, alert.User, alert.Active, isSupervisor)
-	// MCX Step 5: propagate an emergency set to the external MCX platform.
-	if s.sipGateway != nil && alert.Active {
-		s.sipGateway.OnEmergencyAlert(key, userMCXID(alert.User, client.AgencyID, s.config.McpttDomain))
+	if s.clearEmergency(client.AgencyID, alert.User, alert.User) {
+		return
 	}
+	if isSupervisor {
+		// A supervisor's cancel: the emergencies raised on their channel.
+		s.clearEmergenciesOnChannel(client.AgencyID, client.Channel, alert.User)
+		return
+	}
+	// Not active (already cleared, or the server restarted): confirm the
+	// clear to the unit so its phone stops showing it.
+	s.sendFloorToUserIn(key, alert.User, buildEmergencyAlert(client.Channel, alert.User, false))
 }

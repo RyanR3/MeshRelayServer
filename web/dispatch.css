@@ -336,3 +336,8 @@ kbd { background: var(--surface3); border: 1px solid var(--border2); border-radi
 .tak-avatar { border-radius: 8px; color: #0B0E14; }
 .units-section { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.6px; padding: 10px 6px 4px; }
 .stale-row { opacity: 0.55; }
+
+/* EMERGENCY channel row: listen-only, always heard */
+.ch-row.emergency-ch { cursor: default; border-left-color: #ef4444; }
+.ch-row.emergency-ch .ch-name { color: #f87171; }
+.ch-row.emergency-ch.talking { background: rgba(239, 68, 68, 0.12); }

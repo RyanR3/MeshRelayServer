@@ -151,6 +151,13 @@ func (s *Server) dispatchPTT(key string, tx *dispatchTX, down bool) {
 		log.Printf("Dispatch %s [%s] unkeyed ch %d: %d frames in %.1fs", username, agency, channel, frames, since.Seconds())
 	}
 
+	if channel == EmergencyChannel && !c.DispatchAllCall {
+		// Listen-only: nobody talks back on the EMERGENCY channel.
+		if down {
+			deliverToDispatch(buildFloorDenied(channel, FloorDenyNoPermission, 0, ""), c.Addr)
+		}
+		return
+	}
 	floorOn := agency != "" && s.floor != nil && s.floorEnabledForAgency(agency) && !c.DispatchAllCall
 	if !floorOn {
 		if down {
@@ -204,7 +211,7 @@ func (s *Server) dispatchAudioIn(key string, tx *dispatchTX, opus []byte) {
 		}
 	}
 	s.mu.RUnlock()
-	if c == nil {
+	if c == nil || (channel == EmergencyChannel && allCall == nil) {
 		return
 	}
 	if allCall != nil {

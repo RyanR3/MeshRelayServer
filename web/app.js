@@ -89,6 +89,8 @@ function navigateTo(pageName) {
         initMapsPage();
     } else if (pageName === 'channels') {
         fetchAgencyChannels();
+    } else if (pageName === 'emergency') {
+        fetchAgencyEmergency();
     } else if (pageName === 'guest-events') {
         fetchGuestEvents();
     } else if (pageName === 'zello-bridges') {
@@ -4985,6 +4987,118 @@ function saveAgencyChannels(i) {
         showStatus('channels-status', `${data.agency_name}: ${data.count} channels saved and sent to its phones and consoles`, 'success');
     })
     .catch(err => showStatus('channels-status', 'Failed to save: ' + err.message, 'error'));
+}
+
+
+// --- Emergency Alerts (the listen-only EMERGENCY channel) -------------------
+// Name of the channel, the LMR bridge its audio is also sent out on, and the
+// active emergencies (an admin can clear one from here).
+
+let agencyEmergencyData = [];
+let emergencyRefresh = null;
+
+function fetchAgencyEmergency() {
+    fetch('/api/my-agency/emergency')
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { showStatus('emergency-status', data.error, 'error'); return; }
+            agencyEmergencyData = data || [];
+            renderAgencyEmergency();
+        })
+        .catch(err => showStatus('emergency-status', 'Failed to load: ' + err.message, 'error'));
+    // Keep the active list current while the page is open.
+    if (!emergencyRefresh) {
+        emergencyRefresh = setInterval(() => {
+            const page = document.getElementById('page-emergency');
+            if (!page || !page.classList.contains('active')) { clearInterval(emergencyRefresh); emergencyRefresh = null; return; }
+            if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#emergency-agencies')) return;
+            fetch('/api/my-agency/emergency').then(r => r.json()).then(d => {
+                if (!d.error) { agencyEmergencyData = d || []; renderAgencyEmergency(); }
+            }).catch(() => {});
+        }, 10000);
+    }
+}
+
+function renderAgencyEmergency() {
+    const box = document.getElementById('emergency-agencies');
+    if (!box) return;
+    if (!agencyEmergencyData.length) { box.innerHTML = '<div class="empty-state">No agencies</div>'; return; }
+    box.innerHTML = agencyEmergencyData.map((a, i) => {
+        const opts = ['<option value="">None (phones and Command only)</option>'].concat(a.bridges.map(b =>
+            `<option value="${escapeHtml(b.id)}"${b.id === a.lmr_bridge ? ' selected' : ''}>${escapeHtml(b.name)} (ch ${b.channel})${b.shared ? ' — shared with you' : ''}${b.enabled ? '' : ' — paused'}</option>`)).join('');
+        const active = a.active.length ? a.active.map(e => `
+                <div class="em-active-row">
+                    <span class="em-dot"></span>
+                    <span class="em-user">${escapeHtml(e.user)}</span>
+                    <span class="em-meta">was on ${escapeHtml(e.channel_name)} · since ${new Date(e.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                    <button class="btn-secondary" onclick="clearAgencyEmergency(${i}, '${escapeHtml(e.user).replace(/'/g, "\\'")}')">Clear</button>
+                </div>`).join('') : '<div class="list-hint">No active emergencies.</div>';
+        return `
+            <div class="panel chn-panel" style="margin-bottom: 20px;">
+                <div class="chn-head">
+                    <h3>${escapeHtml(a.agency_name)}${currentRole === 'super_admin' ? ` <span class="agency-badge">${escapeHtml(a.agency_id)}</span>` : ''}</h3>
+                </div>
+                <div class="settings-field" style="margin-bottom: 14px;">
+                    <label class="modal-field-label">Channel name</label>
+                    <input type="text" maxlength="32" class="chn-input em-field" id="em-name-${i}" value="${escapeHtml(a.channel_name)}" placeholder="EMERGENCY">
+                    <div class="list-hint">Shown on every phone and on Command (channel ${a.channel}, listen-only).</div>
+                </div>
+                <div class="settings-field" style="margin-bottom: 14px;">
+                    <label class="modal-field-label">Also send emergency audio out on an LMR radio channel</label>
+                    <select class="chn-input em-field" id="em-bridge-${i}">${opts}</select>
+                    <div class="list-hint">${a.bridges.length
+                        ? 'The bridge\'s radio transmits the emergency audio. One way only: radio traffic is not put on the EMERGENCY channel.'
+                        : 'Your agency has no LMR bridges. Add one on the LMR Bridges page to use this.'}</div>
+                </div>
+                <div class="chn-actions">
+                    <button class="btn-primary" onclick="saveAgencyEmergency(${i})">Save</button>
+                </div>
+                <h4 style="margin: 18px 0 8px;">Active emergencies</h4>
+                ${active}
+            </div>`;
+    }).join('');
+}
+
+function saveAgencyEmergency(i) {
+    const a = agencyEmergencyData[i];
+    const body = {
+        channel_name: document.getElementById(`em-name-${i}`).value.trim(),
+        lmr_bridge: document.getElementById(`em-bridge-${i}`).value
+    };
+    if (currentRole === 'super_admin') body.agency_id = a.agency_id;
+    fetch('/api/my-agency/emergency', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('emergency-status', data.error, 'error'); return; }
+        agencyEmergencyData[i] = data;
+        renderAgencyEmergency();
+        showStatus('emergency-status', `${data.agency_name}: emergency channel saved`, 'success');
+    })
+    .catch(err => showStatus('emergency-status', 'Failed to save: ' + err.message, 'error'));
+}
+
+function clearAgencyEmergency(i, user) {
+    const a = agencyEmergencyData[i];
+    if (!confirm(`Clear ${user}'s emergency? Their phone, dispatch and everyone in the agency will see it cleared.`)) return;
+    const body = { user };
+    if (currentRole === 'super_admin') body.agency_id = a.agency_id;
+    fetch('/api/my-agency/emergency/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('emergency-status', data.error, 'error'); return; }
+        agencyEmergencyData[i] = data;
+        renderAgencyEmergency();
+        showStatus('emergency-status', `${user}'s emergency cleared`, 'success');
+    })
+    .catch(err => showStatus('emergency-status', 'Failed to clear: ' + err.message, 'error'));
 }
 
 

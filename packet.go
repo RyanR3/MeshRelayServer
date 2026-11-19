@@ -228,6 +228,10 @@ type HeartbeatPacket struct {
 // packets). The server echoes the flag back to confirm.
 const HeartbeatFlagLowPower byte = 0x01
 
+// HeartbeatFlagEmergencyChannel: the client knows the EMERGENCY channel
+// (0x37) and plays its channel-tagged audio (emergency_channel.go).
+const HeartbeatFlagEmergencyChannel byte = 0x02
+
 // JoinPacket represents a channel join request
 type JoinPacket struct {
 	Username string

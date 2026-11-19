@@ -158,7 +158,9 @@ func (s *Server) dispatchDirectory(agencyFilter string) ([]map[string]string, []
 		for ch := 0; ch < n; ch++ {
 			out = append(out, dispatchChannel{id, a.Name, ch, a.talkgroupName(ch), "talkgroup", units(id, ch)})
 		}
-		seen := map[int]bool{}
+		// Listen-only, always heard (emergency_channel.go).
+		out = append(out, dispatchChannel{id, a.Name, EmergencyChannel, a.emergencyChannelName(), "emergency", 0})
+		seen := map[int]bool{EmergencyChannel: true}
 		add := func(ch int, name, kind string) {
 			if seen[ch] {
 				return
@@ -219,6 +221,9 @@ func nonEmpty(v, fallback string) string {
 func consoleHears(c *Client, agencyID string, channel int) bool {
 	if c.AgencyID != "" && c.AgencyID != agencyID {
 		return false
+	}
+	if channel == EmergencyChannel {
+		return true // every console of the agency hears the EMERGENCY channel
 	}
 	if c.Channel == channel && (c.DispatchTxAgency == "" || c.DispatchTxAgency == agencyID) {
 		return true

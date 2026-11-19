@@ -201,7 +201,8 @@ function onUpdate(data) {
     units = (data.clients || []).filter(c => !c.console);
     takUnits = data.tak_units || [];
     if (!txKey && directory.channels.length) {
-        const first = directory.channels.find(c => !currentAgency || c.agency === currentAgency) || directory.channels[0];
+        const first = directory.channels.find(c => c.kind !== 'emergency' && (!currentAgency || c.agency === currentAgency))
+            || directory.channels.find(c => c.kind !== 'emergency') || directory.channels[0];
         selectTx(first.agency, first.channel);
     }
     if (!currentAgency) document.getElementById('dispatch-agency-label').textContent = `All agencies (${directory.agencies.length})`;
@@ -211,7 +212,15 @@ function onUpdate(data) {
 
 // ─── Channels ──────────────────────────────────────────────────────────────
 
+// The EMERGENCY channel (server emergency_channel.go): always heard, nobody
+// transmits on it — only a unit with an active emergency is put on it.
+const EMERGENCY_CHANNEL = 99;
+
 function selectTx(agency, channel) {
+    if (Number(channel) === EMERGENCY_CHANNEL) {
+        flashMessage('The emergency channel is listen-only. It is always heard here.');
+        return;
+    }
     const key = chKey(agency, channel);
     if (currentAgency && agency !== currentAgency) return;
     if (key === txKey) return;
@@ -273,6 +282,14 @@ function renderChannels() {
             for (const c of rows) {
                 const key = chKey(c.agency, c.channel);
                 const talking = talkersOn(c.agency, c.channel);
+                if (c.kind === 'emergency') {
+                    html += `<div class="ch-row emergency-ch${talking.length ? ' talking' : ''}" title="Listen-only. Always heard. A unit with an active emergency talks here.">
+                        <div class="ch-name">${WARN_ICON}${escHtml(c.name)}<span class="ch-kind">listen only</span></div>
+                        <span></span><span></span>
+                        <div class="ch-sub">${talking.length ? `<span class="talker">● ${escHtml(talking.join(', '))}</span>` : 'Always heard'}</div>
+                    </div>`;
+                    continue;
+                }
                 const kind = c.kind !== 'talkgroup' ? `<span class="ch-kind">${escHtml(c.kind.replace('_', ' '))}</span>` : '';
                 const sub = talking.length
                     ? `<span class="talker">● ${escHtml(talking.join(', '))}</span>`

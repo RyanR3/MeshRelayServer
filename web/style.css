@@ -2953,3 +2953,10 @@ body {
 .map-preview img { width: 128px; height: 128px; }
 .map-url-cell { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #8B949E; }
 .map-shared { font-size: 12px; color: #8B949E; }
+
+/* Emergency Alerts page */
+.em-active-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border-color, #30363d); }
+.em-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; flex: none; }
+.em-user { font-weight: 600; }
+.em-meta { color: var(--text-secondary, #8b949e); font-size: 13px; flex: 1; }
+.em-field { display: block; width: 100%; max-width: 420px; margin: 4px 0 4px !important; }

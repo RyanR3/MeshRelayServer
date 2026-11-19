@@ -39,6 +39,9 @@ type Client struct {
 	ConnectedAt   time.Time
 	// LowPower: the client asked for the low-power stream (HeartbeatFlagLowPower).
 	LowPower bool
+	// EmergencyAware: the client knows the EMERGENCY channel
+	// (HeartbeatFlagEmergencyChannel), so its audio arrives channel-tagged.
+	EmergencyAware bool
 	// lastPing: when the server last sent this low-power client a keepalive.
 	lastPing time.Time
 	// MonitoredChannels: extra channels this client always LISTENS to (mutual-aid
@@ -136,6 +139,11 @@ type Agency struct {
 	// channel number. Synced to every phone and console (channel_names.go).
 	ChannelCount int            `json:"channel_count,omitempty"`
 	ChannelNames map[int]string `json:"channel_names,omitempty"`
+
+	// The EMERGENCY channel (emergency_channel.go): its name ("" = EMERGENCY)
+	// and the LMR bridge its audio is also sent out on ("" = none).
+	EmergencyChannelName string `json:"emergency_channel_name,omitempty"`
+	EmergencyLMRBridge   string `json:"emergency_lmr_bridge,omitempty"`
 }
 
 // Floor modes kept in Server.floorOn (lock-free, read per audio packet).
@@ -298,13 +306,15 @@ type Server struct {
 	takOnce                sync.Once
 	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
-	pendingChallenges      map[string]pendingChallenge                                  // addr string -> nonce (Phase 4f challenge-response)
-	enrollmentTokens       map[string]*EnrollmentToken                                  // token string -> enrollment token
-	guestEvents            map[string]*GuestEvent                                       // eventID -> guest event
-	webAdmins              map[string]*WebAdmin                                         // "agencyID:username" -> admin account (web dashboard)
-	dispatchConns          map[string]*DispatchConn                                     // "agencyID:username" -> active dispatch WebSocket
-	webSessions            map[string]*WebSession                                       // session token -> session
-	mutualAidLinks         map[string]*MutualAidLink                                    // linkID -> link
+	pendingChallenges      map[string]pendingChallenge // addr string -> nonce (Phase 4f challenge-response)
+	enrollmentTokens       map[string]*EnrollmentToken // token string -> enrollment token
+	guestEvents            map[string]*GuestEvent      // eventID -> guest event
+	webAdmins              map[string]*WebAdmin        // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns          map[string]*DispatchConn    // "agencyID:username" -> active dispatch WebSocket
+	webSessions            map[string]*WebSession      // session token -> session
+	mutualAidLinks         map[string]*MutualAidLink   // linkID -> link
+	emergMu                sync.Mutex
+	emergCalls             map[string]map[string]*emergencyCall                         // agency -> user -> active emergency (emergency_channel.go)
 	lmrBridges             map[string]*LMRBridge                                        // bridgeID -> LMR/VHF radio bridge
 	mutualAidRequests      map[string]*MutualAidRequest                                 // requestID -> agency-to-agency ask
 	zelloBridges           map[string]*ZelloBridge                                      // bridgeID -> Zello Work channel bridge
@@ -694,7 +704,7 @@ func (s *Server) ensureAgencyChannels(agencyID string) {
 	// Talkgroups plus the shared mutual-aid/ad-hoc block. Bridge channels
 	// (LMR, Zello) are created on demand by their own code, since a bridge
 	// only exists in the agencies it serves.
-	for i := 0; i <= SharedChannelMax; i++ {
+	for i := 0; i <= EmergencyChannel; i++ { // talkgroups, shared block, EMERGENCY
 		key := channelKey(agencyID, i)
 		if _, exists := s.channels[key]; !exists {
 			s.channels[key] = &Channel{
@@ -774,6 +784,7 @@ func NewServer(config *Config, configFile string) *Server {
 			case <-t.C:
 				s.floor.Tick()
 				s.groupMgr.Tick()
+				s.emergencyTick()
 			}
 		}
 	}()
@@ -844,6 +855,15 @@ func (s *Server) BroadcastEmergency(channelKey, userMCXID string) error {
 // audio packet, so it uses the lock-free map rather than s.agencies.
 func (s *Server) floorEnabledForAgency(agencyID string) bool {
 	return s.floorModeForAgency(agencyID) != floorModeOff
+}
+
+// floorQueueForKey: queue mode for one channel key. The EMERGENCY channel
+// always queues (a second emergency is recorded and replayed after the first).
+func (s *Server) floorQueueForKey(key string) bool {
+	if isEmergencyKey(key) {
+		return true
+	}
+	return s.floorQueueForAgency(agencyFromKey(key))
 }
 
 // floorQueueForAgency reports whether a busy channel records and replays a
@@ -1080,6 +1100,16 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 		audioData = append([]byte{relayType}, SerializeAudioPacket(packet)...)
 	}
 
+	// A unit with an active emergency talks on the EMERGENCY channel, whatever
+	// channel it is on (emergency_channel.go).
+	if s.routeEmergencyAudio(client, packet, audioData) {
+		return
+	}
+	// Nobody else talks on the EMERGENCY channel.
+	if client.Channel == EmergencyChannel {
+		return
+	}
+
 	// MCX Step 3: when floor control is enabled for this agency, only the current
 	// floor holder's audio is relayed. A non-holder is either recorded for replay
 	// (queue mode, if the server granted them a queued slot) or dropped. The
@@ -1118,6 +1148,11 @@ func (s *Server) relayDeferred(key string, channelNum int, user string, packet *
 	// The recording belongs to the channel's agency: never resolve the user
 	// by name in another agency.
 	agency := agencyFromKey(key)
+	if isEmergencyKey(key) {
+		// A queued emergency: the EMERGENCY channel and its LMR bridge.
+		s.relayEmergencyAudio(agency, user, nil, packet, audioData)
+		return
+	}
 	s.mu.RLock()
 	var client *Client
 	if c := s.clientInAgency(agency, user); c != nil {
@@ -1182,12 +1217,27 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 	// (always-listen) but aren't tuned to it — so mutual-aid/Zello channels are
 	// heard regardless of the client's active channel.
 	s.mu.RLock()
+	emergency := client.Channel == EmergencyChannel
 	for _, mc := range s.clients {
 		if mc.AgencyID != client.AgencyID || mc.Username == client.Username || s.gatewayPaused(mc) {
 			continue
 		}
 		if sentTo[mc.Addr.String()] {
 			continue // already got it as an active-channel member
+		}
+		if emergency {
+			// Everyone in the agency always hears the EMERGENCY channel.
+			// Apps that don't know it get it untagged, so it still plays.
+			if s.emergencyListener(mc) {
+				if mc.EmergencyAware {
+					s.sendPacket(monitorAudioData, mc.Addr)
+				} else {
+					s.sendPacket(audioData, mc.Addr)
+				}
+				sentTo[mc.Addr.String()] = true
+				relayCount++
+			}
+			continue
 		}
 		for _, ch := range mc.MonitoredChannels {
 			if ch == client.Channel {
@@ -1479,6 +1529,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	s.adoptSenderAddr(client, addr, "heartbeat")
 	client.LastHeartbeat = time.Now()
 	client.LowPower = lowPower
+	client.EmergencyAware = packet.Flags&HeartbeatFlagEmergencyChannel != 0
 	agencyID, chNum, username := client.AgencyID, client.Channel, client.Username
 
 	// Everyone the heartbeat is relayed to, collected under the locks: the
@@ -1648,6 +1699,12 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	if a := s.agencies[agencyID]; a != nil {
 		toSend = append(toSend, pendingPacket{buildChannelNames(a), addr,
 			fmt.Sprintf("Sent channel names (%d) to %s [%s]", a.talkgroupCount(), packet.Username, agencyID)})
+	}
+
+	// The EMERGENCY channel (always heard, listen-only).
+	if a := s.agencies[agencyID]; a != nil && s.lmrBridgeByUsername(agencyID, packet.Username) == nil {
+		toSend = append(toSend, pendingPacket{buildEmergencyChannel(a), addr,
+			fmt.Sprintf("Sent emergency channel to %s [%s]", packet.Username, agencyID)})
 	}
 
 	// Channels to announce to the joining client (mutual aid, Zello, LMR).
