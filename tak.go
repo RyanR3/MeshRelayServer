@@ -25,10 +25,13 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"encoding/xml"
@@ -44,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -171,9 +175,112 @@ func takEnrollVerified(cfg *TakConfig, password string, trustPEMs []string) erro
 	if len(trustPEMs) > 0 {
 		tlsCfg = enrollTLSConfig(trustPEMs)
 	}
+	return takEnrollWith(cfg, password, tlsCfg, nil)
+}
+
+// --- dashboard enrollment: a confirmed certificate, and no internal hosts ----
+//
+// The dashboard path used to send the TAK username and password to whatever
+// answered on the enrollment port (no certificate check), and let an agency
+// admin point the server at any internal address and read the errors back.
+// Now: the host must be a plain name or address; the server will not connect
+// to loopback or link-local addresses for an agency admin; and the password
+// is only sent to an enrollment port whose certificate is publicly trusted,
+// or whose exact certificate the admin confirmed by fingerprint.
+
+// takHostAllowed validates what a dashboard user typed.
+func takHostAllowed(host string, ports ...int) error {
+	if !managedTakHostRe.MatchString(host) {
+		return errors.New("TAK server address must be a host name or IP address (no scheme, path or port)")
+	}
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return errors.New("TAK ports must be between 1 and 65535")
+		}
+	}
+	return nil
+}
+
+// takDialControl refuses connections to this machine and to link-local
+// addresses (cloud metadata lives there) unless allowLocal.
+func takDialControl(allowLocal bool) func(network, address string, c syscall.RawConn) error {
+	return func(network, address string, _ syscall.RawConn) error {
+		if allowLocal {
+			return nil
+		}
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			return errors.New("that address is not allowed for a TAK server")
+		}
+		return nil
+	}
+}
+
+// takCertInfo is what the admin is asked to confirm.
+type takCertInfo struct {
+	Fingerprint string `json:"fingerprint"` // SHA-256 of the certificate, hex
+	Subject     string `json:"subject"`
+	Issuer      string `json:"issuer"`
+	NotAfter    string `json:"not_after"`
+}
+
+// takProbeCert reads the enrollment port's certificate WITHOUT sending any
+// credentials. trusted is true when it verifies against the public roots for
+// that host name (nothing to confirm then).
+func takProbeCert(host string, port int, allowLocal bool) (info takCertInfo, trusted bool, err error) {
+	d := &net.Dialer{Timeout: 10 * time.Second, Control: takDialControl(allowLocal)}
+	conn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(host, strconv.Itoa(port)), &tls.Config{InsecureSkipVerify: true, ServerName: host})
+	if err != nil {
+		return info, false, err
+	}
+	defer conn.Close()
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return info, false, errors.New("no certificate")
+	}
+	leaf := certs[0]
+	sum := sha256.Sum256(leaf.Raw)
+	info = takCertInfo{Fingerprint: hex.EncodeToString(sum[:]), Subject: leaf.Subject.String(),
+		Issuer: leaf.Issuer.String(), NotAfter: leaf.NotAfter.Format(time.RFC3339)}
+	inter := x509.NewCertPool()
+	for _, c := range certs[1:] {
+		inter.AddCert(c)
+	}
+	_, verr := leaf.Verify(x509.VerifyOptions{DNSName: host, Intermediates: inter})
+	return info, verr == nil, nil
+}
+
+// takEnrollPinned enrolls, sending the password only to an enrollment port
+// that presents exactly the confirmed certificate (fingerprint), or — with
+// an empty fingerprint — one the public roots vouch for.
+func takEnrollPinned(cfg *TakConfig, password, fingerprint string, allowLocal bool) error {
+	tlsCfg := &tls.Config{ServerName: cfg.Host}
+	if fingerprint != "" {
+		want := strings.ToLower(strings.TrimSpace(fingerprint))
+		tlsCfg.InsecureSkipVerify = true // replaced by the exact-certificate check
+		tlsCfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
+			if len(raw) == 0 {
+				return errors.New("no certificate")
+			}
+			sum := sha256.Sum256(raw[0])
+			if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(want)) != 1 {
+				return errors.New("the TAK server's certificate is not the one that was confirmed")
+			}
+			return nil
+		}
+	}
+	return takEnrollWith(cfg, password, tlsCfg, takDialControl(allowLocal))
+}
+
+func takEnrollWith(cfg *TakConfig, password string, tlsCfg *tls.Config, control func(string, string, syscall.RawConn) error) error {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: control}
 	client := &http.Client{
 		Timeout:   20 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Transport: &http.Transport{TLSClientConfig: tlsCfg, DialContext: dialer.DialContext},
 	}
 	base := fmt.Sprintf("https://%s:%d", cfg.Host, cfg.EnrollPort)
 	do := func(method, url string, body io.Reader, ctype string) ([]byte, error) {
@@ -877,8 +984,10 @@ func (s *Server) handleUpdateTak(w http.ResponseWriter, r *http.Request) {
 		Callsign   string `json:"callsign"`
 		Enabled    bool   `json:"enabled"`
 		Remove     bool   `json:"remove"`
+		// The enrollment certificate the admin confirmed (SHA-256, hex).
+		TrustFingerprint string `json:"trust_fingerprint"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
@@ -907,6 +1016,10 @@ func (s *Server) handleUpdateTak(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	cfg, existed := m.cfgs[agencyID]
 	m.mu.Unlock()
+	if existed && cfg.Managed && !isSuper {
+		writeJSONError(w, http.StatusForbidden, "this TAK link is managed by the platform and cannot be changed here")
+		return
+	}
 	host := strings.TrimSpace(req.Host)
 	if host == "" {
 		writeJSONError(w, http.StatusBadRequest, "TAK server address is required")
@@ -931,14 +1044,46 @@ func (s *Server) handleUpdateTak(w http.ResponseWriter, r *http.Request) {
 	if cfg.UID == "" {
 		cfg.UID = "MeshRelay-Dispatch-" + safeName.ReplaceAllString(agencyID, "_") + "-" + randomHex(3)
 	}
+	if err := takHostAllowed(cfg.Host, cfg.StreamPort, cfg.EnrollPort, cfg.APIPort); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if reEnroll {
 		if req.Password == "" {
 			writeJSONError(w, http.StatusBadRequest, "Enter the TAK password to enroll for a certificate")
 			return
 		}
-		if err := takEnroll(&cfg, req.Password); err != nil {
+		// Only a super admin may point the server at itself (a TAK server on
+		// the same machine); link-local addresses are never useful here.
+		allowLocal := isSuper
+		fp := strings.TrimSpace(req.TrustFingerprint)
+		if fp == "" {
+			// Look at the enrollment port's certificate first, sending
+			// nothing. Publicly trusted: go on. Otherwise the admin must
+			// confirm that exact certificate before the password is sent.
+			info, trusted, err := takProbeCert(cfg.Host, cfg.EnrollPort, allowLocal)
+			if err != nil {
+				log.Printf("TAK [%s]: could not reach %s:%d: %v", agencyID, cfg.Host, cfg.EnrollPort, err)
+				writeJSONError(w, http.StatusBadGateway, "Could not reach the TAK server's enrollment port")
+				return
+			}
+			if !trusted {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]interface{}{"needs_trust": true, "certificate": info})
+				return
+			}
+		}
+		if err := takEnrollPinned(&cfg, req.Password, fp, allowLocal); err != nil {
 			log.Printf("TAK [%s]: enrollment failed: %v", agencyID, err)
-			writeJSONError(w, http.StatusBadGateway, err.Error())
+			// The journal has the detail; the caller gets only what it can
+			// act on (not a map of what answers on which internal port).
+			msg := "Enrollment with the TAK server failed"
+			if strings.Contains(err.Error(), "rejected the username or password") {
+				msg = "TAK server rejected the username or password"
+			} else if strings.Contains(err.Error(), "not the one that was confirmed") {
+				msg = "The TAK server's certificate changed since you confirmed it. Try again"
+			}
+			writeJSONError(w, http.StatusBadGateway, msg)
 			return
 		}
 		log.Printf("TAK [%s]: enrolled with %s as %s", agencyID, cfg.Host, cfg.Username)

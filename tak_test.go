@@ -356,3 +356,43 @@ func TestTakGroupsListAndApply(t *testing.T) {
 	}
 	t.Fatalf("groups were not applied after connecting")
 }
+
+// Dashboard enrollment: the certificate is read first (nothing sent), the
+// password goes only to the confirmed certificate, and an agency admin cannot
+// aim the server at itself.
+func TestTakEnrollmentIsPinnedAndNotInternal(t *testing.T) {
+	f := startFakeTAK(t)
+	enrollPort, _ := strconv.Atoi(strings.Split(f.enroll.Listener.Addr().String(), ":")[1])
+	cfg := TakConfig{AgencyID: "ag", Host: "127.0.0.1", EnrollPort: enrollPort, Username: "dispatch"}
+
+	info, trusted, err := takProbeCert("127.0.0.1", enrollPort, true)
+	if err != nil || trusted || len(info.Fingerprint) != 64 {
+		t.Fatalf("probe: trusted=%v fp=%q err=%v", trusted, info.Fingerprint, err)
+	}
+	// Not confirmed and not publicly trusted: refused.
+	if err := takEnrollPinned(&cfg, "secret", "", true); err == nil {
+		t.Fatal("enrolled with an unconfirmed, untrusted certificate")
+	}
+	// A different certificate than the one confirmed: refused.
+	if err := takEnrollPinned(&cfg, "secret", strings.Repeat("0", 64), true); err == nil {
+		t.Fatal("enrolled against a certificate that was not the confirmed one")
+	}
+	if err := takEnrollPinned(&cfg, "secret", info.Fingerprint, true); err != nil {
+		t.Fatalf("enroll with the confirmed certificate: %v", err)
+	}
+	// An agency admin (allowLocal false) cannot reach loopback at all.
+	if _, _, err := takProbeCert("127.0.0.1", enrollPort, false); err == nil {
+		t.Fatal("probe reached loopback for a non-super admin")
+	}
+	for _, bad := range []string{"10.0.0.5:8443/x?", "http://tak", "tak.example/path", "", "a b"} {
+		if takHostAllowed(bad, 8089) == nil {
+			t.Errorf("host %q accepted", bad)
+		}
+	}
+	if takHostAllowed("tak.county.example", 8089, 8446, 8443) != nil || takHostAllowed("192.168.5.120", 8089) != nil {
+		t.Error("an ordinary host was refused")
+	}
+	if takHostAllowed("tak.example", 0) == nil || takHostAllowed("tak.example", 70000) == nil {
+		t.Error("a bad port was accepted")
+	}
+}
