@@ -1037,20 +1037,6 @@
                     </div>
                 </div>
 
-                <!-- Authentication -->
-                <div class="panel">
-                    <h3>Authentication</h3>
-                    <div class="settings-row">
-                        <div class="settings-info">
-                            <div class="settings-label">Require Authentication</div>
-                            <div class="settings-description">When enabled, clients must provide valid credentials to connect</div>
-                        </div>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="auth-toggle" onchange="toggleAuth()">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </div>
-                </div>
             </div>
 
         </main>
@@ -1154,10 +1140,15 @@
                     <div id="qrUsername" class="qr-value"></div>
                 </div>
                 <div class="qr-field">
-                    <div class="qr-label">Enrollment Key</div>
+                    <div class="qr-label">One-time Key</div>
                     <div id="qrPassword" class="qr-value mono"></div>
                 </div>
+                <div class="qr-field">
+                    <div class="qr-label">Server key fingerprint</div>
+                    <div id="qrServerKey" class="qr-value mono" style="font-size:11px;word-break:break-all;"></div>
+                </div>
                 <div id="qrExpiry" class="qr-expiry" style="display:none;"></div>
+                <div class="qr-label" style="margin-top:8px;">Works once, for one phone. That phone gets its own key, so the account password is unchanged and still works for the app and the dashboard. Scan again with a new QR code for another phone or app.</div>
             </div>
             <div class="modal-actions">
                 <button class="btn-secondary" onclick="closeModal('qrCodeModal')">Close</button>
@@ -1323,6 +1314,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=38"></script>
+    <script src="app.js?v=44"></script>
 </body>
 </html>

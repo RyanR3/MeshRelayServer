@@ -119,7 +119,6 @@ function navigateTo(pageName) {
     } else if (pageName === 'activity') {
         fetchActivityPage();
     } else if (pageName === 'settings') {
-        fetchAuthStatus();
         fetchVersionInfo();
         if (currentRole === 'super_admin') fetchGitHubTokenStatus();
         if (currentRole === 'super_admin' || currentRole === 'agency_admin') initFloorControlPanel();
@@ -207,7 +206,7 @@ function fetchTak() {
         .catch(err => showStatus('tak-status-msg', 'Failed to load: ' + err.message, 'error'));
 }
 
-function saveTak() {
+function saveTak(trustFingerprint) {
     const body = {
         host: document.getElementById('tak-host').value.trim(),
         stream_port: parseInt(document.getElementById('tak-stream-port').value, 10) || 8089,
@@ -222,9 +221,24 @@ function saveTak() {
     if (agency) body.agency_id = agency;
     const btn = document.getElementById('tak-save-btn');
     btn.disabled = true; btn.textContent = body.password ? 'Enrolling…' : 'Saving…';
+    if (trustFingerprint) body.trust_fingerprint = trustFingerprint;
     fetch('/api/my-agency/tak', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(r => r.json())
         .then(d => {
+            if (d.needs_trust && d.certificate) {
+                // The TAK server's certificate is not publicly trusted (normal
+                // for TAK). Nothing has been sent yet: the admin confirms the
+                // exact certificate, then the password goes only to it.
+                const c = d.certificate;
+                const fp = (c.fingerprint || '').toUpperCase().match(/.{1,2}/g).join(':');
+                const okToTrust = confirm('Confirm the TAK server\'s certificate before your password is sent.\n\n'
+                    + 'Server: ' + body.host + ':' + body.enroll_port + '\n'
+                    + 'Issued to: ' + c.subject + '\nIssued by: ' + c.issuer + '\nExpires: ' + new Date(c.not_after).toLocaleDateString() + '\n\n'
+                    + 'SHA-256 fingerprint:\n' + fp + '\n\n'
+                    + 'If you can, compare the fingerprint with the TAK server administrator. Continue only if this is your TAK server.');
+                if (okToTrust) { saveTak(c.fingerprint); } else { showStatus('tak-status-msg', 'Not connected: certificate not confirmed', 'error'); }
+                return;
+            }
             if (d.error) { showStatus('tak-status-msg', d.error, 'error'); return; }
             document.getElementById('tak-password').value = '';
             renderTakState(d);
@@ -687,6 +701,25 @@ function updateChannels(channels) {
 }
 
 // Update clients list
+// Which sign-in protocol a connected phone is using. "Secure" = the server is
+// verified by the phone and every packet is encrypted and checked. "Older
+// protocol" = an app from before that; it still works, less protected.
+function protocolBadge(c) {
+    if (c.console) return '';
+    return c.secure
+        ? ' <span class="guest-badge" style="background:rgba(63,185,80,0.15);color:#3FB950;border-color:rgba(63,185,80,0.35)" title="Secure protocol: the phone verifies this server and every packet is encrypted and checked">Secure</span>'
+        : ' <span class="guest-badge" title="This app uses the older sign-in protocol. It works, but is less protected. Update the app.">Older protocol</span>';
+}
+
+// The server's identity key: put in every enrollment QR so a phone knows the
+// real server from its first connection.
+let serverIdentity = null;
+function fetchServerIdentity() {
+    return fetch('/api/server-identity').then(r => r.ok ? r.json() : null)
+        .then(d => { if (d && d.public_key) serverIdentity = d; return serverIdentity; })
+        .catch(() => null);
+}
+
 function updateClients(clients) {
     const clientList = document.getElementById('client-list');
     const topCount = document.getElementById('top-clients-count');
@@ -708,7 +741,7 @@ function updateClients(clients) {
             <div class="client-item">
                 <div class="client-username">
                     ${escapeHtml(client.username)}${agencyLabel}
-                    <span class="client-channel">Ch ${escapeHtml(client.channel)}</span>
+                    <span class="client-channel">Ch ${escapeHtml(client.channel)}</span>${protocolBadge(client)}
                 </div>
                 <div class="client-info">
                     Connected ${escapeHtml(connectedTime)}
@@ -937,7 +970,7 @@ function renderOnlineClientsModal() {
         return `
             <div class="client-item">
                 <div class="client-username">${statusDotHtml(true)} ${escapeHtml(c.username)}${agency}
-                    <span class="client-channel">Ch ${escapeHtml(String(c.channel))}</span></div>
+                    <span class="client-channel">Ch ${escapeHtml(String(c.channel))}</span>${protocolBadge(c)}</div>
                 <div class="client-info">${since ? 'Connected ' + escapeHtml(since) : ''}${account}</div>
             </div>`;
     }).join('');
@@ -987,15 +1020,6 @@ function showStatus(elementId, message, type) {
 }
 
 // --- User Management ---
-
-function fetchAuthStatus() {
-    fetch('/api/auth/status')
-        .then(r => r.json())
-        .then(data => {
-            document.getElementById('auth-toggle').checked = data.auth_enabled;
-        })
-        .catch(err => console.error('Error fetching auth status:', err));
-}
 
 function fetchUsers() {
     let url = '/api/users';
@@ -1157,6 +1181,13 @@ function renderUsersTable(items) {
         const guestBadge = user.guest_expires_at
             ? `<div><span class="guest-badge" title="Guest of ${escapeHtml(user.invited_by || '?')} until ${escapeHtml(new Date(user.guest_expires_at).toLocaleString())}">Guest · ${guestLeftText}</span></div>`
             : '';
+        // Phones enrolled by one-time QR. "older app" keys accept a copy of
+        // their QR too, until "Sign out phones" removes them.
+        const devs = user.devices || [];
+        const legacyDevs = devs.filter(d => d.legacy).length;
+        const phonesBadge = devs.length
+            ? `<div><span class="guest-badge" title="${escapeHtml(devs.map(d => `Enrolled ${d.created_at ? new Date(d.created_at).toLocaleString() : '?'} from ${d.enrolled_from || '?'}${d.legacy ? ' (older app)' : ''}`).join('\n'))}">${devs.length} ${devs.length === 1 ? 'phone' : 'phones'}${legacyDevs ? ` · ${legacyDevs} older app` : ''}</span></div>`
+            : '';
         const roleCell = isDispatch
             ? `<span class="link-status" style="background:rgba(31,111,235,0.15);color:#58A6FF;border-color:rgba(31,111,235,0.3);">Dispatch</span>`
             : `<select class="role-select" onchange="updateUserRole(${jsArg(user.username)}, this.value, ${jsArg(user.agency_id || 'default')})" data-current="${escapeHtml(role)}">
@@ -1168,12 +1199,13 @@ function renderUsersTable(items) {
             ? `<button class="btn-action delete" onclick="deleteUser(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Delete</button>`
             : `<button class="btn-action qr" onclick="showQRCode(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">QR Code</button>
                <button class="btn-action edit" onclick="showEditUser(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Edit</button>
+               ${devs.length || online ? `<button class="btn-action edit" title="Remove this account's QR phone keys and disconnect every phone signed in to it" onclick="signOutPhones(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Sign out phones</button>` : ''}
                <button class="btn-action delete" onclick="deleteUser(${jsArg(user.username)}, ${jsArg(user.agency_id || 'default')})">Delete</button>`;
         return `
             <tr>
                 <td><div class="user-avatar" style="background: ${avatarColor};">${escapeHtml(initial)}</div></td>
                 <td class="user-name-cell">${safeName || '<span style="color:#8B949E;">—</span>'}</td>
-                <td class="nowrap"><strong>${safeUsername}</strong>${guestBadge}</td>
+                <td class="nowrap"><strong>${safeUsername}</strong>${guestBadge}${phonesBadge}</td>
                 <td style="text-align: center;">${statusDot}</td>
                 ${agencyCol}
                 <td>${roleCell}</td>
@@ -1864,6 +1896,22 @@ function saveUserEdits() {
     });
 }
 
+// --- Sign out phones ---
+
+function signOutPhones(username, agency) {
+    if (!confirm(`Sign out every phone using "${username}"?\n\nPhones enrolled by QR code lose their key and need a new QR code. Phones signed in with the password are disconnected and must sign in again. The password itself keeps working — reset it too if it may have been shared.`)) return;
+    const agencyParam = agency ? `?agency=${encodeURIComponent(agency)}` : '';
+    fetch(`/api/users/${encodeURIComponent(username)}/sign-out-phones${agencyParam}`, { method: 'POST' })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed');
+        showStatus('user-status', `Signed out phones for "${username}"`, 'success');
+        addLog(`Signed out phones for "${username}" (${data.removed || 0} QR key(s) removed)`, 'success');
+        fetchUsers();
+    })
+    .catch(err => showStatus('user-status', `Failed to sign out phones: ${err.message}`, 'error'));
+}
+
 // --- Delete User ---
 
 function deleteUser(username, agency) {
@@ -1898,15 +1946,25 @@ function deleteUser(username, agency) {
 
 // --- Update User Role ---
 
-function updateUserRole(username, newRole, agency) {
+function updateUserRole(username, newRole, agency, dashboardPassword) {
     const agencyParam = agency ? `?agency=${encodeURIComponent(agency)}` : '';
+    const body = { role: newRole };
+    if (dashboardPassword) body.password = dashboardPassword;
     fetch(`/api/users/${encodeURIComponent(username)}/role${agencyParam}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: newRole })
+        body: JSON.stringify(body)
     })
     .then(r => r.json().then(data => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
+        if (!ok && data.error === 'needs_dashboard_password') {
+            // First dashboard login for this account: the admin chooses its
+            // password (never copied from the app or a QR code).
+            const pw = prompt(`"${username}" has no dashboard login yet.\n\nEnter a dashboard password for them (at least 12 characters):`);
+            if (!pw) { fetchUsers(); return null; }
+            updateUserRole(username, newRole, agency, pw);
+            return null;
+        }
         if (!ok) throw new Error(data.error || 'Failed');
         const roleLabel = newRole === 'super_admin' ? 'Super Admin' : newRole === 'admin' ? 'Admin' : 'User';
         showStatus('user-status', `Role updated to "${roleLabel}" for "${username}"`, 'success');
@@ -1966,6 +2024,10 @@ function showQRCodeBasic(username, agencyId) {
         username: username
     };
     if (agency) qrObj.agency_id = agency;
+    // Server identity key (older apps ignore it).
+    if (serverIdentity && serverIdentity.public_key) qrObj.spk = serverIdentity.public_key;
+    const fpEl = document.getElementById('qrServerKey');
+    if (fpEl) fpEl.textContent = serverIdentity ? serverIdentity.fingerprint.toUpperCase().match(/.{1,4}/g).join(' ') : 'not available';
     const qrData = JSON.stringify(qrObj);
 
     new QRCode(container, {
@@ -1998,6 +2060,10 @@ function showQRCodeWithEnrollment(username, enrollmentToken, agencyId) {
         password: enrollmentToken
     };
     if (agency) qrObj.agency_id = agency;
+    // Server identity key (older apps ignore it).
+    if (serverIdentity && serverIdentity.public_key) qrObj.spk = serverIdentity.public_key;
+    const fpEl = document.getElementById('qrServerKey');
+    if (fpEl) fpEl.textContent = serverIdentity ? serverIdentity.fingerprint.toUpperCase().match(/.{1,4}/g).join(' ') : 'not available';
     const qrData = JSON.stringify(qrObj);
 
     new QRCode(container, {
@@ -2024,7 +2090,7 @@ function startExpiryCountdown(seconds) {
     function updateExpiry() {
         if (remaining <= 0) {
             expiryEl.className = 'qr-expiry expired';
-            expiryEl.textContent = 'Enrollment key expired — generate a new QR code';
+            expiryEl.textContent = 'Expired — generate a new QR code';
             clearInterval(qrExpiryInterval);
             qrExpiryInterval = null;
             return;
@@ -2035,10 +2101,10 @@ function startExpiryCountdown(seconds) {
 
         if (remaining <= 120) {
             expiryEl.className = 'qr-expiry expiring';
-            expiryEl.textContent = `Enrollment key expires in ${timeStr}`;
+            expiryEl.textContent = `One phone only · expires in ${timeStr}`;
         } else {
             expiryEl.className = 'qr-expiry active';
-            expiryEl.textContent = `Enrollment key expires in ${timeStr}`;
+            expiryEl.textContent = `One phone only · expires in ${timeStr}`;
         }
         remaining--;
     }
@@ -2385,6 +2451,7 @@ function renderZelloBridges(bridges) {
             </div>
             <div class="zb-actions">
                 <button class="btn-secondary zb-toggle" onclick="toggleZelloBridge(${jsArg(b.id)})">${b.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn-action" title="Guests can always listen. This decides whether they may transmit toward Zello." onclick="zelloGuests(${jsArg(b.id)}, ${b.allow_guests ? 'true' : 'false'})">Guests: ${b.allow_guests ? 'can transmit' : 'listen only'}</button>
                 <button class="btn-action" onclick="editZelloBridge(${jsArg(b)})">Edit</button>
                 <button class="btn-action delete" onclick="deleteZelloBridge(${jsArg(b.id)})">Delete</button>
             </div>
@@ -2715,6 +2782,16 @@ function toggleZelloBridge(id) {
     }).catch(err => showStatus('zello-bridges-status', 'Failed: ' + err.message, 'error'));
 }
 
+function zelloGuests(id, allowed) {
+    if (!allowed && !confirm('Let guests transmit on this Zello bridge?')) return;
+    fetch('/api/zello-bridges/' + id + '/guests', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { showStatus('zello-bridges-status', data.error, 'error'); return; }
+        fetchZelloBridges();
+    }).catch(err => showStatus('zello-bridges-status', 'Failed: ' + err.message, 'error'));
+}
+
 function deleteZelloBridge(id) {
     if (!confirm('Delete this Zello bridge? It will disconnect from Zello.')) return;
     fetch('/api/zello-bridges/' + id, { method: 'DELETE' })
@@ -2894,28 +2971,6 @@ function deleteGuestEvent(id, name) {
     })
     .catch(err => {
         showStatus('guest-events-status', 'Failed to end event: ' + err.message, 'error');
-    });
-}
-
-// --- Auth Toggle ---
-
-function toggleAuth() {
-    const toggle = document.getElementById('auth-toggle');
-    const action = toggle.checked ? 'enable' : 'disable';
-    if (!confirm(`Are you sure you want to ${action} authentication? This affects all client connections.`)) {
-        toggle.checked = !toggle.checked; // revert the toggle
-        return;
-    }
-
-    fetch('/api/auth/toggle', { method: 'POST' })
-    .then(r => r.json())
-    .then(data => {
-        const status = data.auth_enabled ? 'enabled' : 'disabled';
-        addLog(`Authentication ${status}`, 'info');
-    })
-    .catch(err => {
-        addLog(`Failed to toggle auth: ${err.message}`, 'error');
-        fetchAuthStatus();
     });
 }
 
@@ -3583,7 +3638,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!valid) return;
 
         connectWebSocket();
-        fetchAuthStatus();
+        fetchServerIdentity();
         fetchUsers();
         fetchVersionInfo();
         if (currentRole === 'super_admin') {
@@ -4603,6 +4658,19 @@ function lmrToggle(id, resume) {
         .catch(e => showStatus('lmr-status', 'Failed: ' + e.message, 'error'));
 }
 
+// Guests on a bridge: listen only (default) or allowed to key the radio.
+function lmrGuests(id, allowed) {
+    if (!allowed && !confirm('Let guests transmit on this bridge? Guest accounts (invited from a phone, or guest-event logins) will be able to key the radio.')) return;
+    fetch('/api/my-agency/lmr-bridges/' + id + '/guests', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('lmr-status', d.error, 'error'); return; }
+            showStatus('lmr-status', d.allow_guests ? 'Guests can now transmit on this bridge' : 'Guests are listen-only on this bridge', 'success');
+            fetchAgencyLmrBridges();
+        })
+        .catch(e => showStatus('lmr-status', 'Failed: ' + e.message, 'error'));
+}
+
 function fetchAgencyLmrBridges() {
     const arr = v => Array.isArray(v) ? v : [];
     Promise.all([
@@ -4709,6 +4777,11 @@ function lmrRenderAgencyBridges() {
                         onclick="lmrToggle(${jsArg(b.id)}, ${paused ? 'true' : 'false'})"
                         title="${paused ? 'Resume: the gateway may transmit again' : 'Pause: stop all audio to the gateway so the radio cannot be keyed'}">
                     ${paused ? 'Resume' : 'Pause'}
+                </button>
+                <button class="btn-action" style="margin-right:8px"
+                        onclick="lmrGuests(${jsArg(b.id)}, ${b.allow_guests ? 'true' : 'false'})"
+                        title="Guests (invited from a phone, or guest-event logins) can always listen. This decides whether they may key the radio.">
+                    Guests: ${b.allow_guests ? 'can transmit' : 'listen only'}
                 </button>
                 <button class="ma-patch-remove" onclick="lmrDelete(${jsArg(b.id)},${jsArg(b.channel_name || b.name)})"
                         title="Delete this bridge">&times;</button>
@@ -5031,7 +5104,7 @@ function renderAgencyEmergency() {
                     <span class="em-dot"></span>
                     <span class="em-user">${escapeHtml(e.user)}</span>
                     <span class="em-meta">was on ${escapeHtml(e.channel_name)} · since ${new Date(e.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                    <button class="btn-secondary" onclick="clearAgencyEmergency(${i}, '${escapeHtml(e.user).replace(/'/g, "\\'")}')">Clear</button>
+                    <button class="btn-secondary" onclick="clearAgencyEmergency(${i}, ${jsArg(e.user)})">Clear</button>
                 </div>`).join('') : '<div class="list-hint">No active emergencies.</div>';
         return `
             <div class="panel chn-panel" style="margin-bottom: 20px;">
