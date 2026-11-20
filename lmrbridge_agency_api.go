@@ -32,7 +32,8 @@ type lmrAgencyView struct {
 	Channel     int    `json:"channel"`
 	ChannelName string `json:"channel_name"`
 	Enabled     bool   `json:"enabled"`
-	Access      string `json:"access"` // "owner" | "shared"
+	AllowGuests bool   `json:"allow_guests"` // guests may transmit on this bridge
+	Access      string `json:"access"`       // "owner" | "shared"
 
 	// Owner-only.
 	Username   string              `json:"username,omitempty"`
@@ -64,7 +65,7 @@ func (s *Server) handleGetMyLMRBridges(w http.ResponseWriter, r *http.Request) {
 		}
 		v := lmrAgencyView{
 			ID: b.ID, Name: b.Name, Channel: b.Channel,
-			ChannelName: b.displayName(), Enabled: b.Enabled,
+			ChannelName: b.displayName(), Enabled: b.Enabled, AllowGuests: b.AllowGuests,
 		}
 		if owner || isSuper {
 			v.Access = "owner"
@@ -120,6 +121,10 @@ func (s *Server) handleCreateMyLMRBridge(w http.ResponseWriter, r *http.Request)
 	}
 	if req.Username == "" || req.Password == "" {
 		writeJSONError(w, http.StatusBadRequest, "gateway username and password are required")
+		return
+	}
+	if err := validateNewPassword(req.Password); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	channelName := req.ChannelName
@@ -413,6 +418,37 @@ func (s *Server) handleDeleteMyLMRBridge(w http.ResponseWriter, r *http.Request)
 }
 
 // handleToggleMyLMRBridge pauses or resumes a bridge the caller's agency owns.
+// handleGuestsMyLMRBridge flips whether guest accounts may TRANSMIT on a
+// bridge (bridge_tx.go). Owner agency or super admin.
+func (s *Server) handleGuestsMyLMRBridge(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+	mine, isSuper := s.callerAgency(r)
+
+	s.mu.Lock()
+	b := s.lmrBridges[id]
+	if b == nil {
+		s.mu.Unlock()
+		writeJSONError(w, http.StatusNotFound, "bridge not found")
+		return
+	}
+	if !b.ownedBy(mine) && !isSuper {
+		s.mu.Unlock()
+		writeJSONError(w, http.StatusForbidden, "only the owning agency can change this bridge")
+		return
+	}
+	b.AllowGuests = !b.AllowGuests
+	allow := b.AllowGuests
+	s.mu.Unlock()
+
+	if err := s.saveLMRBridges(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
+		return
+	}
+	log.Printf("LMR: bridge %s guests %s by agency %s", id, map[bool]string{true: "ALLOWED to transmit", false: "blocked from transmitting"}[allow], mine)
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "allow_guests": allow})
+}
+
 // Paused = disabled: the channel is withdrawn from phones, the gateway is told
 // (it inhibits its transmitter), and the server relays nothing to the gateway,
 // so the radio cannot be keyed even if the bridge host has gone wrong. This is

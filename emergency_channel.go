@@ -320,7 +320,9 @@ func (s *Server) forwardEmergencyToLMR(agencyID string, audioData []byte) {
 	var gw *Client
 	if a := s.agencies[agencyID]; a != nil && a.EmergencyLMRBridge != "" {
 		if b := s.lmrBridges[a.EmergencyLMRBridge]; b != nil && b.Enabled && b.servesAgency(agencyID) {
-			if c := s.clients[userKey(b.ownerAgency(), b.Username)]; c != nil && c.Addr != nil {
+			// Only the bridge's own gateway account, never a client that
+			// merely holds its callsign.
+			if c := s.clients[userKey(b.ownerAgency(), b.Username)]; c != nil && c.Addr != nil && s.ownLMRBridge(c) != nil {
 				gw, addr = c, c.Addr
 			}
 		}
@@ -328,6 +330,10 @@ func (s *Server) forwardEmergencyToLMR(agencyID string, audioData []byte) {
 	paused := gw != nil && s.gatewayPaused(gw)
 	s.mu.RUnlock()
 	if addr == nil || paused {
+		return
+	}
+	// Segmented: the radio is never keyed without a break (bridge_tx.go).
+	if !s.emergencyLMRAllowed(agencyID, time.Now()) {
 		return
 	}
 	s.sendPacket(audioData, addr)

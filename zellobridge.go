@@ -67,9 +67,12 @@ type ZelloBridge struct {
 	ZelloChannel  string         `json:"zello_channel,omitempty"` // legacy single mapping
 	MeshChannel   int            `json:"mesh_channel,omitempty"`  // legacy single mapping
 
-	Enabled   bool   `json:"enabled"`
-	CreatedAt string `json:"created_at"`
-	CreatedBy string `json:"created_by"`
+	Enabled bool `json:"enabled"`
+	// AllowGuests lets guest accounts transmit toward Zello on this bridge's
+	// channels. Off by default (bridge_tx.go).
+	AllowGuests bool   `json:"allow_guests,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	CreatedBy   string `json:"created_by"`
 
 	// --- Runtime status (not persisted) ---
 	Status    string `json:"status,omitempty"`     // "disconnected" | "connecting" | "connected" | "error"
@@ -198,18 +201,19 @@ func (m ZelloMapping) servesAgency(agencyID string) bool {
 // zelloBridgePublic is the JSON shape returned to the dashboard — never leaks
 // the password or full auth token.
 type zelloBridgePublic struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	Network   string         `json:"network"`
-	Username  string         `json:"username"`
-	HasAuth   bool           `json:"has_auth"` // whether a token/password is set (without revealing it)
-	AgencyID  string         `json:"agency_id"`
-	Mappings  []ZelloMapping `json:"mappings"` // zello_channel <-> mesh_channel pairs
-	Enabled   bool           `json:"enabled"`
-	Status    string         `json:"status"`
-	LastError string         `json:"last_error,omitempty"`
-	CreatedAt string         `json:"created_at"`
-	CreatedBy string         `json:"created_by"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Network     string         `json:"network"`
+	Username    string         `json:"username"`
+	HasAuth     bool           `json:"has_auth"` // whether a token/password is set (without revealing it)
+	AgencyID    string         `json:"agency_id"`
+	Mappings    []ZelloMapping `json:"mappings"` // zello_channel <-> mesh_channel pairs
+	Enabled     bool           `json:"enabled"`
+	AllowGuests bool           `json:"allow_guests"`
+	Status      string         `json:"status"`
+	LastError   string         `json:"last_error,omitempty"`
+	CreatedAt   string         `json:"created_at"`
+	CreatedBy   string         `json:"created_by"`
 }
 
 func (b *ZelloBridge) public() zelloBridgePublic {
@@ -222,7 +226,7 @@ func (b *ZelloBridge) public() zelloBridgePublic {
 	return zelloBridgePublic{
 		ID: b.ID, Name: b.Name, Network: b.Network,
 		Username: b.Username, HasAuth: b.AuthToken != "" || b.Password != "",
-		AgencyID: b.AgencyID, Mappings: b.effectiveMappings(), Enabled: b.Enabled,
+		AgencyID: b.AgencyID, Mappings: b.effectiveMappings(), Enabled: b.Enabled, AllowGuests: b.AllowGuests,
 		Status: status, LastError: lastErr, CreatedAt: b.CreatedAt, CreatedBy: b.CreatedBy,
 	}
 }
@@ -1401,6 +1405,27 @@ func (s *Server) handleZelloBridgeChannels(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "channels": channels})
+}
+
+// handleGuestsZelloBridge flips whether guest accounts may transmit toward
+// Zello on this bridge's channels (bridge_tx.go).
+func (s *Server) handleGuestsZelloBridge(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+	s.mu.Lock()
+	b, ok := s.zelloBridges[id]
+	if !ok {
+		s.mu.Unlock()
+		zelloErr(w, http.StatusNotFound, "bridge not found")
+		return
+	}
+	b.AllowGuests = !b.AllowGuests
+	allow := b.AllowGuests
+	s.mu.Unlock()
+	if err := s.saveZelloBridges(); err != nil {
+		log.Printf("Warning: failed to save zello bridges: %v", err)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "allow_guests": allow})
 }
 
 func (s *Server) handleToggleZelloBridge(w http.ResponseWriter, r *http.Request) {

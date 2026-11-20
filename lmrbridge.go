@@ -77,6 +77,11 @@ type LMRBridge struct {
 	Enabled   bool   `json:"enabled"`
 	CreatedAt string `json:"created_at"`
 	CreatedBy string `json:"created_by"`
+
+	// AllowGuests lets guest accounts (invited from the app, or guest-event
+	// logins) TRANSMIT on this bridge's channel. Off by default: a guest can
+	// listen, but cannot key the radio (bridge_tx.go).
+	AllowGuests bool `json:"allow_guests,omitempty"`
 }
 
 // ownerAgency is the agency the gateway's own client record belongs to.
