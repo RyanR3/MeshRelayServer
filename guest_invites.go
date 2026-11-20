@@ -131,9 +131,6 @@ func (s *Server) createInvitedGuest(req *GuestInviteRequest, addr *net.UDPAddr) 
 	fail := func(msg string) *GuestInviteResponse {
 		return &GuestInviteResponse{Message: msg}
 	}
-	if !s.config.AuthEnabled {
-		return fail("This server has no user accounts, so there's nothing to invite to — anyone can connect")
-	}
 	if !s.isAuthenticated(addr) {
 		return fail("Sign in to the server first")
 	}
@@ -281,10 +278,7 @@ func (s *Server) removeExpiredInvitedGuests() []expiredGuestKick {
 		log.Printf("Guest %s [%s] (invited by %s) expired, removed", u.Username, u.AgencyID, u.InvitedBy)
 		s.activityLog.Add("guest_expired", u.Username,
 			fmt.Sprintf("Guest invited by %s expired", u.InvitedBy), u.AgencyID)
-		if c, ok := s.clients[key]; ok {
-			s.removeClient(c)
-			kicks = append(kicks, expiredGuestKick{client: c, addr: c.Addr})
-		}
+		kicks = append(kicks, s.takeAccountSessionsLocked(key)...)
 	}
 	if removed > 0 {
 		if err := s.saveUsers(); err != nil {
@@ -295,14 +289,24 @@ func (s *Server) removeExpiredInvitedGuests() []expiredGuestKick {
 }
 
 func (s *Server) finishExpiredGuestKicks(kicks []expiredGuestKick) {
+	s.finishSessionKicks(kicks, "Guest access expired")
+}
+
+// finishSessionKicks tells each ended session why (a revoked, not failed,
+// sign-in: the app stops instead of retrying) and finishes the removal.
+// Call without s.mu held.
+func (s *Server) finishSessionKicks(kicks []expiredGuestKick, reason string) {
 	agencies := map[string]bool{}
 	for _, k := range kicks {
 		if k.addr != nil {
 			s.sendPacket(SerializeAuthResponse(&AuthResponsePacket{
 				Success: false,
 				Revoked: true,
-				Message: "Guest access expired",
+				Message: reason,
 			}), k.addr)
+		}
+		if k.client == nil {
+			continue
 		}
 		s.clientRemovedCleanup(k.client)
 		agencies[k.client.AgencyID] = true

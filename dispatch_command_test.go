@@ -23,7 +23,7 @@ func locationPayload(lat, lon float64) []byte {
 
 func TestLocationReportShowsOnConsole(t *testing.T) {
 	s, _, _, _ := dispatchTestServer(t)
-	s.authenticatedAddrs = map[string]string{}
+	signInAll(s)
 	alice := s.clients[userKey("ag", "alice")]
 
 	p, err := ParseLocationReport(locationPayload(41.65, -74.69))

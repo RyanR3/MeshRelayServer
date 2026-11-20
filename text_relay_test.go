@@ -40,6 +40,7 @@ func TestPrivateTextGoesToRecipientOnly(t *testing.T) {
 		ch.Clients[userKey("a", c.Username)] = c
 	}
 	s.channels[channelKey("a", 1)] = ch
+	signInAll(s)
 	var got []int
 	s.testFloorSink = func(to *net.UDPAddr, data []byte) { got = append(got, to.Port) }
 

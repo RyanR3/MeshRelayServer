@@ -63,7 +63,6 @@ func newSecTestServer(t *testing.T) (*Server, *secSink) {
 	dir := t.TempDir()
 	s := &Server{
 		config: &Config{
-			AuthEnabled:   true,
 			UsersFile:     filepath.Join(dir, "users.json"),
 			AgenciesFile:  filepath.Join(dir, "agencies.json"),
 			WebAdminsFile: filepath.Join(dir, "web_admins.json"),
@@ -76,7 +75,6 @@ func newSecTestServer(t *testing.T) (*Server, *secSink) {
 		authenticatedAddrs: map[string]string{},
 		authAccounts:       map[string]string{},
 		lastChannel:        map[string]int{},
-		pendingChallenges:  map[string]pendingChallenge{},
 		enrollmentTokens:   map[string]*EnrollmentToken{},
 		guestEvents:        map[string]*GuestEvent{},
 		webAdmins:          map[string]*WebAdmin{},
@@ -177,8 +175,10 @@ func TestEnrollmentTokenIsBoundToItsAgency(t *testing.T) {
 	if s.users[userKey("a2", "bob")].PasswordHash != a2Hash {
 		t.Fatal("a2's bob's password changed by a1's token")
 	}
-	if s.users[userKey("a1", "bob")].PasswordHash != hashPassword(token) {
-		t.Fatal("a1's bob should now have the token bound as the PTT password")
+	// The QR never replaces the password; this (older-app) login bound the
+	// token as a legacy phone key instead.
+	if b := s.users[userKey("a1", "bob")]; b.PasswordHash != hashPassword("a1-password") || len(b.Devices) != 1 || !b.Devices[0].Legacy {
+		t.Fatal("a1's bob: password must be unchanged and the token kept as one legacy phone key")
 	}
 
 	// No agency + a2's own password: the password picks a2, not map order.
@@ -186,7 +186,7 @@ func TestEnrollmentTokenIsBoundToItsAgency(t *testing.T) {
 	if got := s.authenticatedAddrs[udp(5003).String()]; got != "a2" {
 		t.Fatalf("password login landed in agency %q, want a2", got)
 	}
-	// The token keeps working for its own account.
+	// The older app's phone keeps working with the token (its legacy key).
 	mustLogin(t, s, sink, udp(5004), "bob", "a1", token)
 }
 

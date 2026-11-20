@@ -4,10 +4,12 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,105 +108,153 @@ func TestManagedServerRefusesSelfUpdate(t *testing.T) {
 
 func TestDashboardLoginLockout(t *testing.T) {
 	s := newWebTestServer(t)
-	s.loginLimit = newFailLimiter(30, 3, time.Minute, time.Minute)
+	s.loginLimit = newSignInGuard(3, 6, time.Minute, time.Minute)
 	hash, _ := hashPasswordSecure("right-password")
 	s.webAdmins[userKey("fire", "chief2")] = &WebAdmin{Username: "chief2", AgencyID: "fire", Role: "agency_admin", PasswordHash: hash}
 	h := s.webHandler()
-	try := func(user, pw string) *httptest.ResponseRecorder {
-		return doReq(h, "POST", "/api/login", "", `{"username":"`+user+`","password":"`+pw+`","agency_id":"fire"}`)
+	from := func(ip, user, pw string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"username":"`+user+`","password":"`+pw+`","agency_id":"fire"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = ip + ":40000"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
 	}
 
+	// The chief signs in from the station: that address is now known for the account.
+	if rec := from("198.51.100.7", "chief2", "right-password"); rec.Code != 200 {
+		t.Fatalf("login = %d %s", rec.Code, rec.Body)
+	}
 	// Unknown user and wrong password look the same.
-	a, b := try("nobody", "x"), try("chief2", "x")
+	a, b := from("203.0.113.1", "nobody", "x"), from("203.0.113.1", "chief2", "x")
 	if a.Code != 401 || b.Code != 401 || a.Body.String() != b.Body.String() {
 		t.Fatalf("unknown %d %q vs wrong %d %q", a.Code, a.Body, b.Code, b.Body)
 	}
-	try("chief2", "y")
-	try("chief2", "z") // 3rd wrong password for the account: locked
-	if rec := try("chief2", "right-password"); rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
-		t.Fatalf("locked account accepted: %d %s", rec.Code, rec.Body)
+	// A third wrong password locks THAT ADDRESS...
+	from("203.0.113.1", "chief2", "y")
+	if rec := from("203.0.113.1", "chief2", "right-password"); rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("locked address accepted: %d %s", rec.Code, rec.Body)
 	}
-
-	// Lock expires; a success then clears the count.
-	now := time.Now().Add(2 * time.Minute)
-	s.loginLimit.now = func() time.Time { return now }
-	if rec := try("chief2", "right-password"); rec.Code != 200 {
-		t.Fatalf("login after the lock expired = %d %s", rec.Code, rec.Body)
+	// ...and nobody else: the account is not locked out for its real user.
+	if rec := from("198.51.100.7", "chief2", "right-password"); rec.Code != 200 {
+		t.Fatalf("a guesser locked the real user out: %d %s", rec.Code, rec.Body)
 	}
-	if rec := try("chief2", "x"); rec.Code != 401 {
-		t.Fatalf("one wrong password after a success = %d", rec.Code)
+	// A guess from many addresses puts the account under guard: strangers
+	// are refused even with the right password, the known address is not.
+	for i := 2; i < 8; i++ {
+		from("203.0.113."+strconv.Itoa(i), "chief2", "bad")
+	}
+	if rec := from("203.0.113.99", "chief2", "right-password"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("guarded account accepted a new address: %d", rec.Code)
+	}
+	if rec := from("198.51.100.7", "chief2", "right-password"); rec.Code != 200 {
+		t.Fatalf("guarded account refused its known address: %d %s", rec.Code, rec.Body)
+	}
+	// An oversized body is refused before any password check.
+	big := httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"username":"a","password":"`+strings.Repeat("x", 40000)+`","agency_id":"fire"}`))
+	big.RemoteAddr = "192.0.2.50:1"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, big)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized login body = %d", rec.Code)
 	}
 }
 
 func TestPhoneAuthLockoutAndUniformErrors(t *testing.T) {
 	s, sink := newSecTestServer(t)
-	s.pttAuthLimit = newFailLimiter(30, 3, time.Minute, time.Minute)
+	s.pttAuthLimit = newSignInGuard(3, 6, time.Minute, time.Minute)
 	addUser(s, "a1", "medic", "pw")
-	addr := udp(41000)
+	station := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 41000}
+	bad := func(i int) *net.UDPAddr { return &net.UDPAddr{IP: net.IPv4(203, 0, 113, byte(i)), Port: 41000} }
 
-	reply := func() string {
-		for _, p := range sink.take(addr) {
+	reply := func(a *net.UDPAddr) string {
+		for _, p := range sink.take(a) {
 			if p[0] == PacketTypeAuthResponse {
 				return string(p)
 			}
 		}
 		return ""
 	}
-	if login(t, s, sink, addr, "ghost", "a1", "pw") {
+	if login(t, s, sink, bad(1), "ghost", "a1", "pw") {
 		t.Fatal("unknown user signed in")
 	}
-	if !login(t, s, sink, addr, "medic", "a1", "pw") {
+	if !login(t, s, sink, station, "medic", "a1", "pw") {
 		t.Fatal("right password refused")
 	}
 
 	// Same reply text for an unknown user and a wrong password.
-	s.handleAuthChallengeRequest(&AuthChallengeRequestPacket{Username: "ghost", AgencyID: "a1"}, addr)
-	sink.take(addr)
-	s.handleAuthRequest(&AuthRequestPacket{Username: "ghost", PasswordHash: "00", AgencyID: "a1"}, addr)
-	unknown := reply()
-	s.handleAuthChallengeRequest(&AuthChallengeRequestPacket{Username: "medic", AgencyID: "a1"}, addr)
-	sink.take(addr)
-	s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: "00", AgencyID: "a1"}, addr)
-	wrong := reply()
+	s.handleAuthRequest(&AuthRequestPacket{Username: "ghost", PasswordHash: "00", AgencyID: "a1"}, bad(2))
+	unknown := reply(bad(2))
+	s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: "00", AgencyID: "a1"}, bad(3))
+	wrong := reply(bad(3))
 	if unknown == "" || unknown != wrong {
 		t.Fatalf("unknown user %q vs wrong password %q", unknown, wrong)
 	}
 
-	// Two more wrong passwords for medic (3 in all) lock the account,
-	// from any address, even with the right password.
-	login(t, s, sink, addr, "medic", "a1", "bad")
-	login(t, s, sink, addr, "medic", "a1", "bad")
-	if login(t, s, sink, udp(41001), "medic", "a1", "pw") {
-		t.Fatal("locked account signed in")
+	// Three wrong passwords lock the guesser's ADDRESS (it gets no more
+	// challenges), not the account: the station still signs in.
+	g := bad(10)
+	for i := 0; i < 3; i++ {
+		s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: "00", AgencyID: "a1"}, g)
+	}
+	sink.take(g)
+	s.handleAuthChallengeRequest(&AuthChallengeRequestPacket{Username: "medic", AgencyID: "a1"}, g)
+	if len(sink.take(g)) != 0 {
+		t.Fatal("a locked address was still given a challenge")
+	}
+	if !login(t, s, sink, station, "medic", "a1", "pw") {
+		t.Fatal("a guesser locked the real unit out")
+	}
+
+	// A junk agency name does not give a fresh counter: the failures count
+	// against the account the request resolves to.
+	for i := 20; i < 26; i++ {
+		s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: "00", AgencyID: "junk" + strconv.Itoa(i)}, bad(i))
+	}
+	// Now guarded: a new address is refused even with the right password,
+	// the station (known for this account) is not.
+	if login(t, s, sink, bad(40), "medic", "a1", "pw") {
+		t.Fatal("guarded account accepted a new address")
+	}
+	if !login(t, s, sink, station, "medic", "a1", "pw") {
+		t.Fatal("guarded account refused its known address")
 	}
 	now := time.Now().Add(2 * time.Minute)
-	s.pttAuthLimit.now = func() time.Time { return now }
-	if !login(t, s, sink, udp(41001), "medic", "a1", "pw") {
-		t.Fatal("lock did not expire")
+	s.pttAuthLimit.acct.now = func() time.Time { return now }
+	s.pttAuthLimit.ips.now = func() time.Time { return now }
+	if !login(t, s, sink, bad(40), "medic", "a1", "pw") {
+		t.Fatal("guard did not expire")
 	}
 }
 
-func TestChallengesExpireAndAreCapped(t *testing.T) {
-	s, _ := newSecTestServer(t)
+// Challenges are stateless: a flood stores nothing, and a nonce only works
+// for the address it was made for, for a short time.
+func TestChallengesAreStatelessAndBound(t *testing.T) {
 	now := time.Now()
-	var n [32]byte
-	n[0] = 7
-	s.storeChallengeLocked("a:1", n, now.Add(-time.Minute))
-	if _, ok := s.takeChallengeLocked("a:1", now); ok {
-		t.Fatal("stale challenge accepted")
+	a, b := "198.51.100.7:5000", "198.51.100.7:5001"
+	n := challengeNonce(a, now)
+	if n == challengeNonce(b, now) {
+		t.Fatal("two addresses got the same nonce")
 	}
-	if len(s.pendingChallenges) != 0 {
-		t.Fatal("stale challenge not removed")
+	ok := func(addr string, at time.Time) bool {
+		for _, c := range challengeNonces(addr, at) {
+			if c == n {
+				return true
+			}
+		}
+		return false
 	}
-	for i := 0; i < maxChallenge; i++ {
-		s.pendingChallenges[string(rune(i))+"x"] = pendingChallenge{at: now}
+	if !ok(a, now) || !ok(a, now.Add(challengeSlot)) {
+		t.Fatal("a fresh nonce was not accepted")
 	}
-	if s.storeChallengeLocked("new:1", n, now) {
-		t.Fatal("challenge table grew past its cap with live entries")
+	if ok(a, now.Add(2*challengeSlot+time.Second)) {
+		t.Fatal("a stale nonce was accepted")
 	}
-	// Once they are stale, room is made.
-	if !s.storeChallengeLocked("new:1", n, now.Add(time.Minute)) || len(s.pendingChallenges) != 1 {
-		t.Fatalf("stale challenges not pruned: %d left", len(s.pendingChallenges))
+	if ok(b, now) {
+		t.Fatal("a nonce was accepted from another address")
+	}
+	if guardAddr("2001:db8:1:2:aaaa::1") != guardAddr("2001:db8:1:2:bbbb::9") || guardAddr("2001:db8:1:3::1") == guardAddr("2001:db8:1:2::1") {
+		t.Fatal("IPv6 addresses are not grouped by /64")
 	}
 }
 

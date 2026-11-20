@@ -18,7 +18,7 @@ func guestTestServer(t *testing.T) (*Server, *net.UDPAddr, map[string][][]byte) 
 	t.Helper()
 	s, sent := newFloorTestServer(t, "alice")
 	dir := t.TempDir()
-	s.config = &Config{AuthEnabled: true, UsersFile: dir + "/users.json", AgenciesFile: dir + "/agencies.json"}
+	s.config = &Config{UsersFile: dir + "/users.json", AgenciesFile: dir + "/agencies.json"}
 	s.activityLog = NewActivityLog(dir+"/activity.json", 100)
 	s.users = map[string]*UserAccount{
 		userKey("ag", "alice"): {Username: "alice", AgencyID: "ag", Role: "user", PasswordHash: hashPassword("pw")},

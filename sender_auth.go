@@ -52,10 +52,6 @@ func (s *Server) senderClient(claimed string, addr *net.UDPAddr) *Client {
 	if addr == nil {
 		return nil
 	}
-	if !s.config.AuthEnabled {
-		c, _ := s.findClientForSender(claimed, addr)
-		return c
-	}
 	agencyID := s.authenticatedAddrs[addr.String()]
 	if agencyID == "" {
 		return nil
@@ -77,7 +73,7 @@ func (s *Server) senderClient(claimed string, addr *net.UDPAddr) *Client {
 // login account, a dispatch console). Used to tell an impersonation attempt
 // apart from a client that simply isn't registered yet. Caller holds s.mu.
 func (s *Server) senderBlocked(claimed string, addr *net.UDPAddr) bool {
-	if !s.config.AuthEnabled || addr == nil {
+	if addr == nil {
 		return false
 	}
 	agencyID := s.authenticatedAddrs[addr.String()]

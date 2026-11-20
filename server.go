@@ -4,6 +4,7 @@
 package main
 
 import (
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -191,6 +193,9 @@ type UserAccount struct {
 	GuestExpiresAt *time.Time `json:"guest_expires_at,omitempty"`
 	// LastLogin: when this account last signed in to PTT (RFC 3339).
 	LastLogin string `json:"last_login,omitempty"`
+	// Devices: per-phone keys issued by enrollment QR codes
+	// (account_security.go). The password above is never replaced by a QR.
+	Devices []*DeviceKey `json:"devices,omitempty"`
 	// MCX Step 2 note: the derived MCX identity (<callsign>@<agency>.<mcptt_domain>)
 	// is NOT stored — it's computed on demand (see userMCXID / GetUsers) and added
 	// to API responses. The plain Username remains the display name + routing key.
@@ -258,6 +263,14 @@ type EnrollmentToken struct {
 	PasswordHash string    `json:"-"` // the real password hash this token maps to
 	ExpiresAt    time.Time `json:"expires_at"`
 	IsGuest      bool      `json:"is_guest,omitempty"` // guest event tokens: multi-use, long-lived
+	// One-time QR (account_security.go): when and from where it was used,
+	// and the device key that use issued.
+	UsedAt   time.Time `json:"-"`
+	UsedFrom string    `json:"-"`
+	DeviceID string    `json:"-"`
+	// The device key's secret, kept in memory only for the retry grace so a
+	// retry (or the app's second connection at startup) gets the SAME key.
+	pendingSecret []byte
 }
 
 // GuestEvent is a temporary shared account for mutual aid / pop-up events.
@@ -281,9 +294,9 @@ type GuestEvent struct {
 type Server struct {
 	proxyNetsOnce sync.Once
 	proxyNets     []*net.IPNet
-	loginLimit    *failLimiter  // dashboard logins (ratelimit.go)
+	loginLimit    *signInGuard  // dashboard logins (ratelimit.go)
 	oidc          *oidcProvider // dashboard single sign-on (oidc.go); nil = off
-	pttAuthLimit  *failLimiter  // phone sign-ins
+	pttAuthLimit  *signInGuard  // phone sign-ins
 	// rosterSent: last roster sent per agency to low-power clients.
 	rosterMu   sync.Mutex
 	rosterSent map[string]rosterState
@@ -306,37 +319,46 @@ type Server struct {
 	takOnce                sync.Once
 	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
-	pendingChallenges      map[string]pendingChallenge // addr string -> nonce (Phase 4f challenge-response)
-	enrollmentTokens       map[string]*EnrollmentToken // token string -> enrollment token
-	guestEvents            map[string]*GuestEvent      // eventID -> guest event
-	webAdmins              map[string]*WebAdmin        // "agencyID:username" -> admin account (web dashboard)
-	dispatchConns          map[string]*DispatchConn    // "agencyID:username" -> active dispatch WebSocket
-	webSessions            map[string]*WebSession      // session token -> session
-	mutualAidLinks         map[string]*MutualAidLink   // linkID -> link
-	emergMu                sync.Mutex
-	emergCalls             map[string]map[string]*emergencyCall                         // agency -> user -> active emergency (emergency_channel.go)
-	lmrBridges             map[string]*LMRBridge                                        // bridgeID -> LMR/VHF radio bridge
-	mutualAidRequests      map[string]*MutualAidRequest                                 // requestID -> agency-to-agency ask
-	zelloBridges           map[string]*ZelloBridge                                      // bridgeID -> Zello Work channel bridge
-	ssrcToUser             map[uint32]string                                            // RTP SSRC -> username (MCX Step 1)
-	ssrcMu                 sync.RWMutex                                                 // guards ssrcToUser
-	floor                  *FloorController                                             // MCX Step 3 floor control (per channel)
-	floorOn                sync.Map                                                     // agencyID -> floorMode* (lock-free for the audio path)
-	groupMgr               *GroupManager                                                // MCX Step 4 group types / ad-hoc
-	sipGateway             *SipGateway                                                  // MCX Step 5 SIP gateway (nil = disabled)
-	testFloorSink          func(*net.UDPAddr, []byte)                                   // test-only: capture floor packets
-	testRelaySink          func(key string, channel int, user string, audioData []byte) // test-only: capture replayed audio
-	testFloorUserSink      func(user string, data []byte)                               // test-only: capture per-user floor packets
-	autoFloorMu            sync.Mutex
-	autoFloorLast          map[string]time.Time // gateway username -> last automatic floor request
-	pausedGateways         sync.Map             // userKey of a disabled LMR bridge\'s gateway: relay nothing to it (lock-free, read per packet)
-	mu                     sync.RWMutex
-	shutdown               chan struct{}
-	stats                  *Stats
-	updateStatus           *UpdateStatus
-	activityLog            *ActivityLog
-	networkTimeSeries      *NetworkTimeSeries
-	wsConnCount            int64 // atomic counter for active WebSocket connections
+	authSessions           map[string]authSession // addr string -> how it signed in (account_security.go)
+	bridgeTx               bridgeTxGate           // transmit limits on bridged channels (bridge_tx.go)
+	bridgeGuestGate        noteGate
+	// Secure protocol (secure.go): the server's identity key, live sessions,
+	// and remembered password verifiers.
+	identity          *ecdh.PrivateKey
+	sec               secTable
+	dispatch          packetDispatcher
+	verifierMu        sync.Mutex
+	verifiers         map[string]scramVerifier
+	enrollmentTokens  map[string]*EnrollmentToken // token string -> enrollment token
+	guestEvents       map[string]*GuestEvent      // eventID -> guest event
+	webAdmins         map[string]*WebAdmin        // "agencyID:username" -> admin account (web dashboard)
+	dispatchConns     map[string]*DispatchConn    // "agencyID:username" -> active dispatch WebSocket
+	webSessions       map[string]*WebSession      // session token -> session
+	mutualAidLinks    map[string]*MutualAidLink   // linkID -> link
+	emergMu           sync.Mutex
+	emergCalls        map[string]map[string]*emergencyCall                         // agency -> user -> active emergency (emergency_channel.go)
+	lmrBridges        map[string]*LMRBridge                                        // bridgeID -> LMR/VHF radio bridge
+	mutualAidRequests map[string]*MutualAidRequest                                 // requestID -> agency-to-agency ask
+	zelloBridges      map[string]*ZelloBridge                                      // bridgeID -> Zello Work channel bridge
+	ssrcToUser        map[uint32]string                                            // RTP SSRC -> username (MCX Step 1)
+	ssrcMu            sync.RWMutex                                                 // guards ssrcToUser
+	floor             *FloorController                                             // MCX Step 3 floor control (per channel)
+	floorOn           sync.Map                                                     // agencyID -> floorMode* (lock-free for the audio path)
+	groupMgr          *GroupManager                                                // MCX Step 4 group types / ad-hoc
+	sipGateway        *SipGateway                                                  // MCX Step 5 SIP gateway (nil = disabled)
+	testFloorSink     func(*net.UDPAddr, []byte)                                   // test-only: capture floor packets
+	testRelaySink     func(key string, channel int, user string, audioData []byte) // test-only: capture replayed audio
+	testFloorUserSink func(user string, data []byte)                               // test-only: capture per-user floor packets
+	autoFloorMu       sync.Mutex
+	autoFloorLast     map[string]time.Time // gateway username -> last automatic floor request
+	pausedGateways    sync.Map             // userKey of a disabled LMR bridge\'s gateway: relay nothing to it (lock-free, read per packet)
+	mu                sync.RWMutex
+	shutdown          chan struct{}
+	stats             *Stats
+	updateStatus      *UpdateStatus
+	activityLog       *ActivityLog
+	networkTimeSeries *NetworkTimeSeries
+	wsConnCount       int64 // atomic counter for active WebSocket connections
 }
 
 type Stats struct {
@@ -727,20 +749,22 @@ func NewServer(config *Config, configFile string) *Server {
 		agencies:           make(map[string]*Agency),
 		authenticatedAddrs: make(map[string]string),
 		authAccounts:       make(map[string]string),
-		pendingChallenges:  make(map[string]pendingChallenge),
-		loginLimit:         newFailLimiter(30, 10, 15*time.Minute, 15*time.Minute),
-		pttAuthLimit:       newFailLimiter(30, 10, 5*time.Minute, 5*time.Minute),
-		enrollmentTokens:   make(map[string]*EnrollmentToken),
-		guestEvents:        make(map[string]*GuestEvent),
-		webAdmins:          make(map[string]*WebAdmin),
-		dispatchConns:      make(map[string]*DispatchConn),
-		webSessions:        make(map[string]*WebSession),
-		mutualAidLinks:     make(map[string]*MutualAidLink),
-		lmrBridges:         make(map[string]*LMRBridge),
-		mutualAidRequests:  make(map[string]*MutualAidRequest),
-		zelloBridges:       make(map[string]*ZelloBridge),
-		ssrcToUser:         make(map[uint32]string),
-		shutdown:           make(chan struct{}),
+		authSessions:       make(map[string]authSession),
+		// 10 wrong passwords per address, then that address waits; an account
+		// is guarded only when 50 failures arrive from many addresses.
+		loginLimit:        newSignInGuard(10, 50, 15*time.Minute, 15*time.Minute),
+		pttAuthLimit:      newSignInGuard(10, 50, 5*time.Minute, 5*time.Minute),
+		enrollmentTokens:  make(map[string]*EnrollmentToken),
+		guestEvents:       make(map[string]*GuestEvent),
+		webAdmins:         make(map[string]*WebAdmin),
+		dispatchConns:     make(map[string]*DispatchConn),
+		webSessions:       make(map[string]*WebSession),
+		mutualAidLinks:    make(map[string]*MutualAidLink),
+		lmrBridges:        make(map[string]*LMRBridge),
+		mutualAidRequests: make(map[string]*MutualAidRequest),
+		zelloBridges:      make(map[string]*ZelloBridge),
+		ssrcToUser:        make(map[uint32]string),
+		shutdown:          make(chan struct{}),
 		stats: &Stats{
 			StartTime: time.Now(),
 		},
@@ -754,6 +778,9 @@ func NewServer(config *Config, configFile string) *Server {
 	s.loadAgencies()
 	s.loadLastChannels()
 	s.loadUsers()
+	if err := s.loadOrCreateIdentity(); err != nil {
+		log.Printf("WARNING: secure protocol disabled: %v", err)
+	}
 	s.loadWebAdmins()
 	s.loadMutualAid()
 	s.loadLMRBridges()
@@ -972,12 +999,32 @@ func (s *Server) StartPTT() error {
 			// garbled audio — constant at video-call packet rates).
 			pkt := make([]byte, n)
 			copy(pkt, buffer[:n])
-			go s.handlePacket(pkt, addr)
+			// Handled in arrival order per source (ordered_dispatch.go).
+			s.dispatchPacket(pkt, addr)
 		}
 	}
 }
 
 func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
+	if len(data) == 0 {
+		return
+	}
+	if data[0] >= PacketTypeSecHello && data[0] <= PacketTypeSecRetry {
+		s.handleSecurePacket(data, addr) // secure.go
+		return
+	}
+	// An address with a secure session speaks ONLY through it. A plaintext
+	// packet that claims to come from that address is forged (a spoofed
+	// "leave", a replayed emergency, injected audio) and is dropped.
+	if s.sec.live() && s.addrIsSecure(addr.String()) {
+		return
+	}
+	s.handlePlainPacket(data, addr)
+}
+
+// handlePlainPacket dispatches one MeshRelay packet: straight off the wire in
+// the old protocol, or after decryption in the secure one.
+func (s *Server) handlePlainPacket(data []byte, addr *net.UDPAddr) {
 	packetType, payload, err := ParsePacket(data)
 	if err != nil {
 		log.Printf("Error parsing packet from %s: %v", addr, err)
@@ -1036,7 +1083,7 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 
 // handleMonitorChannels updates which extra channels a client always listens to.
 func (s *Server) handleMonitorChannels(pkt *MonitorChannelsPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	s.mu.Lock()
@@ -1052,7 +1099,7 @@ func (s *Server) handleMonitorChannels(pkt *MonitorChannelsPacket, addr *net.UDP
 }
 
 func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 
@@ -1107,6 +1154,11 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	}
 	// Nobody else talks on the EMERGENCY channel.
 	if client.Channel == EmergencyChannel {
+		return
+	}
+	// Bridged channels (LMR, Zello): no guests unless the bridge allows them,
+	// and a transmit time limit (bridge_tx.go).
+	if !s.bridgeTxAllowed(client, time.Now()) {
 		return
 	}
 
@@ -1355,7 +1407,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 }
 
 func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 
@@ -1402,7 +1454,7 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 }
 
 func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 
@@ -1483,7 +1535,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	// callback does the same at once). An unsolicited failed AUTH_RESPONSE
 	// would NOT trigger that — the app only shows an "Authentication failed"
 	// toast — so silence is the correct "re-login needed" signal.
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 
@@ -1596,8 +1648,12 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 }
 
 func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
-		log.Printf("JOIN rejected: %s from %s (not authenticated)", packet.Username, addr)
+	if !s.isAuthenticated(addr) {
+		log.Printf("JOIN rejected: %q from %s (not authenticated)", packet.Username, addr)
+		return
+	}
+	if !validCallsign(packet.Username) {
+		log.Printf("JOIN rejected: callsign %q from %s has characters that are not allowed", packet.Username, addr)
 		return
 	}
 
@@ -1611,23 +1667,40 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 
 	s.mu.Lock()
 
-	// Determine agency: prefer authenticated session, then user account lookup, then default
+	// The agency is the signed-in session's, never guessed from the name.
 	agencyID := s.authenticatedAddrs[addr.String()]
 	if agencyID == "" {
-		if user := s.findUserByUsername(packet.Username); user != nil {
-			agencyID = user.AgencyID
-		} else {
-			agencyID = "default"
-			log.Printf("JOIN warning: user %s not found in users list, using agency 'default'", packet.Username)
+		s.mu.Unlock()
+		log.Printf("JOIN rejected: %s from %s (session ended)", packet.Username, addr)
+		return
+	}
+
+	// The login account this address authenticated as.
+	account := s.authAccounts[addr.String()]
+	// A callsign that is the NAME of an account in this agency — a unit's
+	// login, or an LMR bridge's gateway — belongs to that account. Anyone
+	// could JOIN as an offline unit or gateway before: the squatter received
+	// its private messages, was treated as the gateway, and the real device
+	// was then refused for as long as the squatter stayed.
+	if owner := s.callsignOwnerLocked(agencyID, packet.Username); owner != "" && owner != account {
+		s.mu.Unlock()
+		if !s.bridgeGuestGate.note("join#"+addr.String(), time.Now()) {
+			return // already said so a moment ago
 		}
+		log.Printf("JOIN refused: %q [%s] from %s — that callsign is the name of another account (signed in as %s)",
+			packet.Username, agencyID, addr, account)
+		s.activityLog.Add("join_refused", packet.Username,
+			"Callsign belongs to another account; signed in as "+strings.TrimPrefix(account, agencyID+":"), agencyID)
+		s.sendPacket(SerializeTextPacket(&TextMessagePacket{Sender: "Server", Recipient: packet.Username,
+			Content:   "The callsign \"" + packet.Username + "\" belongs to another account. Change your callsign (Profile) or sign in with that account.",
+			Timestamp: time.Now().UnixMilli()}), addr)
+		return
 	}
 
 	// Check if client already exists
 	ck := userKey(agencyID, packet.Username)
 	client, exists := s.clients[ck]
-	// The login account this address authenticated as ("" with auth off).
-	account := s.authAccounts[addr.String()]
-	if exists && s.config.AuthEnabled && !s.mayActAs(client, addr) {
+	if exists && !s.mayActAs(client, addr) {
 		// The callsign is online under a different login account (or is a
 		// dispatch console). Taking it over would steal its audio, its queued
 		// dispatch messages and — for an LMR gateway — the radio bridge. The
@@ -1662,6 +1735,12 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 			oldCh.mu.Unlock()
 		}
 
+		// Moved to a new address (network switch, new port): the old one
+		// must not stay signed in — another device can be handed that
+		// ip:port by the same carrier NAT.
+		if client.Addr != nil && client.Addr.String() != addr.String() {
+			s.dropAddrAuthLocked(client.Addr.String(), client)
+		}
 		client.Channel = packet.Channel
 		client.AgencyID = agencyID
 		client.Addr = addr
@@ -1747,7 +1826,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 }
 
 func (s *Server) handleLeave(addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 
@@ -1794,8 +1873,7 @@ func (s *Server) removeClient(client *Client) {
 
 	// Remove from authenticated addresses
 	if client.Addr != nil {
-		delete(s.authenticatedAddrs, client.Addr.String())
-		delete(s.authAccounts, client.Addr.String())
+		s.forgetAddrAuthLocked(client.Addr.String())
 	}
 
 	// Remove from clients map
@@ -1812,7 +1890,7 @@ func (s *Server) removeClient(client *Client) {
 func (s *Server) clientRemovedCleanup(client *Client) {
 	// MCX Step 3: release any floor/queue this user held (prevents a stuck floor).
 	if s.floor != nil {
-		s.floor.DropUser(client.Username)
+		s.floor.DropUser(client.AgencyID, client.Username)
 	}
 	// MCX Step 4: leaving an ad-hoc group channel dissolves it when empty.
 	if s.groupMgr != nil {
@@ -1979,6 +2057,19 @@ type rosterState struct {
 }
 
 func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
+	// An address with a secure session gets everything encrypted and
+	// authenticated for that session (secure.go).
+	if addr != nil && s.sec.live() {
+		if ss := s.secSessionForAddr(addr.String()); ss != nil {
+			data = ss.seal(data)
+		}
+	}
+	s.sendRaw(data, addr)
+}
+
+// sendRaw writes bytes to an address as they are (handshake packets, and
+// packets sendPacket already wrapped).
+func (s *Server) sendRaw(data []byte, addr *net.UDPAddr) {
 	// Test hook / no-conn guard: capture instead of writing to the socket.
 	if s.testFloorSink != nil {
 		s.testFloorSink(addr, data)
@@ -2007,7 +2098,7 @@ func (s *Server) sendPacket(data []byte, addr *net.UDPAddr) {
 // relayRawPacket forwards a raw packet (key exchange, key announce) to all
 // other clients in the sender's channel. The packet is sent as-is.
 func (s *Server) relayRawPacket(data []byte, senderAddr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(senderAddr) {
+	if !s.isAuthenticated(senderAddr) {
 		return
 	}
 
@@ -2169,8 +2260,10 @@ func (s *Server) GetClients(agencyFilter string) []map[string]interface{} {
 			}
 		}
 		clients = append(clients, map[string]interface{}{
-			"username":  client.Username,
-			"account":   account,
+			"username": client.Username,
+			"account":  account,
+			// true = this phone uses the secure protocol (secure.go).
+			"secure":    client.Addr != nil && s.sec.live() && s.addrIsSecure(client.Addr.String()),
 			"agency_id": client.AgencyID,
 			// No IP address: the list reaches every admin's and dispatcher's
 			// browser, and a phone's public IP is nobody else's business.
@@ -2239,7 +2332,7 @@ func (s *Server) handleGroupUpdate(packet *GroupPacket, addr *net.UDPAddr) {
 // as: the agency used to come from a by-name search for packet.Creator, so
 // anyone could push group packets into another agency.
 func (s *Server) relayGroupPacket(packetType byte, packet *GroupPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 
@@ -2253,7 +2346,7 @@ func (s *Server) relayGroupPacket(packetType byte, packet *GroupPacket, addr *ne
 	creatorAgency := "default"
 	if creator := s.senderClient(packet.Creator, addr); creator != nil {
 		creatorAgency = creator.AgencyID
-	} else if s.config.AuthEnabled {
+	} else {
 		s.mu.Unlock()
 		log.Printf("Group packet from %s dropped: creator %q is not this session's client", addr, packet.Creator)
 		return
@@ -2490,30 +2583,13 @@ func (s *Server) findClientByUsername(username string) (*Client, string) {
 // handleAuthChallengeRequest handles the first step of challenge-response auth (Phase 4f).
 // Client sends username, server generates a nonce and sends it back.
 func (s *Server) handleAuthChallengeRequest(packet *AuthChallengeRequestPacket, addr *net.UDPAddr) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Generate 32-byte random nonce
-	var nonce [32]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		log.Printf("Failed to generate auth nonce: %v", err)
+	// Stateless (ratelimit.go): nothing is stored, and the server lock is not
+	// taken, so a flood of these cannot block sign-ins or slow the server.
+	// Refused while the address is locked out for wrong passwords.
+	if locked, _, _ := s.pttAuthLimit.blocked(addr.IP.String()); locked {
 		return
 	}
-
-	// Store pending challenge (keyed by address). Refused while the address
-	// is locked out for wrong passwords, or during a challenge flood.
-	if locked, _ := s.pttAuthLimit.blocked(pttAuthIPKey(addr)); locked {
-		return
-	}
-	if !s.storeChallengeLocked(addr.String(), nonce, time.Now()) {
-		log.Printf("Auth challenge refused for %s: too many pending challenges", addr)
-		return
-	}
-
-	// Send challenge nonce to client
-	resp := SerializeAuthChallenge(nonce)
-	s.sendPacket(resp, addr)
-	log.Printf("Auth challenge sent to %s for user %s", addr, packet.Username)
+	s.sendPacket(SerializeAuthChallenge(challengeNonce(addr.String(), time.Now())), addr)
 }
 
 func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr) {
@@ -2535,24 +2611,27 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		candidates = s.findUsersByUsername(packet.Username)
 	}
 
-	// Wrong-password limits (ratelimit.go), per address and per account.
-	// Unknown user and wrong password get the same answer, so the reply does
-	// not tell a stranger which usernames exist.
-	ipKey, acctKey := pttAuthIPKey(addr), pttAuthAccountKey(packet.AgencyID, packet.Username)
-	for _, k := range []string{ipKey, acctKey} {
-		if locked, left := s.pttAuthLimit.blocked(k); locked {
-			delete(s.pendingChallenges, addr.String())
-			log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %s from %s",
-				strings.SplitN(k, ":", 2)[0], left.Round(time.Second), packet.Username, addr)
-			resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Too many attempts — try again in a few minutes"})
-			s.sendPacket(resp, addr)
-			return
-		}
+	// Wrong-password limits (ratelimit.go). They count against the address,
+	// and against the account(s) this request RESOLVES to — never the agency
+	// text in the packet. Unknown user and wrong password get the same
+	// answer, so the reply does not tell a stranger which usernames exist.
+	ip := addr.IP.String()
+	var accts []string
+	for _, c := range candidates {
+		accts = append(accts, strings.ToLower(userKey(c.AgencyID, c.Username)))
+	}
+	if len(accts) == 0 {
+		accts = []string{"?:" + strings.ToLower(strings.TrimSpace(packet.Username))}
+	}
+	if locked, left, what := s.pttAuthLimit.blocked(ip, accts...); locked {
+		log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %s from %s",
+			what, left.Round(time.Second), packet.Username, addr)
+		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Too many attempts — try again in a few minutes"})
+		s.sendPacket(resp, addr)
+		return
 	}
 	authFailed := func() {
-		lockedIP := s.pttAuthLimit.fail(ipKey)
-		lockedAcct := s.pttAuthLimit.fail(acctKey)
-		if lockedIP || lockedAcct {
+		if s.pttAuthLimit.failed(ip, accts...) {
 			log.Printf("Auth lockout: too many wrong passwords (user %s from %s)", packet.Username, addr)
 		}
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid username or password"})
@@ -2560,29 +2639,26 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	if len(candidates) == 0 {
-		delete(s.pendingChallenges, addr.String())
 		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
 		authFailed()
 		return
 	}
 
-	// Challenge-response auth is required — legacy static-hash auth has been removed.
-	addrKey := addr.String()
-	nonce, hasPendingChallenge := s.takeChallengeLocked(addrKey, time.Now()) // one-time use
-
-	if !hasPendingChallenge {
-		// No challenge issued for this address — challenge-response is required.
-		log.Printf("Auth rejected: no pending challenge for %s (client must use challenge-response)", addr)
-		resp := SerializeAuthResponse(&AuthResponsePacket{
-			Success: false,
-			Message: "Authentication method not supported — please update the app",
-		})
-		s.sendPacket(resp, addr)
-		return
+	// Challenge-response: the client sends HMAC-SHA256(stored hash, nonce) for
+	// the nonce this address was given (current or previous time slot).
+	var (
+		user            *UserAccount
+		usedEnrollToken string
+		deviceID        string
+		authOk          bool
+		nonce           [32]byte
+	)
+	for _, n := range challengeNonces(addr.String(), time.Now()) {
+		if user, usedEnrollToken, deviceID, authOk = s.matchCredential(candidates, n, packet.PasswordHash, addr); authOk {
+			nonce = n
+			break
+		}
 	}
-
-	// Challenge-response: client sends HMAC-SHA256(stored hash, nonce)
-	user, usedEnrollToken, authOk := s.matchCredential(candidates, nonce, packet.PasswordHash)
 	if user == nil {
 		user = candidates[0] // for the log line only
 	}
@@ -2592,63 +2668,84 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		authFailed()
 		return
 	}
-	s.pttAuthLimit.success(acctKey)
-	s.pttAuthLimit.success(ipKey)
+	s.pttAuthLimit.succeeded(ip, strings.ToLower(userKey(user.AgencyID, user.Username)))
 
-	// Enrollment token used — the token becomes the stable PTT password so the
-	// client can reconnect with the stored token indefinitely. This is made
-	// idempotent: the hash is set to the token once and never rewritten while
-	// it already matches, and the token is NOT deleted. That lets the SAME
-	// account be enrolled into multiple clients (e.g. plugin and standalone)
-	// by scanning the same QR — each stores the same token and all reconnect
-	// forever. Web admin password (bcrypt, web_admins.json) is left untouched,
-	// so the web dashboard login still uses the user's original password.
-	// Guest event tokens (IsGuest=true) behave the same way (multi-use).
-	if usedEnrollToken != "" {
+	msg, err := s.completeSignInLocked(user, usedEnrollToken, deviceID, addr, &legacyKeyWrap{nonce: nonce, flags: packet.Flags})
+	if err != nil {
+		s.sendPacket(SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Server error — try again"}), addr)
+		return
+	}
+	// The address now speaks the old protocol: any secure session it had is over.
+	s.secDropAddr(addr.String())
+	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: msg})
+	s.sendPacket(resp, addr)
+}
+
+// legacyKeyWrap carries what the OLD handshake needs to deliver a device key
+// (wrapped under the QR token). The secure handshake passes nil: its reply is
+// already encrypted, so the key goes as it is.
+type legacyKeyWrap struct {
+	nonce [32]byte
+	flags byte
+}
+
+// completeSignInLocked finishes a sign-in that proved a credential, for both
+// handshakes: device-key issue for a QR, session bookkeeping, last login. It
+// returns the success message ("Authenticated|domain=…|devkey=…"). Caller
+// holds s.mu.
+func (s *Server) completeSignInLocked(user *UserAccount, usedEnrollToken, deviceID string, addr *net.UDPAddr, legacy *legacyKeyWrap) (string, error) {
+	// Which credential this session used: ends with it (account_security.go).
+	cred := credPassword
+	devSuffix := ""
+	now := time.Now()
+	how := "challenge-response"
+	if legacy == nil {
+		how = "secure"
+	}
+	switch {
+	case usedEnrollToken != "" && s.enrollmentTokens[usedEnrollToken].IsGuest:
+		// Guest event QR: shared by everyone at the event, ends with it.
+		cred = credGuest
+		log.Printf("Auth (guest token, %s) success: user %s from %s — guest event login", how, user.Username, addr)
+	case usedEnrollToken != "":
+		// One-time QR: this phone gets its own key and the token is spent.
 		et := s.enrollmentTokens[usedEnrollToken]
-		if et.IsGuest {
-			// Guest tokens: the token IS the password; never modify the hash
-			// and never delete the token (unlimited clients scan the same QR).
-			log.Printf("Auth (guest token) success: user %s from %s — guest event login", packet.Username, addr)
-		} else {
-			tokenHash := hashPassword(et.Token)
-			if user.PasswordHash != tokenHash {
-				// First use of this token — bind it as the stable PTT password.
-				user.PasswordHash = tokenHash
-				s.saveUsers()
-				log.Printf("Auth (enrollment token) success: user %s from %s — PTT password bound to enrollment token", packet.Username, addr)
-			} else {
-				// Token already bound — idempotent reconnect (e.g. other app,
-				// or after restart). Nothing to change; keep the token usable.
-				log.Printf("Auth (enrollment token) success: user %s from %s — reconnected with bound token", packet.Username, addr)
+		var nonce [32]byte
+		flags := AuthFlagDeviceKey // the secure handshake always takes a device key
+		if legacy != nil {
+			nonce, flags = legacy.nonce, legacy.flags
+		}
+		c, suffix, err := s.issueDeviceKeyLocked(user, et, nonce, flags, addr, legacy == nil)
+		if err != nil {
+			log.Printf("Auth (enrollment token) for %s from %s: could not issue a device key: %v", user.Username, addr, err)
+			return "", err
+		}
+		cred, devSuffix = c, suffix
+		s.saveUsers()
+		kind := "device key issued"
+		if suffix == "" {
+			kind = "older app: token kept as this phone's key (update the app for one-time QR codes)"
+		}
+		log.Printf("Auth (enrollment token, %s) success: user %s [%s] from %s — QR used, %s", how, user.Username, user.AgencyID, addr, kind)
+		s.activityLog.Add("qr_enrolled", user.Username, fmt.Sprintf("QR code used from %s (%s)", addr.IP, kind), user.AgencyID)
+	case deviceID != "":
+		cred = deviceCred(deviceID)
+		for _, d := range user.Devices {
+			if d.ID == deviceID {
+				d.LastUsed = now.Format(time.RFC3339)
 			}
-			// NOTE: token is intentionally NOT deleted so the same QR can be
-			// enrolled into multiple clients and reused across restarts.
 		}
-	} else {
-		log.Printf("Auth (challenge-response) success: user %s from %s", packet.Username, addr)
+		log.Printf("Auth (device key, %s) success: user %s from %s", how, user.Username, addr)
+	default:
+		log.Printf("Auth (%s) success: user %s from %s", how, user.Username, addr)
 	}
 
-	// Remove old authenticated address for this user (in case they reconnected from a new port)
-	clientKey := userKey(user.AgencyID, user.Username)
-	if existingClient, ok := s.clients[clientKey]; ok {
-		oldAddr := existingClient.Addr.String()
-		if oldAddr != addr.String() {
-			delete(s.authenticatedAddrs, oldAddr)
-			delete(s.authAccounts, oldAddr)
-			log.Printf("Cleaned up stale auth for user %s (old addr: %s)", packet.Username, oldAddr)
-		}
-	}
-
-	s.authenticatedAddrs[addr.String()] = user.AgencyID
-	if s.authAccounts == nil {
-		s.authAccounts = make(map[string]string)
-	}
-	s.authAccounts[addr.String()] = userKey(user.AgencyID, user.Username)
+	// A phone that moved addresses re-JOINs and the JOIN clears its old
+	// address; nothing here may touch another device's session.
+	s.recordAuthLocked(addr.String(), user.AgencyID, userKey(user.AgencyID, user.Username), cred)
 	// Last login, for the dashboard. Reconnects are frequent (network
 	// switches, heartbeats lost), so the file is rewritten at most every few
 	// minutes per account; the in-memory value is always current.
-	now := time.Now()
 	prev, _ := time.Parse(time.RFC3339, user.LastLogin)
 	user.LastLogin = now.Format(time.RFC3339)
 	if now.Sub(prev) > 5*time.Minute {
@@ -2661,8 +2758,7 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	if dom := agencyDomain(user.AgencyID, s.config.McpttDomain); dom != "" {
 		msg = "Authenticated|domain=" + dom
 	}
-	resp := SerializeAuthResponse(&AuthResponsePacket{Success: true, Message: msg})
-	s.sendPacket(resp, addr)
+	return msg + devSuffix, nil // "|devkey=…" after a one-time QR
 }
 
 // matchCredential finds the account (among candidates) whose password, or one
@@ -2671,30 +2767,38 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 // username AND same agency. Matching on username alone let agency A's QR
 // code log in as (and rebind the password of) a same-named user in agency B.
 // Caller holds s.mu.
-func (s *Server) matchCredential(candidates []*UserAccount, nonce [32]byte, clientHmac string) (*UserAccount, string, bool) {
+func (s *Server) matchCredential(candidates []*UserAccount, nonce [32]byte, clientHmac string, addr *net.UDPAddr) (user *UserAccount, token, deviceID string, ok bool) {
 	matches := func(hash string) bool {
+		if hash == "" {
+			return false
+		}
 		expected := computeHmacSha256([]byte(hash), nonce[:])
 		return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(expected)), []byte(clientHmac)) == 1
 	}
 	for _, u := range candidates {
 		if matches(u.PasswordHash) {
-			return u, "", true
+			return u, "", "", true
+		}
+		for _, d := range u.Devices {
+			if matches(d.Hash) {
+				return u, "", d.ID, true
+			}
 		}
 	}
 	now := time.Now()
 	for _, u := range candidates {
-		for token, et := range s.enrollmentTokens {
-			if et.Username != u.Username || et.AgencyID != u.AgencyID || !now.Before(et.ExpiresAt) {
+		for t, et := range s.enrollmentTokens {
+			if et.Username != u.Username || et.AgencyID != u.AgencyID || !enrollTokenUsable(et, addr, now) {
 				continue
 			}
 			// The client used the enrollment token as a password:
 			// client computes SHA256(token), then HMAC(SHA256(token), nonce)
 			if matches(hashPassword(et.Token)) {
-				return u, token, true
+				return u, t, "", true
 			}
 		}
 	}
-	return nil, "", false
+	return nil, "", "", false
 }
 
 // findUsersByUsername returns every account with this username, in a stable
@@ -2719,40 +2823,31 @@ func computeHmacSha256(key, data []byte) []byte {
 
 // --- Enrollment Tokens ---
 
-// GenerateEnrollmentToken creates a random 16-byte hex token for QR enrollment.
-// The token maps to the user's real password hash and expires after 15 minutes.
-// Must be called while s.mu is held.
+// GenerateEnrollmentToken creates a one-time QR token (128-bit) for the
+// account. It works for one sign-in within 15 minutes (account_security.go).
+// Showing the QR again within that window returns the same unused token; it
+// never extends the window. Must be called while s.mu is held.
 func (s *Server) GenerateEnrollmentToken(username, agencyID, passwordHash string) string {
-	// Reuse an existing, non-expired token for this user so regenerating the QR
-	// returns the SAME token. Combined with idempotent token auth, this lets the
-	// same account be enrolled into multiple clients (plugin + standalone) with a
-	// stable credential — re-scanning never orphans a previously enrolled app.
 	now := time.Now()
 	for _, et := range s.enrollmentTokens {
-		if et.Username == username && et.AgencyID == agencyID && !et.IsGuest && now.Before(et.ExpiresAt) {
-			// Extend the window so an actively-used enrollment stays valid.
-			et.ExpiresAt = now.Add(15 * time.Minute)
-			log.Printf("Enrollment token reused for user %s (agency: %s), window refreshed", username, agencyID)
+		if et.Username == username && et.AgencyID == agencyID && !et.IsGuest &&
+			et.UsedAt.IsZero() && now.Before(et.ExpiresAt) {
 			return et.Token
 		}
 	}
-
-	tokenBytes := make([]byte, 8)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	token, err := randomHexBytes(16)
+	if err != nil {
 		log.Printf("Failed to generate enrollment token: %v", err)
 		return ""
 	}
-	token := hex.EncodeToString(tokenBytes)
-
 	s.enrollmentTokens[token] = &EnrollmentToken{
 		Token:        token,
 		Username:     username,
 		AgencyID:     agencyID,
 		PasswordHash: passwordHash,
-		ExpiresAt:    now.Add(15 * time.Minute),
+		ExpiresAt:    now.Add(enrollTokenLife),
 	}
-
-	log.Printf("Enrollment token created for user %s (agency: %s), expires in 15 minutes", username, agencyID)
+	log.Printf("Enrollment QR created for user %s (agency: %s): one use, expires in 15 minutes", username, agencyID)
 	return token
 }
 
@@ -2770,6 +2865,10 @@ func (s *Server) cleanupExpiredTokens() {
 
 	// Check for expired guest events and remove them (releases and re-acquires lock internally)
 	s.cleanupExpiredGuestEvents()
+
+	// Sign-ins that never joined, and spent one-time QR tokens.
+	s.pruneAuthLocked(now)
+	defer s.secReap(now) // after the lock is released
 
 	// Guests invited from the app whose time is up.
 	kicks := s.removeExpiredInvitedGuests()
@@ -2869,7 +2968,15 @@ func checkPassword(password, storedHash string) bool {
 
 func (s *Server) UpdatePassword(agencyID, username, password string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	kicks, err := s.updatePasswordLocked(agencyID, username, password)
+	s.mu.Unlock()
+	// Phones signed in with the OLD password are signed out now; phones
+	// enrolled by QR keep their own keys ("Sign out phones" ends those).
+	s.finishSessionKicks(kicks, "Your password was changed — sign in again")
+	return err
+}
+
+func (s *Server) updatePasswordLocked(agencyID, username, password string) ([]expiredGuestKick, error) {
 
 	key := userKey(agencyID, username)
 	user, userExists := s.users[key]
@@ -2882,14 +2989,16 @@ func (s *Server) UpdatePassword(agencyID, username, password string) error {
 	// (or vice versa), and appears to "revert" after a restart because the
 	// stale file is what gets reloaded.
 	if !userExists && !adminExists {
-		return fmt.Errorf("user %s not found", username)
+		return nil, fmt.Errorf("user %s not found", username)
 	}
 
+	var kicks []expiredGuestKick
 	if userExists {
 		// PTT auth uses SHA-256 (challenge-response HMACs over this hash).
 		user.PasswordHash = hashPassword(password)
+		kicks = s.takeSessionsLocked(key, func(c string) bool { return c == credPassword })
 		if err := s.saveUsers(); err != nil {
-			return err
+			return kicks, err
 		}
 	}
 
@@ -2901,16 +3010,20 @@ func (s *Server) UpdatePassword(agencyID, username, password string) error {
 			admin.PasswordHash = hashPassword(password) // fallback
 		}
 		if err := s.saveWebAdmins(); err != nil {
-			return err
+			return kicks, err
 		}
 	}
 
 	log.Printf("Updated password for %s [%s] (ptt=%v dashboard=%v)",
 		username, agencyID, userExists, adminExists)
-	return nil
+	return kicks, nil
 }
 
-func (s *Server) UpdateUserRole(agencyID, username, newRole string) error {
+// ErrNeedsDashboardPassword: promoting an account that has no dashboard
+// login needs a dashboard password typed by the admin.
+var ErrNeedsDashboardPassword = errors.New("needs_dashboard_password")
+
+func (s *Server) UpdateUserRole(agencyID, username, newRole string, dashboardPassword ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2944,16 +3057,29 @@ func (s *Server) UpdateUserRole(agencyID, username, newRole string) error {
 			existing.Role = webRole
 			existing.AgencyID = webAgency
 		} else {
-			// First dashboard entry for this account: the PTT hash is all we
-			// have. If it is an enrollment token the admin has no usable
-			// dashboard password until a super admin sets one — say so.
-			if s.hashIsEnrollmentToken(user.PasswordHash) {
-				log.Printf("WARNING: %s [%s] promoted to %s but its PTT password is a QR enrollment token — set a dashboard password for it",
-					username, agencyID, newRole)
+			// First dashboard login for this account. Never copy the PTT
+			// hash: it may be an old QR token, and the dashboard password
+			// must be one the admin chose (bcrypt).
+			pw := ""
+			if len(dashboardPassword) > 0 {
+				pw = dashboardPassword[0]
+			}
+			if pw == "" {
+				user.Role = oldRole
+				return ErrNeedsDashboardPassword
+			}
+			if err := validateNewPassword(pw); err != nil {
+				user.Role = oldRole
+				return err
+			}
+			bh, err := hashPasswordSecure(pw)
+			if err != nil {
+				user.Role = oldRole
+				return err
 			}
 			s.webAdmins[key] = &WebAdmin{
 				Username:           username,
-				PasswordHash:       user.PasswordHash,
+				PasswordHash:       bh,
 				Role:               webRole,
 				AgencyID:           webAgency,
 				MustChangePassword: false,
@@ -2974,22 +3100,20 @@ func (s *Server) UpdateUserRole(agencyID, username, newRole string) error {
 	return nil
 }
 
-// hashIsEnrollmentToken reports whether a users.json password hash is the
-// hash of an enrollment token (i.e. the account was bound by a QR login and
-// has no password a person knows). Caller holds s.mu.
-func (s *Server) hashIsEnrollmentToken(hash string) bool {
-	for _, et := range s.enrollmentTokens {
-		if et != nil && hashPassword(et.Token) == hash {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) RemoveUser(agencyID, username string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	kicks, err := s.removeUserLocked(agencyID, username)
+	s.mu.Unlock()
+	if len(kicks) > 0 {
+		log.Printf("Removed user %s [%s]: ended %d live session(s)", username, agencyID, len(kicks))
+		s.finishSessionKicks(kicks, "Your account was removed")
+	}
+	return err
+}
 
+// removeUserLocked deletes the account and takes its live sessions off the
+// server. Caller holds s.mu; the kicks are finished after unlocking.
+func (s *Server) removeUserLocked(agencyID, username string) ([]expiredGuestKick, error) {
 	key := userKey(agencyID, username)
 	user, exists := s.users[key]
 
@@ -2999,13 +3123,13 @@ func (s *Server) RemoveUser(agencyID, username string) error {
 		if adminExists && admin.Role == "dispatch" {
 			delete(s.webAdmins, key)
 			if err := s.saveWebAdmins(); err != nil {
-				return fmt.Errorf("failed to remove dispatch user: %w", err)
+				return nil, fmt.Errorf("failed to remove dispatch user: %w", err)
 			}
 			log.Printf("Removed dispatch user: %s [%s]", username, agencyID)
 			s.activityLog.Add("dispatch_user_deleted", username, fmt.Sprintf("Removed from agency %s", agencyID), agencyID)
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("user %s not found", username)
+		return nil, fmt.Errorf("user %s not found", username)
 	}
 
 	// If user had admin/super_admin role, also remove web admin entry
@@ -3018,13 +3142,15 @@ func (s *Server) RemoveUser(agencyID, username string) error {
 
 	delete(s.users, key)
 
+	kicks := s.takeAccountSessionsLocked(key)
+
 	if err := s.saveUsers(); err != nil {
-		return err
+		return kicks, err
 	}
 
 	log.Printf("Removed user account: %s [%s]", username, agencyID)
 	s.activityLog.Add("user_deleted", username, fmt.Sprintf("Removed from agency %s", agencyID), agencyID)
-	return nil
+	return kicks, nil
 }
 
 func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername string) []map[string]interface{} {
@@ -3084,6 +3210,8 @@ func (s *Server) GetUsers(agencyFilter, callerRole, callerAgency, callerUsername
 			"priority":   pri,
 			"online":     online[userKey(user.AgencyID, user.Username)],
 			"last_login": user.LastLogin,
+			// Phones enrolled by QR (account_security.go), no secrets.
+			"devices": deviceSummary(user),
 		})
 		if user.GuestExpiresAt != nil {
 			u := users[len(users)-1]
@@ -3688,6 +3816,25 @@ func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expir
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The channel is the server's choice whenever other agencies are patched
+	// in: it must be a FREE channel in the shared block. Taking the number
+	// from the request let an event land on a partner agency's own
+	// talkgroup (or an LMR/Zello channel), putting anonymous QR guests on it.
+	patched := false
+	for _, a := range includeAgencies {
+		patched = patched || a != ""
+	}
+	if patched {
+		if channel < SharedChannelMin || channel > SharedChannelMax || s.usedHighChannels()[channel] {
+			channel = s.pickMutualAidChannel()
+			if channel == 0 {
+				return nil, fmt.Errorf("no free shared channel for the event")
+			}
+		}
+	} else if channel < 0 || channel > SharedChannelMax {
+		return nil, fmt.Errorf("invalid event channel")
+	}
+
 	// Generate unique event ID and guest username
 	idBytes := make([]byte, 8)
 	rand.Read(idBytes)
@@ -3826,15 +3973,20 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 	key := userKey(ev.AgencyID, ev.Username)
 	delete(s.users, key)
 
-	// Collect addresses of any connected clients in this event's agency so we
-	// can kick them. With a dedicated per-event agency, that's every client
-	// whose key is scoped to ev.AgencyID.
-	var kickAddrs []*net.UDPAddr
-	var kickKeys []string
-	for clientKey, client := range s.clients {
-		if strings.HasPrefix(clientKey, ev.AgencyID+":") {
-			kickAddrs = append(kickAddrs, client.Addr)
-			kickKeys = append(kickKeys, clientKey)
+	// End every session of the event: the shared account's (whatever
+	// callsign each phone joined as) and anyone else in the event's agency.
+	// These leave the channels too — only dropping them from s.clients left
+	// them in the channel member lists, still hearing and transmitting.
+	kicks := s.takeAccountSessionsLocked(key)
+	for _, c := range s.clients {
+		if c.AgencyID == ev.AgencyID {
+			s.removeClient(c)
+			kicks = append(kicks, expiredGuestKick{client: c, addr: c.Addr})
+		}
+	}
+	for a, ag := range s.authenticatedAddrs {
+		if ag == ev.AgencyID {
+			s.forgetAddrAuthLocked(a)
 		}
 	}
 
@@ -3880,19 +4032,7 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 	s.mu.Unlock()
 
 	// Kick connected clients (outside lock)
-	for i, addr := range kickAddrs {
-		resp := SerializeAuthResponse(&AuthResponsePacket{
-			Success: false,
-			Revoked: true,
-			Message: "Guest event ended",
-		})
-		s.sendPacket(resp, addr)
-		s.mu.Lock()
-		delete(s.clients, kickKeys[i])
-		delete(s.authenticatedAddrs, addr.String())
-		delete(s.authAccounts, addr.String())
-		s.mu.Unlock()
-	}
+	s.finishSessionKicks(kicks, "Guest event ended")
 
 	// The savers iterate server maps: hold s.mu (read) while they run.
 	s.mu.RLock()
@@ -3906,8 +4046,8 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 		log.Printf("Warning: failed to save guest events: %v", err)
 	}
 
-	log.Printf("Deleted guest event: %s (%s), removed agency %s, kicked %d clients", eventID, ev.Name, ev.AgencyID, len(kickAddrs))
-	s.activityLog.Add("guest_event_deleted", "", fmt.Sprintf("Guest event '%s' deleted (agency %s removed), kicked %d clients", ev.Name, ev.AgencyID, len(kickAddrs)), ev.AgencyID)
+	log.Printf("Deleted guest event: %s (%s), removed agency %s, kicked %d clients", eventID, ev.Name, ev.AgencyID, len(kicks))
+	s.activityLog.Add("guest_event_deleted", "", fmt.Sprintf("Guest event '%s' deleted (agency %s removed), kicked %d clients", ev.Name, ev.AgencyID, len(kicks)), ev.AgencyID)
 	return nil
 }
 
@@ -4020,6 +4160,11 @@ func (s *Server) isGatewayLogin(c *Client) bool {
 func (s *Server) ownLMRBridge(c *Client) *LMRBridge {
 	for _, b := range s.lmrBridges {
 		if b.Username == c.Username && b.ownerAgency() == c.AgencyID {
+			// The gateway is the bridge's OWN ACCOUNT, not anyone using its
+			// callsign. (JOIN also reserves the name; this is the second lock.)
+			if c.Account != "" && c.Account != userKey(b.ownerAgency(), b.Username) {
+				return nil
+			}
 			return b
 		}
 	}
@@ -4087,15 +4232,4 @@ func (s *Server) refreshPausedGateways() {
 			s.pausedGateways.Store(userKey(b.ownerAgency(), b.Username), true)
 		}
 	}
-}
-
-func pttAuthIPKey(addr *net.UDPAddr) string {
-	if addr == nil {
-		return ""
-	}
-	return "ip:" + addr.IP.String()
-}
-
-func pttAuthAccountKey(agency, user string) string {
-	return "acct:" + strings.ToLower(strings.TrimSpace(agency)) + "/" + strings.ToLower(strings.TrimSpace(user))
 }

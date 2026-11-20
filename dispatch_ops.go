@@ -181,7 +181,7 @@ func (s *Server) setUnitStatus(agency, user string, code uint8, note, by string)
 
 // handleUnitStatus: a unit set its own status.
 func (s *Server) handleUnitStatus(p *UnitStatusPacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	s.mu.RLock()
@@ -300,7 +300,7 @@ func (s *Server) consoleSendMessage(console *Client, text string, unit *messageT
 
 // handleDispatchMessage: a unit replied to dispatch.
 func (s *Server) handleDispatchMessage(p *DispatchMessagePacket, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	text := strings.TrimSpace(p.Text)

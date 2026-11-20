@@ -74,6 +74,10 @@ func (s *Server) handleCreateLMRBridge(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "gateway username and password are required")
 		return
 	}
+	if err := validateNewPassword(req.Password); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// One agency is enough here (unlike mutual aid, which patches agencies to
 	// each other): a bridge with a single agency is a plain radio link.
 	if len(req.Agencies) < 1 {

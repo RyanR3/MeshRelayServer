@@ -73,6 +73,7 @@ func phoneSink(s *Server) (func(addr string) [][]byte, func()) {
 func addPhone(s *Server, agency, user string, port int) *net.UDPAddr {
 	a := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
 	s.clients[userKey(agency, user)] = &Client{Username: user, AgencyID: agency, Addr: a}
+	s.recordAuthLocked(a.String(), agency, userKey(agency, user), credPassword)
 	return a
 }
 

@@ -65,7 +65,7 @@ func TestRecorderWritesIndexesAndFinds(t *testing.T) {
 func TestUnitStatusFromUnitAndConsole(t *testing.T) {
 	s, dc, key, sent := dispatchTestServer(t)
 	dc.Text = make(chan []byte, 16)
-	s.authenticatedAddrs = map[string]string{}
+	signInAll(s)
 	alice := s.clients[userKey("ag", "alice")]
 
 	s.handleUnitStatus(&UnitStatusPacket{Code: 3}, alice.Addr)
@@ -86,7 +86,7 @@ func TestUnitStatusFromUnitAndConsole(t *testing.T) {
 func TestDispatchMessagesBothWaysAndOffline(t *testing.T) {
 	s, dc, key, sent := dispatchTestServer(t)
 	dc.Text = make(chan []byte, 16)
-	s.authenticatedAddrs = map[string]string{}
+	signInAll(s)
 	console := s.clients[key]
 
 	s.consoleSendMessage(console, "Respond to 12 Main St", &messageTarget{Agency: "ag", User: "alice"}, "", "")

@@ -150,7 +150,7 @@ var (
 )
 
 func (s *Server) handleTranscriptRequest(req *TranscriptRequest, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	s.mu.RLock()
@@ -297,7 +297,7 @@ func recordingAudioChunk(id string, seq, total int, data []byte) []byte {
 // handleRecordingAudioRequest sends (part of) a recording to a phone of the
 // recording's agency.
 func (s *Server) handleRecordingAudioRequest(req *RecordingAudioRequest, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	s.mu.RLock()

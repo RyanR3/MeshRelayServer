@@ -130,7 +130,7 @@ func TestDispatchDeniedUsersAgenciesConfig(t *testing.T) {
 
 	denied := []struct{ method, path, body string }{
 		{"GET", "/api/users", ""},
-		{"POST", "/api/users", `{"username":"evil","password":"pw123456789","role":"admin","agency_id":"ems"}`},
+		{"POST", "/api/users", `{"username":"evil","password":"pw123456789abc","role":"admin","agency_id":"ems"}`},
 		{"POST", "/api/users/bulk", "username,password,role\nevil,pw,admin\n"},
 		{"PUT", "/api/users/medic1/password?agency=ems", `{"password":"owned"}`},
 		{"PUT", "/api/users/medic1/role?agency=ems", `{"role":"admin"}`},
@@ -507,7 +507,7 @@ func TestAccountNameValidation(t *testing.T) {
 func TestCreateRejectsMarkupAndSetsHeaders(t *testing.T) {
 	s := newWebTestServer(t)
 	h := s.webHandler()
-	rec := doReq(h, "POST", "/api/users", "fireadmin", `{"username":"x\"><img src=x onerror=alert(1)>","password":"pw123456789"}`)
+	rec := doReq(h, "POST", "/api/users", "fireadmin", `{"username":"x\"><img src=x onerror=alert(1)>","password":"pw123456789abc"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("markup username: %d %s", rec.Code, rec.Body.String())
 	}
@@ -526,7 +526,7 @@ func TestCreateRejectsMarkupAndSetsHeaders(t *testing.T) {
 	}
 	// Case-variant duplicates are refused.
 	s.users[userKey("fire", "Engine1")] = &UserAccount{Username: "Engine1", AgencyID: "fire", Role: "user"}
-	rec = doReq(h, "POST", "/api/users", "fireadmin", `{"username":"ENGINE1","password":"pw123456789"}`)
+	rec = doReq(h, "POST", "/api/users", "fireadmin", `{"username":"ENGINE1","password":"pw123456789abc"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("case duplicate: %d %s", rec.Code, rec.Body.String())
 	}

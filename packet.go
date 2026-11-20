@@ -243,6 +243,7 @@ type AuthRequestPacket struct {
 	Username     string
 	PasswordHash string // Legacy: SHA-256(password); Challenge-response: HMAC-SHA256(password, nonce)
 	AgencyID     string // optional, empty for older clients
+	Flags        byte   // optional trailing byte (AuthFlagDeviceKey); 0 from older clients
 }
 
 // AuthChallengeRequestPacket - client requests a challenge nonce (Phase 4f)
@@ -918,11 +919,16 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 
 	// Optionally read agency ID (new clients send it, old clients don't)
 	var agencyID string
+	var flags byte
 	if buf.Len() >= 2 {
 		var agencyLen int16
-		if err := binary.Read(buf, binary.BigEndian, &agencyLen); err == nil && agencyLen > 0 && agencyLen <= 256 {
+		if err := binary.Read(buf, binary.BigEndian, &agencyLen); err == nil && agencyLen >= 0 && agencyLen <= 256 {
 			if agencyBytes, err := readN(buf, int(agencyLen)); err == nil {
 				agencyID = string(agencyBytes)
+				// Then an optional flags byte (servers before 4.7 ignore it).
+				if b, err := buf.ReadByte(); err == nil {
+					flags = b
+				}
 			}
 		}
 	}
@@ -931,6 +937,7 @@ func ParseAuthRequestPacket(data []byte) (*AuthRequestPacket, error) {
 		Username:     string(usernameBytes),
 		PasswordHash: string(hashBytes),
 		AgencyID:     agencyID,
+		Flags:        flags,
 	}, nil
 }
 

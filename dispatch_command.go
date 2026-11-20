@@ -71,7 +71,7 @@ func validFix(lat, lon float64) bool {
 }
 
 func (s *Server) handleLocationReport(p *LocationReport, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	if !validFix(p.Lat, p.Lon) {

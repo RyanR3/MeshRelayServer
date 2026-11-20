@@ -15,9 +15,10 @@ import (
 func newFloorTestServer(t *testing.T, users ...string) (*Server, map[string][][]byte) {
 	t.Helper()
 	s := &Server{
-		clients:  make(map[string]*Client),
-		channels: make(map[string]*Channel),
-		config:   &Config{AuthEnabled: false},
+		clients:            make(map[string]*Client),
+		channels:           make(map[string]*Channel),
+		authenticatedAddrs: make(map[string]string),
+		config:             &Config{},
 	}
 	sent := map[string][][]byte{}
 	// Fake UDP addrs, one per user, and a reverse map addr->user for capture.
@@ -30,6 +31,8 @@ func newFloorTestServer(t *testing.T, users ...string) (*Server, map[string][][]
 		s.clients[userKey("ag", u)] = cl
 		ch.Clients[userKey("ag", u)] = cl
 		addrToUser[addr.String()] = u
+		// Sign-in is always required: each test client is signed in.
+		s.recordAuthLocked(addr.String(), "ag", userKey("ag", u), credPassword)
 	}
 	// Override sendPacket path by capturing in a custom test hook: we can't easily
 	// swap sendPacket, so capture via a wrapper the tests call. Instead, we record
@@ -153,5 +156,15 @@ func TestFloorEmergencyPreempts(t *testing.T) {
 	}
 	if !foundAlert {
 		t.Fatalf("channel members should receive EMERGENCY_ALERT broadcast")
+	}
+}
+
+// signInAll marks every test client signed in as its own account (sign-in
+// is always required).
+func signInAll(s *Server) {
+	for k, c := range s.clients {
+		if c.Addr != nil {
+			s.recordAuthLocked(c.Addr.String(), c.AgencyID, k, credPassword)
+		}
 	}
 }

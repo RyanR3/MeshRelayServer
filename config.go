@@ -14,7 +14,6 @@ type Config struct {
 	MaxClients            int    `json:"max_clients"`
 	MaxChannels           int    `json:"max_channels"`
 	LogLevel              string `json:"log_level"`
-	AuthEnabled           bool   `json:"auth_enabled"`
 	UsersFile             string `json:"users_file"`
 	WebAdminsFile         string `json:"web_admins_file"`
 	AgenciesFile          string `json:"agencies_file"`
@@ -103,7 +102,6 @@ func DefaultConfig() *Config {
 		MaxClients:            1000,
 		MaxChannels:           100,
 		LogLevel:              "INFO",
-		AuthEnabled:           true,
 		UsersFile:             "users.json",
 		WebAdminsFile:         "web_admins.json",
 		AgenciesFile:          "agencies.json",

@@ -133,7 +133,7 @@ func TestEditUserPasswordResetPersistsDashboardStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := strings.NewReader(`{"password":"right-one"}`)
+	body := strings.NewReader(`{"password":"right-one-password"}`)
 	req := httptest.NewRequest("PUT", "/api/users/devadmin?agency=dev", body)
 	req = mux.SetURLVars(req, map[string]string{"username": "devadmin"})
 	req.AddCookie(&http.Cookie{Name: "session", Value: "tok"})
@@ -148,7 +148,7 @@ func TestEditUserPasswordResetPersistsDashboardStore(t *testing.T) {
 	fresh.config.WebAdminsFile = s.config.WebAdminsFile
 	fresh.loadWebAdmins()
 	a := fresh.webAdmins[key]
-	if a == nil || !checkPassword("right-one", a.PasswordHash) {
+	if a == nil || !checkPassword("right-one-password", a.PasswordHash) {
 		t.Fatal("password reset did not survive a restart — web_admins.json was not saved")
 	}
 }

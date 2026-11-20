@@ -86,7 +86,6 @@ func TestConsoleAudioOnlyWhileKeyed(t *testing.T) {
 		t.Fatalf("unkeyed console audio must not be relayed")
 	}
 
-	s.config.AuthEnabled = false
 	s.dispatchPTT(key, &dc.tx, true)
 	if f := drain(dc); len(f) != 1 || f[0][0] != PacketTypeFloorGranted {
 		t.Fatalf("open channel: console should be granted, got %v", f)

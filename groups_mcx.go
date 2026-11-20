@@ -372,7 +372,7 @@ const adhocAutoExpire = 4 * time.Hour
 
 // handleGroupCreateAdhoc creates an ad-hoc group channel and invites members.
 func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	// The creator is the client this address is signed in as.
@@ -434,7 +434,7 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 
 // handleGroupInviteResponse processes accept/decline of an ad-hoc invite.
 func (s *Server) handleGroupInviteResponse(resp *GroupInviteResponse, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	s.mu.RLock()
@@ -489,7 +489,7 @@ func (gm *GroupManager) removeAdhoc(key string) *adhocChannel {
 // else's request is ignored (they can simply leave; dissolve-on-empty handles
 // the rest).
 func (s *Server) handleGroupDisband(pkt *GroupDisband, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	s.mu.RLock()

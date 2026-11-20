@@ -13,6 +13,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -154,8 +155,8 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/users/{username}/password", s.handleUpdatePassword).Methods("PUT")
 	api.HandleFunc("/users/{username}/role", s.handleUpdateRole).Methods("PUT")
 	api.HandleFunc("/users/{username}/enroll", s.handleGenerateEnrollToken).Methods("POST")
-	api.HandleFunc("/auth/status", s.handleAuthStatus).Methods("GET")
-	api.HandleFunc("/auth/toggle", s.requireSuperAdmin(s.handleAuthToggle)).Methods("POST")
+	api.HandleFunc("/users/{username}/sign-out-phones", s.handleSignOutPhones).Methods("POST")
+	api.HandleFunc("/server-identity", s.handleServerIdentity).Methods("GET")
 	api.HandleFunc("/admin/change-password", s.handleAdminChangePassword).Methods("POST")
 	api.HandleFunc("/version", s.handleVersion).Methods("GET")
 	api.HandleFunc("/update/check", s.requireSuperAdmin(s.handleUpdateCheck)).Methods("POST")
@@ -226,6 +227,7 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/my-agency/lmr-bridges", s.requireAdmin(s.handleCreateMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}", s.requireAdmin(s.handleDeleteMyLMRBridge)).Methods("DELETE")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/toggle", s.requireAdmin(s.handleToggleMyLMRBridge)).Methods("POST")
+	api.HandleFunc("/my-agency/lmr-bridges/{id}/guests", s.requireAdmin(s.handleGuestsMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/share", s.requireAdmin(s.handleShareMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/unshare", s.requireAdmin(s.handleUnshareMyLMRBridge)).Methods("POST")
 
@@ -242,6 +244,7 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/zello-bridges/{id}", s.requireSuperAdmin(s.handleUpdateZelloBridge)).Methods("PUT")
 	api.HandleFunc("/zello-bridges/{id}", s.requireSuperAdmin(s.handleDeleteZelloBridge)).Methods("DELETE")
 	api.HandleFunc("/zello-bridges/{id}/toggle", s.requireSuperAdmin(s.handleToggleZelloBridge)).Methods("POST")
+	api.HandleFunc("/zello-bridges/{id}/guests", s.requireSuperAdmin(s.handleGuestsZelloBridge)).Methods("POST")
 	api.HandleFunc("/zello-bridges/{id}/map", s.requireSuperAdmin(s.handleMapZelloBridge)).Methods("POST")
 	api.HandleFunc("/zello-bridges/{id}/channels", s.requireSuperAdmin(s.handleZelloBridgeChannels)).Methods("GET")
 	api.HandleFunc("/zello-channels", s.requireSuperAdmin(s.handleZelloChannels)).Methods("POST")
@@ -360,13 +363,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// loginBcryptSlots bounds concurrent dashboard password checks.
+var loginBcryptSlots = make(chan struct{}, 4)
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		AgencyID string `json:"agency_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil || len(req.Password) > 1024 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid request"}`))
@@ -376,20 +382,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	req.Username = strings.TrimSpace(req.Username)
 	req.AgencyID = strings.TrimSpace(req.AgencyID)
 
-	// Wrong-password limits (ratelimit.go): per browser address and per account.
-	ipKey := "ip:" + s.clientIP(r)
-	acctKey := pttAuthAccountKey(req.AgencyID, req.Username)
-	for _, k := range []string{ipKey, acctKey} {
-		if locked, left := s.loginLimit.blocked(k); locked {
-			mins := int(left.Minutes()) + 1
-			log.Printf("Web login refused (locked %s more after too many wrong passwords): %s [%s] from %s",
-				left.Round(time.Second), req.Username, req.AgencyID, s.clientIP(r))
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Retry-After", strconv.Itoa(int(left.Seconds())+1))
-			w.WriteHeader(http.StatusTooManyRequests)
-			fmt.Fprintf(w, `{"error":"too many attempts, try again in %d minute(s)"}`, mins)
-			return
-		}
+	// Wrong-password limits (ratelimit.go): per browser address; an account
+	// is guarded only under a guess from many addresses, and then still
+	// accepts the addresses that have signed in to it before.
+	ip := s.clientIP(r)
+	acct := strings.ToLower(userKey(req.AgencyID, req.Username))
+	if locked, left, what := s.loginLimit.blocked(ip, acct); locked {
+		mins := int(left.Minutes()) + 1
+		log.Printf("Web login refused (%s locked %s more after too many wrong passwords): %s [%s] from %s",
+			what, left.Round(time.Second), req.Username, req.AgencyID, ip)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", strconv.Itoa(int(left.Seconds())+1))
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintf(w, `{"error":"too many attempts, try again in %d minute(s)"}`, mins)
+		return
 	}
 
 	s.mu.RLock()
@@ -413,6 +419,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
+	// At most a few password checks at once: each costs a bcrypt, and the
+	// login page is open to the internet.
+	loginBcryptSlots <- struct{}{}
 	ok := false
 	if exists && !snap.SSO { // SSO accounts sign in through the identity provider only
 		ok = checkPassword(req.Password, snap.PasswordHash)
@@ -421,10 +430,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// reveal which usernames exist.
 		checkPassword(req.Password, dummyPasswordHash())
 	}
+	<-loginBcryptSlots
 	if !ok {
-		lockedIP := s.loginLimit.fail(ipKey)
-		lockedAcct := s.loginLimit.fail(acctKey)
-		if lockedIP || lockedAcct {
+		if s.loginLimit.failed(ip, acct) {
 			log.Printf("Web login lockout: too many wrong passwords for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
 		}
 		// Say WHICH half failed in the journal (never to the client): a
@@ -440,8 +448,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.loginLimit.success(acctKey)
-	s.loginLimit.success(ipKey)
+	s.loginLimit.succeeded(ip, strings.ToLower(adminKey))
 
 	// Transparently migrate legacy SHA-256 hashes to bcrypt on successful login
 	if !strings.HasPrefix(snap.PasswordHash, "$2a$") && !strings.HasPrefix(snap.PasswordHash, "$2b$") {
@@ -610,7 +617,13 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.config)
+	// A copy without the GitHub token (/api/github-token reports only
+	// whether one is set).
+	cfg := *s.config
+	if cfg.GitHubToken != "" {
+		cfg.GitHubToken = ""
+	}
+	json.NewEncoder(w).Encode(&cfg)
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
@@ -619,10 +632,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "super admin access required")
 		return
 	}
-	var newConfig Config
-	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	// Merge onto the current config: fields the request leaves out, and
+	// settings that never appear in JSON (environment-only ones such as the
+	// manage token), keep their values. A full replace wiped them.
+	newConfig := *s.config
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&newConfig); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid config")
 		return
+	}
+	if newConfig.GitHubToken == "" {
+		newConfig.GitHubToken = s.config.GitHubToken // GET never returns it
 	}
 
 	// Update config (would require restart for some changes)
@@ -955,6 +974,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"username and password required"}`))
 		return
 	}
+	if err := validateNewPassword(req.Password); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := validateAccountName(req.Username); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -1016,6 +1040,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`{"error":"username and password required"}`))
+			return
+		}
+		if err := validateNewPassword(req.Password); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := s.AddDispatchUser(req.Username, req.Name, req.Password, req.AgencyID); err != nil {
@@ -1167,6 +1196,11 @@ func (s *Server) handleBulkCreateUsers(w http.ResponseWriter, r *http.Request) {
 			role = "user"
 		}
 		if err := validateAccountName(username); err != nil {
+			failed++
+			results = append(results, rowResult{line, username, "error", err.Error(), ""})
+			continue
+		}
+		if err := validateNewPassword(password); err != nil {
 			failed++
 			results = append(results, rowResult{line, username, "error", err.Error(), ""})
 			continue
@@ -1341,6 +1375,22 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Password != nil && *req.Password != "" {
+		if err := validateNewPassword(*req.Password); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	// Phone sessions this edit ends, finished after the lock is released
+	// (deferred first, so it runs after the Unlock below).
+	var kicks []expiredGuestKick
+	defer func() {
+		if len(kicks) > 0 {
+			s.finishSessionKicks(kicks, "Your account was changed — sign in again")
+		}
+	}()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1380,6 +1430,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	adminPasswordChanged := false
 	if req.Password != nil && *req.Password != "" {
 		user.PasswordHash = hashPassword(*req.Password)
+		// The old password's phone sessions end; QR-enrolled phones keep
+		// their own keys.
+		kicks = append(kicks, s.takeSessionsLocked(oldKey, func(c string) bool { return c == credPassword })...)
 		// Also update web admin password if applicable
 		if admin, ok := s.webAdmins[oldKey]; ok {
 			if bh, err := hashPasswordSecure(*req.Password); err == nil {
@@ -1418,6 +1471,10 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"error":"a user with that username already exists in the target agency"}`))
 			return
 		}
+		// Renamed or moved: every session of the old account ends, and its
+		// phone keys go (they named the old account).
+		kicks = append(kicks, s.takeAccountSessionsLocked(oldKey)...)
+		user.Devices = nil
 		user.Username = newUsername
 		user.AgencyID = newAgency
 		delete(s.users, oldKey)
@@ -1515,6 +1572,43 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
+// handleServerIdentity returns the server's public identity key (secure.go):
+// it goes into enrollment QR codes, and its fingerprint is shown so an admin
+// can read it out to someone checking a phone.
+func (s *Server) handleServerIdentity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"public_key":  hex.EncodeToString(s.identityPublic()),
+		"fingerprint": s.identityFingerprint(),
+	})
+}
+
+// handleSignOutPhones removes every phone key of an account (QR-enrolled
+// phones, including older apps whose QR copy would otherwise keep working)
+// and ends all of its phone sessions. The password keeps working.
+func (s *Server) handleSignOutPhones(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	username := mux.Vars(r)["username"]
+	agencyID := r.URL.Query().Get("agency")
+	session := s.getSession(r)
+	if !isSuperAdmin(session) {
+		agencyID = session.AgencyID
+		if !s.agencyAdminMayManage(session.AgencyID, username) {
+			writeJSONError(w, http.StatusForbidden, "cannot edit this user")
+			return
+		}
+	}
+	if agencyID == "" {
+		agencyID = "default"
+	}
+	n, err := s.SignOutDevices(agencyID, username)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "removed": n})
+}
+
 func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	username := vars["username"]
@@ -1543,10 +1637,9 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Password == "" {
+	if err := validateNewPassword(req.Password); err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"password required"}`))
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1587,6 +1680,9 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Role string `json:"role"`
+		// Dashboard password, needed when promoting an account that has no
+		// dashboard login yet (it is never copied from the app password).
+		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Role == "" {
 		w.Header().Set("Content-Type", "application/json")
@@ -1616,10 +1712,16 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		oldRole = u.Role
 	}
 	s.mu.RUnlock()
-	if err := s.UpdateUserRole(agencyID, username, req.Role); err != nil {
+	if err := s.UpdateUserRole(agencyID, username, req.Role, req.Password); err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+		switch {
+		case errors.Is(err, ErrNeedsDashboardPassword):
+			writeJSONError(w, http.StatusBadRequest, "needs_dashboard_password")
+		case strings.HasPrefix(err.Error(), "password must"):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeJSONError(w, http.StatusNotFound, err.Error())
+		}
 		return
 	}
 	// A real role change ends the account's dashboard sessions; re-saving
@@ -1631,35 +1733,6 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": req.Role})
-}
-
-func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"auth_enabled": s.config.AuthEnabled,
-	})
-}
-
-func (s *Server) handleAuthToggle(w http.ResponseWriter, r *http.Request) {
-	s.config.AuthEnabled = !s.config.AuthEnabled
-
-	if err := s.config.Save("config.json"); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"failed to save config"}`))
-		return
-	}
-
-	status := map[bool]string{true: "enabled", false: "disabled"}[s.config.AuthEnabled]
-	log.Printf("Authentication %s", status)
-	s.activityLog.Add("auth_toggle", "", fmt.Sprintf("Authentication %s", status), "")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if s.config.AuthEnabled {
-		w.Write([]byte(`{"auth_enabled":true}`))
-	} else {
-		w.Write([]byte(`{"auth_enabled":false}`))
-	}
 }
 
 func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -1987,6 +2060,11 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 	if req.Username == "" || req.Password == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"username and password required"}`))
+		return
+	}
+	if err := validateNewPassword(req.Password); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := validateAccountName(req.Username); err != nil {

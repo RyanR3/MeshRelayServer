@@ -633,10 +633,17 @@ func (fc *FloorController) Tick() {
 }
 
 // DropUser removes a disconnected user from any floor/queue on all channels.
-func (fc *FloorController) DropUser(user string) {
+// DropUser releases what user holds or has queued on the channels of its OWN
+// agency. Floor keys are "<agency>:<channel>"; matching on the callsign alone
+// let "Unit1" leaving agency A cut off agency B's "Unit1" mid-transmission.
+func (fc *FloorController) DropUser(agencyID, user string) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
+	prefix := agencyID + ":"
 	for key, c := range fc.channels {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
 		if d := c.recording[user]; d != nil {
 			d.complete = true
 			delete(c.recording, user)
@@ -731,7 +738,7 @@ func (s *Server) broadcastFloorToChannel(key string, data []byte) {
 // is a RELEASE (PTT up). The server validates the client's priority against its
 // provisioned account (clients can't self-elevate).
 func (s *Server) handleFloorRequest(req *FloorRequest, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	// The requester is the client this address is signed in as; the name in
@@ -829,7 +836,7 @@ func (s *Server) SetUserPriority(agencyID, username string, priority int) {
 // channel emergency state. Any member can set; only the originator or a
 // supervisor (admin/super_admin) can cancel.
 func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) {
-	if s.config.AuthEnabled && !s.isAuthenticated(addr) {
+	if !s.isAuthenticated(addr) {
 		return
 	}
 	// Only the signed-in client itself can raise or cancel its emergency.
