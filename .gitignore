@@ -37,3 +37,6 @@ guest_events.json
 mrtranscribe-linux-*
 .env
 docker-compose.override.yml
+
+# Server identity key (secure protocol). NEVER commit.
+server_identity.key

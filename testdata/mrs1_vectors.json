@@ -1,0 +1,19 @@
+{
+  "auth_message": "e0383d0c6ea458ee57b682df1ec882a8f1046ba3ba86b2168f36b79f3cd64653",
+  "client_key": "34cd191582a9bc25ca3fca38cc069378fb8346b37c99c2a755e6ed320d37c8c8",
+  "client_proof": "9a50bd3bc7c49bdd8a018f3e4ee183e70683e877fb68b5349760507397720df8",
+  "data_c2s_key": "eeb474fc971342f64f2da7059bb707ef576a8a63d5fcb5e1681675ba05988ca9",
+  "hs_tag_key": "062249ca3b9001f1cb5ab0a18ad9e1e9e567bb085aaad9c0e10645b7ac588418",
+  "iterations": "100000",
+  "p_hex": "9028ea0d15decaa35b2da21c0290af3b1a5ba0a30a591906f89b5074e209ea72",
+  "password": "correct horse battery",
+  "prk": "a6b4afcfd943c8fbb0d671753fa10acf4e8cad3bf6ee3f2b8f594429e82e3ea3",
+  "salt": "6a850dac84a83a261a8547fc35ebd46859b8419ed28fec1d28511fcd2b7098aa",
+  "sealed_leave": "440000000700000001e7f654c1d91bac78767c7b668d8fcddabe",
+  "server_key": "5c78a579d65a1cfd027c4215bfdd0abc5dc234da4439144ce9e9cf4a7540df5a",
+  "server_public": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+  "server_signature": "3bbbdc6211d608ecd5fcd1aba46dd2f35f02c033e9fa585c655d18bfe3d080b5",
+  "stored_key": "e125e26b2917583ae6ef6d1a1484226cdd590f4d3df902b6d36c86bc6de1b89c",
+  "th1": "abef389cf6d22b30cb0aa94576cb2254c7a595fb1d1014b41a6270d69cf8a209",
+  "username": "Engine7"
+}
