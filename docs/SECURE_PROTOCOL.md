@@ -2,7 +2,9 @@
 
 Client-to-server protocol on UDP 5000 that replaces the challenge-response
 sign-in (`0x0D`/`0x0E`/`0x08`/`0x09`) and the plaintext packets after it.
-The server speaks both until an agency requires this one.
+The server speaks both: older apps keep signing in with the old protocol,
+and a client that has pinned the server's key does not go back to it (see
+below).
 
 Reference implementation: `secure.go` (server) and the `secPhone` type in
 `secure_test.go` (client). Check a new client against

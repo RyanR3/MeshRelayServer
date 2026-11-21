@@ -197,7 +197,7 @@ journalctl -u ptt-server -n 100
 1. **Test the server** - Verify dashboard is accessible
 2. **Monitor logs** - Watch for any errors
 3. **Plan Android app updates** - To support server mode
-4. **Consider security** - Add authentication if exposing to internet
+4. **Consider security** - Sign-in is always required; before exposing the server to the internet, use strong passwords and put the dashboard behind HTTPS
 
 ---
 

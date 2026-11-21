@@ -64,7 +64,6 @@ if [ ! -f "$INSTALL_DIR/config.json" ]; then
   "max_clients": 1000,
   "max_channels": 100,
   "log_level": "INFO",
-  "auth_enabled": true,
   "users_file": "users.json",
   "web_admins_file": "web_admins.json",
   "agencies_file": "agencies.json"

@@ -146,7 +146,6 @@ if [ "$USE_TLS" -eq 1 ]; then
   "max_clients": 1000,
   "max_channels": 100,
   "log_level": "INFO",
-  "auth_enabled": true,
   "users_file": "users.json",
   "web_admins_file": "web_admins.json",
   "agencies_file": "agencies.json",
@@ -162,7 +161,6 @@ else
   "max_clients": 1000,
   "max_channels": 100,
   "log_level": "INFO",
-  "auth_enabled": true,
   "users_file": "users.json",
   "web_admins_file": "web_admins.json",
   "agencies_file": "agencies.json"

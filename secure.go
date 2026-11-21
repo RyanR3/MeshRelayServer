@@ -19,8 +19,9 @@ package main
 //   - The proof of the password uses a salted, slow-to-guess verifier, so what
 //     the server holds for the secure sign-in is not itself a login.
 //
-// The old protocol keeps working beside it until an agency requires the
-// secure one.
+// The old protocol keeps working beside it, so older apps still sign in with
+// it. A phone that has pinned this server's key (from the QR or a secure
+// sign-in) does not go back to the old protocol for this server.
 
 import (
 	"bytes"
