@@ -316,6 +316,8 @@ type Server struct {
 	transcriber            *Transcriber // speech-to-text of recordings (transcriber.go)
 	takMgr                 *takManager  // TAK Server connectors per agency (tak.go)
 	takOnce                sync.Once
+	lmrPub                 *lmrMarkerPublisher // LMR bridge markers on TAK (lmr_atak.go)
+	lmrPubOnce             sync.Once
 	lastChannel            map[string]int // userKey -> channel of the last JOIN, for re-registration
 	lastChannelSavePending bool
 	authSessions           map[string]authSession // addr string -> how it signed in (account_security.go)
@@ -961,6 +963,7 @@ func (s *Server) StartPTT() error {
 		log.Printf("Transcription available (model %s)", m.Name)
 	}
 	s.loadTakConnections()
+	s.startLMRMarkers()
 
 	// Start heartbeat checker
 	go s.heartbeatChecker()

@@ -22,6 +22,8 @@ type lmrBridgeView struct {
 	*LMRBridge
 	AgencyNames []string `json:"agency_names"`
 	Online      bool     `json:"online"`
+	// Where the ATAK marker goes: each agency's TAK link (lmr_atak.go).
+	ATAKMarker []lmrAtakAgencyState `json:"atak_marker,omitempty"`
 }
 
 // handleGetLMRBridges returns every bridge, newest config first.
@@ -46,9 +48,22 @@ func (s *Server) handleGetLMRBridges(w http.ResponseWriter, r *http.Request) {
 				online = true
 			}
 		}
-		out = append(out, lmrBridgeView{LMRBridge: b, AgencyNames: names, Online: online})
+		v := lmrBridgeView{LMRBridge: b, AgencyNames: names, Online: online}
+		if b.ShowInATAK {
+			for j, a := range b.Agencies {
+				v.ATAKMarker = append(v.ATAKMarker, lmrAtakAgencyState{AgencyID: a, Name: names[j]})
+			}
+		}
+		out = append(out, v)
 	}
 	s.mu.RUnlock()
+
+	// TAK link states are read after s.mu is released (lmr_atak.go locking).
+	for i := range out {
+		for j := range out[i].ATAKMarker {
+			out[i].ATAKMarker[j].TAK = s.takLinkState(out[i].ATAKMarker[j].AgencyID)
+		}
+	}
 
 	json.NewEncoder(w).Encode(out)
 }
@@ -269,6 +284,7 @@ func (s *Server) handleUpdateLMRBridge(w http.ResponseWriter, r *http.Request) {
 	if enabled {
 		go s.notifyLMRChannel(newAgencies, channel, newName, true)
 	}
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 
 	if err := s.saveLMRBridges(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save: %s", err.Error()))
@@ -298,6 +314,7 @@ func (s *Server) handleToggleLMRBridge(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	go s.notifyLMRChannel(agencies, channel, name, enabled)
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 
 	if err := s.saveLMRBridges(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save: %s", err.Error()))
@@ -365,6 +382,7 @@ func (s *Server) handleDeleteLMRBridge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notifyLMRChannel(agencies, channel, name, false)
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 
 	if err := s.saveUsersUnlocked(); err != nil {
 		log.Printf("LMR: failed to save users after deleting gateway account: %v", err)

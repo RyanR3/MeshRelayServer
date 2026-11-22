@@ -218,6 +218,7 @@ var apiRolePolicy = map[string]int{
 	"DELETE /api/my-agency/lmr-bridges/{id}":         allowAdmins,
 	"POST /api/my-agency/lmr-bridges/{id}/toggle":    allowAdmins,
 	"POST /api/my-agency/lmr-bridges/{id}/guests":    allowAdmins,
+	"PUT /api/my-agency/lmr-bridges/{id}/atak":       allowAdmins,
 	"POST /api/my-agency/lmr-bridges/{id}/share":     allowAdmins,
 	"POST /api/my-agency/lmr-bridges/{id}/unshare":   allowAdmins,
 	"GET /api/guest-events":                          allowAdmins,

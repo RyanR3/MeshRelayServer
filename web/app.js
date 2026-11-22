@@ -3765,6 +3765,7 @@ function renderLmrBridges(bridges) {
                         Enrollment QR
                     </button>
                 </div>
+                ${lmrAtakSection(b, '/api/lmr-bridges/', lmrAtakSuperState(b))}
             </div>`;
         }).join('');
     }
@@ -4631,6 +4632,134 @@ function zbAddBridge() {
 }
 
 
+// ===== LMR Bridges — ATAK marker =====
+//
+// A bridge can be shown on the ATAK map: the server publishes a marker for the
+// channel on the TAK server connection of each agency in the bridge. Same card
+// section on the super admin and agency views; only the API path differs.
+
+const lmrAtakDrafts = {};   // bridgeId -> {lat, lon} typed but not saved yet
+
+const LMR_ATAK_NOTE = 'The marker is visible to everyone on the agency\'s TAK server. '
+    + 'Listening still needs a MeshRelay login with access to this channel.';
+
+// Why a marker is or is not going out on one agency's TAK link.
+function lmrAtakTakText(tak) {
+    switch (tak) {
+        case 'connected': return { ok: true, text: 'sent to the TAK server' };
+        case 'down': return { ok: false, text: 'marker not being sent: the TAK connection is down (sent again when it reconnects)' };
+        case 'off': return { ok: false, text: 'marker not being sent: the TAK connection is switched off' };
+        default: return { ok: false, text: 'marker not being sent: no TAK connection is set up' };
+    }
+}
+
+function lmrAtakFmt(v) {
+    return (typeof v === 'number' && isFinite(v)) ? String(v) : '';
+}
+
+// The ATAK section of an owner's bridge card. base is the API prefix the card
+// belongs to ('/api/my-agency/lmr-bridges/' or '/api/lmr-bridges/');
+// stateHtml is the line saying where the marker goes.
+function lmrAtakSection(b, base, stateHtml) {
+    const draft = lmrAtakDrafts[b.id];
+    const lat = draft ? draft.lat : lmrAtakFmt(b.lat);
+    const lon = draft ? draft.lon : lmrAtakFmt(b.lon);
+    return `<div class="lmr-atak" data-bridge="${escapeAttr(b.id)}" data-base="${escapeAttr(base)}">
+        <div class="lmr-atak-row">
+            <span class="lmr-atak-label">Show in ATAK</span>
+            <label class="toggle-switch lmr-atak-switch" title="Publish a map marker for this channel to the agency's TAK server">
+                <input type="checkbox" class="lmr-atak-on" ${b.show_in_atak ? 'checked' : ''}
+                       onchange="lmrAtakSave(this)">
+                <span class="toggle-slider"></span>
+            </label>
+            <input type="text" inputmode="decimal" class="lmr-atak-coord lmr-atak-lat" placeholder="Latitude"
+                   value="${escapeAttr(lat)}" oninput="lmrAtakDraft(this)" aria-label="Latitude">
+            <input type="text" inputmode="decimal" class="lmr-atak-coord lmr-atak-lon" placeholder="Longitude"
+                   value="${escapeAttr(lon)}" oninput="lmrAtakDraft(this)" aria-label="Longitude">
+            <button class="btn-secondary lmr-atak-save" onclick="lmrAtakSave(this)">Save location</button>
+        </div>
+        ${stateHtml}
+        <div class="lmr-atak-note">${escapeHtml(LMR_ATAK_NOTE)}</div>
+    </div>`;
+}
+
+function lmrAtakStateLine(ok, text) {
+    return `<div class="lmr-atak-state ${ok === null ? '' : (ok ? 'lmr-atak-ok' : 'lmr-atak-warn')}">${escapeHtml(text)}</div>`;
+}
+
+// Agency view: the caller's own TAK link (atak_tak).
+function lmrAtakAgencyState(b) {
+    if (!b.show_in_atak) return lmrAtakStateLine(null, 'Off: no marker is sent.');
+    if (b.enabled === false) return lmrAtakStateLine(false, 'Marker not being sent: the bridge is paused.');
+    const t = lmrAtakTakText(b.atak_tak);
+    let text = t.ok ? 'Marker is being sent to your agency\'s TAK server.' : t.text.charAt(0).toUpperCase() + t.text.slice(1) + ' for your agency.';
+    if ((b.shared_with || []).length) text += ' Agencies you share this bridge with get it on their own TAK connections.';
+    return lmrAtakStateLine(t.ok, text);
+}
+
+// Super admin view: every agency in the bridge (atak_marker).
+function lmrAtakSuperState(b) {
+    if (!b.show_in_atak) return lmrAtakStateLine(null, 'Off: no marker is sent.');
+    if (b.enabled === false) return lmrAtakStateLine(false, 'Marker not being sent: the bridge is disabled.');
+    const rows = (b.atak_marker || []).map(a => {
+        const t = lmrAtakTakText(a.tak);
+        return `<div class="lmr-atak-state ${t.ok ? 'lmr-atak-ok' : 'lmr-atak-warn'}">${escapeHtml((a.name || a.agency_id) + ': ' + t.text)}</div>`;
+    });
+    return rows.join('');
+}
+
+function lmrAtakDraft(el) {
+    const box = el.closest('.lmr-atak');
+    lmrAtakDrafts[box.dataset.bridge] = {
+        lat: box.querySelector('.lmr-atak-lat').value,
+        lon: box.querySelector('.lmr-atak-lon').value
+    };
+}
+
+function lmrAtakSave(el) {
+    const box = el.closest('.lmr-atak');
+    const id = box.dataset.bridge;
+    const base = box.dataset.base;
+    const sw = box.querySelector('.lmr-atak-on');
+    const latS = box.querySelector('.lmr-atak-lat').value.trim();
+    const lonS = box.querySelector('.lmr-atak-lon').value.trim();
+    const refresh = () => (base.indexOf('/my-agency/') >= 0 ? fetchAgencyLmrBridges() : fetchLmrBridges());
+
+    let lat = null, lon = null;
+    if (latS !== '' || lonS !== '') {
+        lat = Number(latS);
+        lon = Number(lonS);
+        if (latS === '' || lonS === '' || !isFinite(lat) || !isFinite(lon)) {
+            showStatus('lmr-status', 'Enter both latitude and longitude as decimal degrees (for example 41.6512 and -74.6931)', 'warning');
+            if (el === sw) sw.checked = !sw.checked;
+            return;
+        }
+    }
+    if (sw.checked && lat === null) {
+        showStatus('lmr-status', 'Set the bridge\'s location before showing it in ATAK', 'warning');
+        sw.checked = false;
+        return;
+    }
+    fetch(base + encodeURIComponent(id) + '/atak', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_in_atak: sw.checked, lat: lat, lon: lon })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) {
+            showStatus('lmr-status', d.error, 'error');
+            refresh();
+            return;
+        }
+        delete lmrAtakDrafts[id];
+        showStatus('lmr-status', d.show_in_atak ? 'Shown in ATAK' : (lat === null ? 'ATAK marker off, location cleared' : 'ATAK marker off, location saved'), 'success');
+        refresh();
+    })
+    .catch(e => { showStatus('lmr-status', 'Failed to save ATAK marker: ' + e.message, 'error'); refresh(); });
+}
+
+
 // ===== LMR Bridges — agency-admin view =====
 //
 // An LMR bridge belongs to the agency that created it: their gateway box, their
@@ -4757,6 +4886,7 @@ function lmrRenderAgencyBridges() {
                 </div>
                 <div class="ma-patch-meta">Channel ${b.channel}
                     &middot; shared by ${escapeHtml(b.owner_name || 'another agency')}</div>
+                ${b.show_in_atak ? `<div class="lmr-atak lmr-atak-readonly">${lmrAtakAgencyState(b)}</div>` : ''}
             </div>`;
         }
 
@@ -4796,6 +4926,7 @@ function lmrRenderAgencyBridges() {
                 <div class="ma-patch-chips">${shared}</div>
                 <div class="ma-dropzone-hint ma-edit-hint">Drag an agency here to share this bridge</div>
             </div>
+            ${lmrAtakSection(b, '/api/my-agency/lmr-bridges/', lmrAtakAgencyState(b))}
         </div>`;
     }).join('');
     if (keep) wrap.insertAdjacentHTML('afterbegin', keep);

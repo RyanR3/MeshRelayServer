@@ -82,6 +82,15 @@ type LMRBridge struct {
 	// logins) TRANSMIT on this bridge's channel. Off by default: a guest can
 	// listen, but cannot key the radio (bridge_tx.go).
 	AllowGuests bool `json:"allow_guests,omitempty"`
+
+	// ATAK map marker (lmr_atak.go). With ShowInATAK on and a location set,
+	// the server publishes a marker for this channel on the TAK connection of
+	// every agency in the bridge. Off by default; all three are omitted from
+	// the file when unset, so older files load unchanged. Lat/Lon are
+	// pointers so a location at 0,0 is not mistaken for "no location".
+	ShowInATAK bool     `json:"show_in_atak,omitempty"`
+	Lat        *float64 `json:"lat,omitempty"`
+	Lon        *float64 `json:"lon,omitempty"`
 }
 
 // ownerAgency is the agency the gateway's own client record belongs to.

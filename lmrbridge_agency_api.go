@@ -42,6 +42,13 @@ type lmrAgencyView struct {
 
 	// Recipient-facing.
 	OwnerName string `json:"owner_name,omitempty"`
+
+	// ATAK marker (lmr_atak.go). ATAKTAK is the caller's own agency's TAK
+	// link state while the marker is switched on.
+	ShowInATAK bool     `json:"show_in_atak"`
+	Lat        *float64 `json:"lat,omitempty"`
+	Lon        *float64 `json:"lon,omitempty"`
+	ATAKTAK    string   `json:"atak_tak,omitempty"`
 }
 
 // handleGetMyLMRBridges lists the bridges this agency owns or has been granted.
@@ -66,6 +73,7 @@ func (s *Server) handleGetMyLMRBridges(w http.ResponseWriter, r *http.Request) {
 		v := lmrAgencyView{
 			ID: b.ID, Name: b.Name, Channel: b.Channel,
 			ChannelName: b.displayName(), Enabled: b.Enabled, AllowGuests: b.AllowGuests,
+			ShowInATAK: b.ShowInATAK, Lat: copyFloat(b.Lat), Lon: copyFloat(b.Lon),
 		}
 		if owner || isSuper {
 			v.Access = "owner"
@@ -89,6 +97,15 @@ func (s *Server) handleGetMyLMRBridges(w http.ResponseWriter, r *http.Request) {
 		out = append(out, v)
 	}
 	s.mu.RUnlock()
+
+	// After s.mu is released (lmr_atak.go locking).
+	if mine != "" {
+		for i := range out {
+			if out[i].ShowInATAK {
+				out[i].ATAKTAK = s.takLinkState(mine)
+			}
+		}
+	}
 
 	json.NewEncoder(w).Encode(out)
 }
@@ -264,6 +281,7 @@ func (s *Server) handleShareMyLMRBridge(w http.ResponseWriter, r *http.Request) 
 		go s.notifyLMRChannel([]string{req.AgencyID}, channel, chName, true)
 		go s.broadcastRoster(req.AgencyID)
 	}
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 	if err := s.saveLMRBridges(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
@@ -332,6 +350,7 @@ func (s *Server) handleUnshareMyLMRBridge(w http.ResponseWriter, r *http.Request
 		s.announceChannelRemoval(target, channel, chName)
 		s.broadcastRoster(target)
 	}()
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 
 	if err := s.saveLMRBridges(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
@@ -405,6 +424,7 @@ func (s *Server) handleDeleteMyLMRBridge(w http.ResponseWriter, r *http.Request)
 	}
 
 	go s.notifyLMRChannel(agencies, channel, chName, false)
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 
 	if err := s.saveUsersUnlocked(); err != nil {
 		log.Printf("LMR: failed to save users after deleting gateway account: %v", err)
@@ -478,6 +498,7 @@ func (s *Server) handleToggleMyLMRBridge(w http.ResponseWriter, r *http.Request)
 	s.mu.Unlock()
 
 	go s.notifyLMRChannel(agencies, channel, name, enabled)
+	s.lmrMarkersChanged() // ATAK marker follows the bridge (lmr_atak.go)
 	if err := s.saveLMRBridges(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return

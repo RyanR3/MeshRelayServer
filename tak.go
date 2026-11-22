@@ -509,6 +509,7 @@ func (t *takConn) session() error {
 	defer conn.Close()
 	t.setStatus("connected", "")
 	log.Printf("TAK [%s]: connected to %s:%d as %q", t.cfg.AgencyID, t.cfg.Host, t.cfg.StreamPort, t.cfg.Callsign)
+	t.s.lmrMarkersChanged() // LMR bridge markers (lmr_atak.go): send them again now
 	t.mu.Lock()
 	current := t.cfg
 	t.mu.Unlock()
@@ -564,18 +565,21 @@ func (t *takConn) session() error {
 	}
 }
 
-func (t *takConn) send(data string) {
+// send writes one CoT document; it reports whether the write succeeded.
+func (t *takConn) send(data string) bool {
 	t.mu.Lock()
 	c := t.conn
 	t.mu.Unlock()
 	if c == nil {
-		return
+		return false
 	}
 	c.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := c.Write([]byte(data)); err != nil {
 		log.Printf("TAK [%s]: write failed: %v", t.cfg.AgencyID, err)
 		c.Close()
+		return false
 	}
+	return true
 }
 
 func (t *takConn) pruneStale() {

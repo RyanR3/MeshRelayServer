@@ -228,6 +228,7 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/my-agency/lmr-bridges/{id}", s.requireAdmin(s.handleDeleteMyLMRBridge)).Methods("DELETE")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/toggle", s.requireAdmin(s.handleToggleMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/guests", s.requireAdmin(s.handleGuestsMyLMRBridge)).Methods("POST")
+	api.HandleFunc("/my-agency/lmr-bridges/{id}/atak", s.requireAdmin(s.handleLMRBridgeATAK)).Methods("PUT")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/share", s.requireAdmin(s.handleShareMyLMRBridge)).Methods("POST")
 	api.HandleFunc("/my-agency/lmr-bridges/{id}/unshare", s.requireAdmin(s.handleUnshareMyLMRBridge)).Methods("POST")
 
@@ -237,6 +238,7 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/lmr-bridges/{id}", s.requireSuperAdmin(s.handleUpdateLMRBridge)).Methods("PUT")
 	api.HandleFunc("/lmr-bridges/{id}", s.requireSuperAdmin(s.handleDeleteLMRBridge)).Methods("DELETE")
 	api.HandleFunc("/lmr-bridges/{id}/toggle", s.requireSuperAdmin(s.handleToggleLMRBridge)).Methods("POST")
+	api.HandleFunc("/lmr-bridges/{id}/atak", s.requireSuperAdmin(s.handleLMRBridgeATAK)).Methods("PUT")
 
 	// Zello Work channel bridges (super_admin)
 	api.HandleFunc("/zello-bridges", s.requireSuperAdmin(s.handleGetZelloBridges)).Methods("GET")

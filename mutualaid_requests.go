@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"math"
 	"os"
 	"time"
 )
@@ -261,6 +262,12 @@ func (s *Server) agencyRevision(agencyID string) uint64 {
 		h := fnv64(b.ID) ^ fnv64(b.displayName()) ^ uint64(b.Channel)
 		if b.Enabled {
 			h ^= fnv64("enabled")
+		}
+		if b.ShowInATAK {
+			h ^= fnv64("atak")
+		}
+		if b.Lat != nil && b.Lon != nil {
+			h ^= fnv64("loc") ^ math.Float64bits(*b.Lat) ^ (math.Float64bits(*b.Lon) * 31)
 		}
 		for _, ag := range b.Agencies {
 			h ^= fnv64(ag)
