@@ -718,6 +718,8 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 	sender := "Zello:" + zch
 	pkt := &AudioPacket{Username: sender, AudioData: opus, Codec: CodecOpus}
 	audioData := append([]byte{PacketTypeAudioOpus}, SerializeAudioPacket(pkt)...)
+	// Monitors get the channel-tagged copy (monitor_tag.go), built on first use.
+	var monitorTagged []byte
 
 	// Deliver into EVERY agency this Zello channel is shared with. sentTo is
 	// shared across all of them so a client reachable two ways (e.g. via its own
@@ -747,7 +749,10 @@ func (s *Server) handleZelloBinaryAudio(b *ZelloBridge, frame []byte) {
 			}
 			for _, mch := range mc.MonitoredChannels {
 				if mch == meshCh {
-					s.sendPacket(audioData, mc.Addr)
+					if monitorTagged == nil {
+						monitorTagged = s.monitorAudio(monitorStreamKey(meshAgencies[0], meshCh, sender), meshCh, audioData)
+					}
+					s.sendPacket(monitorTagged, mc.Addr)
 					sentTo[mc.Addr.String()] = true
 					break
 				}

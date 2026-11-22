@@ -81,6 +81,9 @@ const (
 	// channel MONITORING (0x12 always-listen) — active-channel members keep the
 	// plain 0x13 framing. Untagged monitor audio was attributed to the
 	// receiver's active channel ("talking on Channel N" showed the wrong N).
+	// Opus relayed without an RTP header (0x10, console talk, Zello) is sent
+	// to monitors in this form too, with an RTP header the server numbers
+	// (monitor_tag.go); raw PCM (0x00) has no tagged form.
 	// Backward-safe: only monitoring clients ever see 0x14, and monitoring is
 	// only implemented by the Android standalone app (which parses it).
 	PacketTypeAudioRtpChan byte = 0x14

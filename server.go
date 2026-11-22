@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -359,6 +358,8 @@ type Server struct {
 	activityLog       *ActivityLog
 	networkTimeSeries *NetworkTimeSeries
 	wsConnCount       int64 // atomic counter for active WebSocket connections
+
+	monTag monitorTagger // RTP numbering for channel-tagged monitor copies (monitor_tag.go)
 }
 
 type Stats struct {
@@ -1241,14 +1242,20 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 
 	// Channel-tagged variant (0x14) for MONITOR recipients only: without the
 	// tag, always-listen audio is attributed to the receiver's active channel.
-	// Non-RTP (legacy PCM/Opus) audio has no tagged form — those monitors keep
-	// the old mislabeled behavior rather than a new wire format.
-	monitorAudioData := audioData
+	// RTP and Opus audio have a tagged form (monitor_tag.go); raw PCM has none
+	// and monitors keep getting it untagged. Built once, on first use, so the
+	// made-up RTP numbering only advances for frames a monitor receives.
+	var monitorTagged []byte
+	monitorAudioData := func() []byte {
+		if monitorTagged == nil {
+			monitorTagged = s.monitorAudio(monitorStreamKey(client.AgencyID, client.Channel, packet.Username), client.Channel, audioData)
+		}
+		return monitorTagged
+	}
+	// EMERGENCY-channel listeners keep the tagging they had: RTP audio only.
+	emergencyAudioData := audioData
 	if packet.RTP != nil {
-		tagged := make([]byte, 5, 5+len(audioData)-1)
-		tagged[0] = PacketTypeAudioRtpChan
-		binary.BigEndian.PutUint32(tagged[1:5], uint32(client.Channel))
-		monitorAudioData = append(tagged, audioData[1:]...)
+		emergencyAudioData = tagRTPAudio(client.Channel, audioData)
 	}
 
 	// Broadcast audio to all clients in the same channel (except sender).
@@ -1282,7 +1289,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 			// Apps that don't know it get it untagged, so it still plays.
 			if s.emergencyListener(mc) {
 				if mc.EmergencyAware {
-					s.sendPacket(monitorAudioData, mc.Addr)
+					s.sendPacket(emergencyAudioData, mc.Addr)
 				} else {
 					s.sendPacket(audioData, mc.Addr)
 				}
@@ -1293,7 +1300,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 		}
 		for _, ch := range mc.MonitoredChannels {
 			if ch == client.Channel {
-				s.sendPacket(monitorAudioData, mc.Addr)
+				s.sendPacket(monitorAudioData(), mc.Addr)
 				sentTo[mc.Addr.String()] = true
 				relayCount++
 				break
@@ -1371,7 +1378,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 			}
 			for _, ch := range mc.MonitoredChannels {
 				if ch == client.Channel {
-					s.sendPacket(monitorAudioData, mc.Addr)
+					s.sendPacket(monitorAudioData(), mc.Addr)
 					sentTo[mc.Addr.String()] = true
 					monitorCount++
 					relayCount++
