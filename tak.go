@@ -101,6 +101,21 @@ type takConn struct {
 	units  map[string]*TakUnit
 	stop   chan struct{}
 	since  time.Time
+	alerts map[string]*takAlert // lower-case user -> 911 alert state (takEmergency)
+}
+
+// takAlert: one MeshRelay user's 911 alert on this TAK server. The phone may
+// send ATAK's own alert over its own TAK link; while it does, the server
+// withholds its MeshRelay-911-... alert so TAK users see one alert per unit.
+type takAlert struct {
+	user      string    // MeshRelay user, as takEmergency got it
+	active    bool      // the MeshRelay emergency is on
+	ownOut    bool      // the server's own alert is out on TAK (not cancelled)
+	phoneAt   time.Time // the phone's own alert last seen on the feed (zero = never)
+	hidden    bool      // the phone's alert is kept off the console (MeshRelay one shows)
+	shownName string    // the phone's alert was put on the console under this name + " (TAK)"
+	clearedAt time.Time // when the MeshRelay emergency ended
+	emergAt   time.Time // last time the unit (of any agency) was in a MeshRelay emergency
 }
 
 type takManager struct {
@@ -533,6 +548,8 @@ func (t *takConn) session() error {
 		t.send(t.presenceCoT())
 		tick := time.NewTicker(30 * time.Second)
 		defer tick.Stop()
+		alerts := time.NewTicker(5 * time.Second) // one 911 alert per unit
+		defer alerts.Stop()
 		for {
 			select {
 			case <-done:
@@ -541,6 +558,8 @@ func (t *takConn) session() error {
 				t.send(t.presenceCoT())
 				t.send(t.pingCoT())
 				t.pruneStale()
+			case <-alerts.C:
+				t.alertTick(time.Now())
 			}
 		}
 	}()
@@ -743,6 +762,9 @@ func (t *takConn) handleEmergency(ev *cotEvent) {
 	if strings.HasPrefix(ev.UID, "MeshRelay-911-") {
 		return
 	}
+	if takPhoneAlertUID.MatchString(ev.UID) && t.phoneAlert(name, active, time.Now()) {
+		return // the unit's MeshRelay emergency shows on the console already
+	}
 	msg := map[string]interface{}{
 		"type": "emergency", "agency": t.cfg.AgencyID, "channel": -1, "user": name + " (TAK)",
 		"active": active, "tak": true, "alert": takAlertNames[ev.Type],
@@ -750,7 +772,7 @@ func (t *takConn) handleEmergency(ev *cotEvent) {
 	if validFix(ev.Point.Lat, ev.Point.Lon) {
 		msg["lat"], msg["lon"] = ev.Point.Lat, ev.Point.Lon
 	}
-	log.Printf("TAK [%s]: emergency %v from %s (%s)", t.cfg.AgencyID, active, name, ev.Type)
+	log.Printf("TAK [%s]: emergency %v from %s (%s, uid %s)", t.cfg.AgencyID, active, name, ev.Type, ev.UID)
 	t.s.sendToConsoles(t.cfg.AgencyID, msg)
 }
 
@@ -918,13 +940,212 @@ func (s *Server) takEmergency(agency, user string, active bool) {
 	if tc == nil {
 		return
 	}
-	var lat, lon float64
+	tc.ownEmergency(user, active, time.Now())
+}
+
+// userFix: a unit's last position (0,0 when unknown).
+func (s *Server) userFix(agency, user string) (lat, lon float64) {
 	s.mu.RLock()
 	if c := s.clients[userKey(agency, user)]; c != nil && c.Loc != nil {
 		lat, lon = c.Loc.Lat, c.Loc.Lon
 	}
 	s.mu.RUnlock()
-	tc.send(tc.emergencyCoT(user, lat, lon, active))
+	return lat, lon
+}
+
+// emergencyUser finds the agency's user called name (any case) whose
+// MeshRelay emergency is on.
+func (s *Server) emergencyUser(agency, name string) (string, bool) {
+	s.emergMu.Lock()
+	defer s.emergMu.Unlock()
+	for u := range s.emergCalls[agency] {
+		if strings.EqualFold(u, name) {
+			return u, true
+		}
+	}
+	return name, false
+}
+
+// emergencyAnyAgency: whether a user called name (any case) of any agency on
+// this server has a MeshRelay emergency on. The phone of a unit from another
+// agency may report into this agency's TAK server.
+func (s *Server) emergencyAnyAgency(name string) bool {
+	s.emergMu.Lock()
+	defer s.emergMu.Unlock()
+	for _, calls := range s.emergCalls {
+		for u := range calls {
+			if strings.EqualFold(u, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// --- one 911 alert per unit ---------------------------------------------------------
+//
+// A MeshRelay phone with its own TAK link sends ATAK's own 911 alert (uid =
+// its PLI uid + "-9-1-1", repeated every 5 s, 10 s stale). While that alert
+// keeps arriving, the server withholds its MeshRelay-911-... alert for the
+// unit (cancelling it if it was out), and sends it again when the phone's
+// alert stops while the MeshRelay emergency is still on. A unit whose phone
+// never sends its own alert is handled as before.
+
+// takPhoneAlertUID: the phone's alert uid ("MeshRelay-" + id + "-9-1-1").
+var takPhoneAlertUID = regexp.MustCompile(`^MeshRelay-[0-9A-Za-z]+-9-1-1$`)
+
+// takPhoneAlertHold: three of the phone's repeats. Missing for this long, its
+// alert counts as gone (one late repeat does not flip the server's alert).
+var takPhoneAlertHold = 15 * time.Second
+
+func (t *takConn) alertLocked(key, user string) *takAlert {
+	if t.alerts == nil {
+		t.alerts = map[string]*takAlert{}
+	}
+	a := t.alerts[key]
+	if a == nil {
+		a = &takAlert{user: user}
+		t.alerts[key] = a
+	}
+	return a
+}
+
+// ownEmergency: a MeshRelay emergency started or ended.
+func (t *takConn) ownEmergency(user string, active bool, now time.Time) {
+	key := strings.ToLower(user)
+	send, unshow := false, ""
+	t.mu.Lock()
+	a := t.alertLocked(key, user)
+	a.user = user
+	if active {
+		a.active = true
+		if !a.phoneAt.IsZero() && now.Sub(a.phoneAt) < takPhoneAlertHold {
+			// The phone's own alert is on TAK already: no second one, and
+			// the console shows the MeshRelay emergency instead of it.
+			a.hidden = true
+			unshow, a.shownName = a.shownName, ""
+		} else {
+			send, a.ownOut = true, true
+		}
+	} else {
+		// One cancel for what the server has out (as before for a unit whose
+		// phone never sent its own alert).
+		send = a.ownOut || a.phoneAt.IsZero()
+		a.active, a.ownOut, a.clearedAt, a.emergAt = false, false, now, now
+		if !a.hidden {
+			delete(t.alerts, key)
+		}
+	}
+	t.mu.Unlock()
+	if unshow != "" {
+		t.unshowPhoneAlert(unshow)
+	}
+	if send {
+		t.sendOwnAlert(user, active)
+	}
+}
+
+// phoneAlert notes a MeshRelay phone's own alert (or its cancel) for the unit
+// called name, and reports whether the console should not show it. It hides
+// it only when name is a user of any agency on this server whose MeshRelay
+// emergency is on (or ended moments ago, for repeats still on the way): that
+// emergency shows on the console already. Any other alert, a TAK user's own
+// included, shows. Withholding the server's own alert stays within this
+// connector's agency.
+func (t *takConn) phoneAlert(name string, active bool, now time.Time) (hide bool) {
+	user, inEmerg := t.s.emergencyUser(t.cfg.AgencyID, name)
+	anyEmerg := inEmerg || t.s.emergencyAnyAgency(name)
+	key := strings.ToLower(name)
+	unshow, cancelOwn := "", false
+	t.mu.Lock()
+	a := t.alertLocked(key, user)
+	if inEmerg {
+		a.user = user
+		if !a.active {
+			// Emergency began before this connection (settings saved since):
+			// the server's alert may be out from the one before.
+			a.active, a.ownOut = true, true
+		}
+	}
+	if !active {
+		hide = a.hidden || (a.shownName == "" && anyEmerg)
+		a.hidden, a.shownName = false, ""
+		if !a.active {
+			delete(t.alerts, key)
+		}
+		t.mu.Unlock()
+		return hide
+	}
+	a.phoneAt = now
+	if anyEmerg {
+		a.emergAt = now
+	}
+	hide = anyEmerg || (a.hidden && now.Sub(a.emergAt) < takPhoneAlertHold)
+	if hide {
+		a.hidden = true
+		unshow, a.shownName = a.shownName, ""
+		if a.ownOut {
+			cancelOwn, a.ownOut = true, false
+		}
+	} else {
+		a.hidden, a.shownName = false, name
+	}
+	user = a.user
+	t.mu.Unlock()
+	if unshow != "" {
+		t.unshowPhoneAlert(unshow)
+	}
+	if cancelOwn {
+		log.Printf("TAK [%s]: %s's phone sends its own 911 alert — server alert withdrawn", t.cfg.AgencyID, user)
+		t.sendOwnAlert(user, false)
+	}
+	return hide
+}
+
+// alertTick (every 5 s): the server's alert goes out again for a unit whose
+// phone alert has stopped while its MeshRelay emergency is on; finished
+// units are forgotten.
+func (t *takConn) alertTick(now time.Time) {
+	var resume []string
+	t.mu.Lock()
+	for key, a := range t.alerts {
+		gone := a.phoneAt.IsZero() || now.Sub(a.phoneAt) >= takPhoneAlertHold
+		switch {
+		case a.active && !a.ownOut && !a.phoneAt.IsZero() && gone:
+			a.ownOut = true
+			resume = append(resume, a.user)
+		case !a.active && gone && now.Sub(a.clearedAt) >= takPhoneAlertHold:
+			delete(t.alerts, key)
+		}
+	}
+	t.mu.Unlock()
+	for _, u := range resume {
+		log.Printf("TAK [%s]: %s's phone alert stopped — server 911 alert sent again", t.cfg.AgencyID, u)
+		t.sendOwnAlert(u, true)
+	}
+}
+
+// sendOwnAlert sends (or cancels) the server's alert for user. A failed write
+// leaves the alert as it was, so a later phone alert or tick tries again.
+func (t *takConn) sendOwnAlert(user string, active bool) {
+	lat, lon := t.s.userFix(t.cfg.AgencyID, user)
+	if t.send(t.emergencyCoT(user, lat, lon, active)) {
+		return
+	}
+	t.mu.Lock()
+	if a := t.alerts[strings.ToLower(user)]; a != nil && a.active {
+		a.ownOut = !active
+	}
+	t.mu.Unlock()
+}
+
+// unshowPhoneAlert takes a phone's alert, shown before its MeshRelay
+// emergency arrived, off the console.
+func (t *takConn) unshowPhoneAlert(name string) {
+	t.s.sendToConsoles(t.cfg.AgencyID, map[string]interface{}{
+		"type": "emergency", "agency": t.cfg.AgencyID, "channel": -1, "user": name + " (TAK)",
+		"active": false, "tak": true, "alert": takAlertNames["b-a-o-tbl"],
+	})
 }
 
 // --- dashboard API -------------------------------------------------------------------
