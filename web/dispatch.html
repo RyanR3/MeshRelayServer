@@ -5,11 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay Command</title>
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
-    <link rel="stylesheet" href="dispatch.css?v=21">
+    <link rel="stylesheet" href="dispatch.css?v=22">
 </head>
 <body>
     <!-- Click-to-enable-audio banner (browsers block autoplay until a user gesture) -->
     <div id="audio-unlock-banner" class="top-banner banner-audio" style="display:none;">🔊 Click anywhere to enable radio audio</div>
+
+    <!-- Active, unacknowledged emergencies (dispatch.js renderEmergencyBanner). Closed only by Acknowledge or the emergency ending. -->
+    <div id="emerg-banner" class="emerg-banner" role="alertdialog" aria-live="assertive" aria-labelledby="emerg-banner-count" style="display:none;">
+        <div class="eb-title"><span class="dot-pulse"></span><span id="emerg-banner-count">EMERGENCY</span></div>
+        <div id="emerg-banner-list" class="eb-list"></div>
+        <div id="emerg-banner-audio" class="eb-audio" style="display:none;">Alarm sound is blocked by the browser. Click anywhere on the page to enable it.</div>
+    </div>
 
     <header class="cmd-header">
         <div class="cmd-header-left">
@@ -172,6 +179,6 @@
     </div>
 
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script src="dispatch.js?v=28"></script>
+    <script src="dispatch.js?v=29"></script>
 </body>
 </html>

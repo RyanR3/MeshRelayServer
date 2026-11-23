@@ -97,7 +97,7 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('channels-active-only').checked = loadPref('cmd.inUse', true);
     tickClock(); setInterval(tickClock, 1000);
     setInterval(sweepTalk, 300);
-    setInterval(() => { renderUnits(); renderMarkers(); renderEmergencies(); }, 15000);
+    setInterval(() => { renderUnits(); renderMarkers(); renderEmergencies(); renderEmergencyBanner(); }, 15000);
     checkSession();
     unlockAudioOnGesture();
 });
@@ -487,6 +487,7 @@ function renderMarkers(force) {
     }
     document.getElementById('map-empty').style.display = located ? 'none' : 'block';
     if (!fittedOnce && located) { fittedOnce = true; fitAllUnits(); }
+    renderEmergencyBanner();   // Locate unit / No position follows the markers
 }
 
 function unitIcon(u, cls, label) {
@@ -737,24 +738,74 @@ function renderHeader() {
 }
 
 // ─── Emergencies ───────────────────────────────────────────────────────────
+//
+// An active emergency that this console has not acknowledged keeps the alarm
+// repeating and shows a card in the middle of the screen until Acknowledge is
+// pressed or the emergency ends. Acknowledgement is local to this browser
+// tab: other consoles still alert, and a page reload alerts again for every
+// emergency that is still active (the server re-sends them on connect).
 
-function handleEmergency(m) {
-    const key = `${m.agency}|${m.user}`;
-    const prev = emergencies.get(key);
-    const e = prev || { agency: m.agency, user: m.user };
+// BEGIN emergency-alert-logic — pure functions, no DOM (webtest/emergency_alert_test.mjs)
+const ALARM_REPEAT_MS = 4000;   // the three-beep pattern (about 1.5 s) starts every 4 s
+
+// Fold one server "emergency" message into the console's record of it.
+// A message for an emergency that is already active (a reconnect re-send, a
+// TAK alert repeated every few seconds) keeps the time it was raised and the
+// acknowledgement; only a newly raised emergency is unacknowledged again.
+function mergeEmergency(prev, m, now) {
+    const active = !!m.active;
+    const continuing = !!(prev && prev.active && active);
+    const e = Object.assign({}, prev || {}, { agency: m.agency, user: m.user });
     e.channel = m.channel;
     e.tak = !!m.tak;
     e.alert = m.alert || '';
-    e.active = !!m.active;
-    e.at = typeof m.at === 'number' ? m.at : Date.now();
-    if (m.lat !== undefined) { e.lat = m.lat; e.lon = m.lon; }
-    if (e.active) e.acked = false;
+    e.active = active;
+    if (!continuing) e.at = typeof m.at === 'number' ? m.at : now;
+    if (typeof m.lat === 'number' && typeof m.lon === 'number') { e.lat = m.lat; e.lon = m.lon; }
+    if (active && !continuing) e.acked = false;
+    return { e, raised: active && !continuing, changed: !prev || !!prev.active !== active };
+}
+
+const emergencyIsOpen = (e) => !!(e && e.active && !e.acked);
+
+// Active, unacknowledged emergencies, oldest first (cards do not move under
+// the pointer when another one arrives).
+function openEmergencies(list) {
+    return [...list].filter(emergencyIsOpen).sort((a, b) => (a.at - b.at) || String(a.user).localeCompare(String(b.user)));
+}
+
+function alarmShouldRun(list) { return [...list].some(emergencyIsOpen); }
+
+// Play the pattern now? Only while needed, only when the browser lets audio
+// play, and at most once per ALARM_REPEAT_MS.
+function alarmDue(shouldRun, audioRunning, lastPlayed, now) {
+    return !!shouldRun && !!audioRunning && (lastPlayed == null || now - lastPlayed >= ALARM_REPEAT_MS);
+}
+
+function emergencyKind(e) { return e.tak ? (e.alert || 'TAK alert') : 'MeshRelay emergency'; }
+
+function emergencyHasPosition(e, hasLiveMarker) {
+    return !!hasLiveMarker || (typeof e.lat === 'number' && typeof e.lon === 'number');
+}
+// END emergency-alert-logic
+
+function handleEmergency(m) {
+    const key = `${m.agency}|${m.user}`;
+    const { e, raised, changed } = mergeEmergency(emergencies.get(key), m, Date.now());
     emergencies.set(key, e);
-    radioLog.unshift({ agency: m.agency, channel: m.channel, user: m.user, start: e.at, end: e.at,
-        emergency: true, active: e.active, heard: false, pcm: [], pcmLen: 0 });
-    if (e.active) alarm();
-    renderEmergencies(); renderHeader(); renderLog(); renderMarkers(true);
-    if (e.active) focusEmergencies();
+    if (changed) {
+        radioLog.unshift({ agency: m.agency, channel: m.channel, user: m.user, start: e.at, end: e.at,
+            emergency: true, active: e.active, heard: false, pcm: [], pcmLen: 0 });
+        renderLog();
+    }
+    emergenciesChanged();
+    renderMarkers(true);
+    if (raised) focusEmergencies();
+}
+
+// Everything that shows the emergency state, plus the alarm.
+function emergenciesChanged() {
+    renderEmergencies(); renderHeader(); renderEmergencyBanner(); syncAlarm();
 }
 
 function renderEmergencies() {
@@ -776,10 +827,57 @@ function renderEmergencies() {
     }).join('');
 }
 
+// The unit's live marker, if it has one (TAK users by callsign).
+function emergencyLiveMarker(key) {
+    if (markers.has(key)) return true;
+    if (key.endsWith(' (TAK)')) {
+        const i = key.indexOf('|'), agency = key.slice(0, i), name = key.slice(i + 1, -6);
+        const t = takUnits.find(x => x.agency === agency && x.callsign === name);
+        return !!(t && markers.has('tak|' + t.uid));
+    }
+    return false;
+}
+
+// The card(s) in the middle of the screen: one per active, unacknowledged
+// emergency. Only Acknowledge (or the emergency ending) removes a card.
+let bannerHtml = '';
+function renderEmergencyBanner() {
+    const box = document.getElementById('emerg-banner');
+    const listEl = document.getElementById('emerg-banner-list');
+    if (!box || !listEl) return;
+    const open = openEmergencies(emergencies.values());
+    if (!open.length) {
+        box.style.display = 'none';
+        if (bannerHtml) { listEl.innerHTML = ''; bannerHtml = ''; }
+        return;
+    }
+    const html = open.map(e => {
+        const key = e.agency + '|' + e.user, k = escAttr(key);
+        const canLocate = emergencyHasPosition(e, emergencyLiveMarker(key));
+        const channel = e.tak ? 'TAK (no channel)' : channelLabel(e.agency, e.channel);
+        return `<div class="eb-card" data-key="${escHtml(key)}">
+            <div class="eb-head">${WARN_ICON}<span class="eb-unit">${escHtml(e.user)}</span><span class="eb-kind">${escHtml(emergencyKind(e))}</span></div>
+            <div class="eb-grid">
+                <span>Agency</span><span>${escHtml(agencyName(e.agency))}</span>
+                <span>Channel</span><span>${escHtml(channel)}</span>
+                <span>Raised</span><span>${fmtTime(e.at)} (${ago(e.at)})</span>
+            </div>
+            <div class="eb-actions">
+                <button class="eb-btn eb-locate" onclick="bannerLocate('${k}')"${canLocate ? '' : ' disabled'}>${canLocate ? 'Locate unit' : 'No position'}</button>
+                <button class="eb-btn eb-ack" onclick="ackEmergency('${k}')">Acknowledge</button>
+            </div></div>`;
+    }).join('');
+    if (html !== bannerHtml) { listEl.innerHTML = html; bannerHtml = html; }
+    document.getElementById('emerg-banner-count').textContent =
+        open.length === 1 ? 'EMERGENCY' : `${open.length} EMERGENCIES`;
+    document.getElementById('emerg-banner-audio').style.display = audioRunning() ? 'none' : 'block';
+    box.style.display = 'flex';
+}
+
 function ackEmergency(key) {
     const e = emergencies.get(key);
-    if (e) e.acked = true;
-    renderEmergencies(); renderHeader();
+    if (e && e.active) e.acked = true;
+    emergenciesChanged();
 }
 
 function locateEmergency(key) {
@@ -791,14 +889,68 @@ function locateEmergency(key) {
     else flashMessage(`${e.user} has not shared a position.`);
 }
 
+// Locate from the banner: centre on the unit, then shift the map so the unit
+// sits in the visible part below the banner instead of behind it.
+function bannerLocate(key) {
+    locateEmergency(key);
+    const box = document.getElementById('emerg-banner');
+    if (!map || !box || box.style.display === 'none') return;
+    const mr = map.getContainer().getBoundingClientRect(), br = box.getBoundingClientRect();
+    const covered = br.bottom - mr.top;              // map pixels hidden under the banner
+    if (covered <= 0 || covered >= mr.height - 40) return;
+    const target = (covered + mr.height) / 2;        // middle of the clear part
+    map.panBy([0, -(target - mr.height / 2)], { animate: false });
+}
+
 function focusEmergencies() {
     document.getElementById('emerg-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ─── Alarm ─────────────────────────────────────────────────────────────────
+// Repeats while any emergency is open (syncAlarm after every change). If the
+// browser has not allowed audio yet, the tick keeps checking and the first
+// pattern plays as soon as it does (the first click on the page).
+
+let alarmTimer = null;
+let alarmLastPlayed = null;
+let alarmNodes = [];
+
+function audioRunning() { return !!(audioCtx && audioCtx.state === 'running'); }
+
+function syncAlarm() {
+    if (alarmShouldRun(emergencies.values())) {
+        if (!alarmTimer) alarmTimer = setInterval(alarmTick, 250);
+        alarmTick();
+    } else {
+        stopAlarm();
+    }
+}
+
+function alarmTick() {
+    const run = alarmShouldRun(emergencies.values());
+    if (!run) { stopAlarm(); return; }
+    if (!audioRunning() && audioSupported()) { try { ensureAudio(); } catch (_) {} }  // resumes once allowed
+    const banner = document.getElementById('emerg-banner-audio');
+    if (banner) banner.style.display = audioRunning() ? 'none' : 'block';
+    const now = Date.now();
+    if (alarmDue(run, audioRunning(), alarmLastPlayed, now)) {
+        alarmLastPlayed = now;
+        alarm();
+    }
+}
+
+function stopAlarm() {
+    if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null; }
+    alarmLastPlayed = null;
+    for (const o of alarmNodes) { try { o.stop(); } catch (_) {} }  // cut a pattern that is still sounding
+    alarmNodes = [];
 }
 
 function alarm() {
     try {
         ensureAudio();
         const t0 = audioCtx.currentTime;
+        alarmNodes = [];
         for (let i = 0; i < 3; i++) {
             const o = audioCtx.createOscillator(), g = audioCtx.createGain();
             o.type = 'square';
@@ -808,6 +960,7 @@ function alarm() {
             g.gain.setValueAtTime(0, t0 + i * 0.5 + 0.4);
             o.connect(g).connect(audioCtx.destination);
             o.start(t0 + i * 0.5); o.stop(t0 + i * 0.5 + 0.42);
+            alarmNodes.push(o);
         }
     } catch (_) {}
 }
