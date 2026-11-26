@@ -296,6 +296,9 @@ type Server struct {
 	loginLimit    *signInGuard  // dashboard logins (ratelimit.go)
 	oidc          *oidcProvider // dashboard single sign-on (oidc.go); nil = off
 	pttAuthLimit  *signInGuard  // phone sign-ins
+	// smallReplies: budget for replies larger than the unauthenticated
+	// request they answer (amplification.go).
+	smallReplies smallReplyGate
 	// rosterSent: last roster sent per agency to low-power clients.
 	rosterMu   sync.Mutex
 	rosterSent map[string]rosterState
@@ -2599,6 +2602,14 @@ func (s *Server) handleAuthChallengeRequest(packet *AuthChallengeRequestPacket, 
 	if locked, _, _ := s.pttAuthLimit.blocked(addr.IP.String()); locked {
 		return
 	}
+	// The 33-byte reply is larger than an unpadded request (every app sends
+	// 3 + name + agency bytes): those are answered within a per-address and
+	// server-wide budget, so a forged source cannot use the server as an
+	// amplifier (amplification.go). A request padded to 33 bytes or more is
+	// always answered.
+	if !s.unauthReplyAllowed(wireLenChallengeReq(packet), challengeReplyLen, addr) {
+		return
+	}
 	s.sendPacket(SerializeAuthChallenge(challengeNonce(addr.String(), time.Now())), addr)
 }
 
@@ -2634,22 +2645,25 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 		accts = []string{"?:" + strings.ToLower(strings.TrimSpace(packet.Username))}
 	}
 	if locked, left, what := s.pttAuthLimit.blocked(ip, accts...); locked {
-		log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %s from %s",
+		log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %q from %s",
 			what, left.Round(time.Second), packet.Username, addr)
+		// Failure replies go to an address that has not proved anything, so
+		// they are never larger than the request (amplification.go). Every
+		// app's request carries a 64-character proof and is larger.
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Too many attempts — try again in a few minutes"})
-		s.sendPacket(resp, addr)
+		s.sendNoLarger(wireLenAuthReq(packet), resp, addr)
 		return
 	}
 	authFailed := func() {
 		if s.pttAuthLimit.failed(ip, accts...) {
-			log.Printf("Auth lockout: too many wrong passwords (user %s from %s)", packet.Username, addr)
+			log.Printf("Auth lockout: too many wrong passwords (user %q from %s)", packet.Username, addr)
 		}
 		resp := SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Invalid username or password"})
-		s.sendPacket(resp, addr)
+		s.sendNoLarger(wireLenAuthReq(packet), resp, addr)
 	}
 
 	if len(candidates) == 0 {
-		log.Printf("Auth failed: unknown user %s from %s", packet.Username, addr)
+		log.Printf("Auth failed: unknown user %q from %s", packet.Username, addr)
 		authFailed()
 		return
 	}
@@ -2682,7 +2696,7 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 
 	msg, err := s.completeSignInLocked(user, usedEnrollToken, deviceID, addr, &legacyKeyWrap{nonce: nonce, flags: packet.Flags})
 	if err != nil {
-		s.sendPacket(SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Server error — try again"}), addr)
+		s.sendNoLarger(wireLenAuthReq(packet), SerializeAuthResponse(&AuthResponsePacket{Success: false, Message: "Server error — try again"}), addr)
 		return
 	}
 	// The address now speaks the old protocol: any secure session it had is over.

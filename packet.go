@@ -247,12 +247,14 @@ type AuthRequestPacket struct {
 	PasswordHash string // Legacy: SHA-256(password); Challenge-response: HMAC-SHA256(password, nonce)
 	AgencyID     string // optional, empty for older clients
 	Flags        byte   // optional trailing byte (AuthFlagDeviceKey); 0 from older clients
+	WireLen      int    // bytes received, type byte included (amplification.go)
 }
 
 // AuthChallengeRequestPacket - client requests a challenge nonce (Phase 4f)
 type AuthChallengeRequestPacket struct {
 	Username string
 	AgencyID string
+	WireLen  int // bytes received, type byte and any padding included (amplification.go)
 }
 
 // AuthChallengePacket - server sends a challenge nonce (Phase 4f)
@@ -382,9 +384,15 @@ func ParsePacket(data []byte) (byte, interface{}, error) {
 		return packetType, pkt, err
 	case PacketTypeAuthRequest:
 		pkt, err := ParseAuthRequestPacket(payload)
+		if pkt != nil {
+			pkt.WireLen = len(data)
+		}
 		return packetType, pkt, err
 	case PacketTypeAuthChallengeReq:
 		pkt, err := ParseAuthChallengeRequestPacket(payload)
+		if pkt != nil {
+			pkt.WireLen = len(data)
+		}
 		return packetType, pkt, err
 	case PacketTypeKeyJoinRequest, PacketTypeKeyJoinResponse, PacketTypeKeyAnnounce:
 		// Pass through — relayed to channel peers

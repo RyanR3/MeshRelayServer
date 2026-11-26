@@ -475,17 +475,24 @@ func (s *Server) handleSecHello(data []byte, addr *net.UDPAddr) {
 	if atomic.SwapInt64(&s.sec.helloSec, sec) != sec {
 		atomic.StoreInt64(&s.sec.helloCount, 0)
 	}
-	if atomic.AddInt64(&s.sec.helloCount, 1) > secHelloBurst {
-		ok := false
-		if len(data) >= 2+32+16+16 {
-			got := data[50:66]
-			ok = hmac.Equal(got, secCookie(addr.String(), slot)) || hmac.Equal(got, secCookie(addr.String(), slot-1))
-		}
-		if !ok {
-			out := append([]byte{PacketTypeSecRetry, secVersion}, secCookie(addr.String(), slot)...)
-			s.sendRaw(out, addr)
-			return
-		}
+	retry := func() {
+		// 18 bytes: smaller than any hello, so not an amplifier.
+		out := append([]byte{PacketTypeSecRetry, secVersion}, secCookie(addr.String(), slot)...)
+		s.sendRaw(out, addr)
+	}
+	cookieOK := helloCookieOK(data, addr, slot)
+	if atomic.AddInt64(&s.sec.helloCount, 1) > secHelloBurst && !cookieOK {
+		retry()
+		return
+	}
+	// The 115-byte reply is larger than an unpadded hello (50 bytes). Such
+	// hellos are answered within a per-address and server-wide budget; past
+	// it, the sender is asked to come back with the cookie, which proves it
+	// receives at this address (amplification.go). A returned cookie or a
+	// hello padded to the reply's size is always answered.
+	if !cookieOK && !s.unauthReplyAllowed(len(data), secHelloReplyLen, addr) {
+		retry()
+		return
 	}
 	k, err := s.secDeriveHello(data[2:34], data[34:50], addr.String(), slot)
 	if err != nil {

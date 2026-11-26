@@ -183,12 +183,19 @@ func TestPhoneAuthLockoutAndUniformErrors(t *testing.T) {
 	}
 
 	// Same reply text for an unknown user and a wrong password.
-	s.handleAuthRequest(&AuthRequestPacket{Username: "ghost", PasswordHash: "00", AgencyID: "a1"}, bad(2))
+	// (A real request carries a 64-character proof; amplification.go.)
+	wrongProof := strings.Repeat("0", 64)
+	s.handleAuthRequest(&AuthRequestPacket{Username: "ghost", PasswordHash: wrongProof, AgencyID: "a1"}, bad(2))
 	unknown := reply(bad(2))
-	s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: "00", AgencyID: "a1"}, bad(3))
+	s.handleAuthRequest(&AuthRequestPacket{Username: "medic", PasswordHash: wrongProof, AgencyID: "a1"}, bad(3))
 	wrong := reply(bad(3))
 	if unknown == "" || unknown != wrong {
 		t.Fatalf("unknown user %q vs wrong password %q", unknown, wrong)
+	}
+	// A request shorter than the refusal gets no refusal at all.
+	s.handleAuthRequest(&AuthRequestPacket{Username: "ghost", PasswordHash: "00", AgencyID: "a1"}, bad(4))
+	if r := reply(bad(4)); r != "" {
+		t.Fatalf("a 16-byte request got a %d-byte refusal", len(r))
 	}
 
 	// Three wrong passwords lock the guesser's ADDRESS (it gets no more

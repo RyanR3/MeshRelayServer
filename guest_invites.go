@@ -123,6 +123,12 @@ func randomHex(nBytes int) string {
 }
 
 func (s *Server) handleGuestInviteRequest(req *GuestInviteRequest, addr *net.UDPAddr) {
+	// An address that has not signed in gets no answer: the refusal (45
+	// bytes) was 15 times the 3-byte request, an amplifier for a forged
+	// source (amplification.go).
+	if !s.isAuthenticated(addr) {
+		return
+	}
 	resp := s.createInvitedGuest(req, addr)
 	s.sendPacket(SerializeGuestInviteResponse(resp), addr)
 }

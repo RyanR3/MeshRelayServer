@@ -103,6 +103,20 @@ func TestGuestInviteNoNameAndHourLimits(t *testing.T) {
 	}
 }
 
+// An address that has not signed in gets no answer at all: the refusal was
+// 15 times the size of the request, an amplifier for a forged source.
+func TestGuestInviteNotSignedInGetsNoReply(t *testing.T) {
+	s, addr, sent := guestTestServer(t)
+	s.authenticatedAddrs = map[string]string{}
+	s.handleGuestInviteRequest(inviteRequest(1, "x"), addr)
+	if len(sent["alice"]) != 0 {
+		t.Fatalf("an unauthenticated invite request was answered (%d packets)", len(sent["alice"]))
+	}
+	if len(s.users) != 1 {
+		t.Fatalf("a refused invite must not create an account")
+	}
+}
+
 func TestGuestInviteRefusals(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -114,7 +128,6 @@ func TestGuestInviteRefusals(t *testing.T) {
 			exp := time.Now().Add(time.Hour)
 			s.users[userKey("ag", "alice")].GuestExpiresAt = &exp
 		}, "Guests can't"},
-		{"not signed in", func(s *Server) { s.authenticatedAddrs = map[string]string{} }, "Sign in"},
 		{"agency full", func(s *Server) { s.agencies["ag"].MaxUsers = 1 }, "user limit"},
 	}
 	for _, c := range cases {

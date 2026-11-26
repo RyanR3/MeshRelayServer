@@ -248,6 +248,12 @@ func (g *SipGateway) reply(reqMsg string, raddr *net.UDPAddr, status string) {
 		"Content-Length: 0",
 		"", "",
 	}, "\r\n")
+	// SIP over UDP has no sign-in here, so the source may be forged: never
+	// answer with more bytes than were received (amplification.go). A real
+	// request carries these headers and more, so it is always larger.
+	if len(resp) > len(reqMsg) {
+		return
+	}
 	conn.WriteToUDP([]byte(resp), raddr)
 }
 

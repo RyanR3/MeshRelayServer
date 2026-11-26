@@ -144,3 +144,36 @@ Rules:
 A client that has never pinned a key for a server sends step 1 and, with no
 `0x41` or `0x45` after two tries of about 1.5 s, uses the old protocol
 (the server predates MRS1).
+
+## Padding (forged-source protection)
+
+UDP source addresses can be forged, so the server never sends an address
+that has not signed in more bytes than it received, with two budgeted
+exceptions for the apps in use today:
+
+| Request (unpadded, as sent today)                  | Reply                  |
+|----------------------------------------------------|------------------------|
+| `0x0D` challenge request, 3 + name + agency bytes  | `0x0E`, 33 bytes       |
+| `0x40` hello, 50 bytes                             | `0x41`, 115 bytes      |
+
+A short request of either kind is answered in full within a budget per
+source address (an IPv4 address or an IPv6 /64: 32 at once, then 2 per
+second) and for the whole server (2000 at once, then 500 per second). Past
+the budget a short challenge request gets no answer (the app asks again
+2 s later) and a short hello gets the 18-byte `0x45` cookie; a hello that
+returns the cookie has shown it receives at that address and is always
+answered.
+
+A request padded to at least the size of its reply cannot amplify and is
+always answered, so **new clients should pad**:
+
+- Hello: `0x40 | 0x01 | eC[32] | cNonce[16] | cookie-or-16-zero-bytes | zero
+  bytes`, 115 bytes or more in total. Bytes 50-65 carry the cookie when the
+  server sent one, zeros otherwise. Servers up to 4.8.0 ignore the padding too.
+- Challenge request: `0x0D | str name | str agency | zero bytes`, 33 bytes
+  or more. Always send the agency string, even when it is empty (length 0):
+  without it the server would read the first padding bytes as the agency.
+  Servers up to 4.8.0 ignore the padding too.
+
+Once every client pads, the budget for short requests can be turned off and
+the amplification factor is below 1 for every unauthenticated packet.
