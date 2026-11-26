@@ -328,7 +328,9 @@ type Server struct {
 	bridgeGuestGate        noteGate
 	// Secure protocol (secure.go): the server's identity key, live sessions,
 	// and remembered password verifiers.
-	identity          *ecdh.PrivateKey
+	identity          *ecdh.PrivateKey // read through identityKey(); replaced only by setIdentity
+	identityMu        sync.RWMutex
+	identityPath      string // "" = identityKeyFile in the working directory
 	sec               secTable
 	dispatch          packetDispatcher
 	verifierMu        sync.Mutex

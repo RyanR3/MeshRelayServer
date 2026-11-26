@@ -157,6 +157,11 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/users/{username}/enroll", s.handleGenerateEnrollToken).Methods("POST")
 	api.HandleFunc("/users/{username}/sign-out-phones", s.handleSignOutPhones).Methods("POST")
 	api.HandleFunc("/server-identity", s.handleServerIdentity).Methods("GET")
+	// Moving users to another server (migration.go). Super admin only: not
+	// in apiRolePolicy, and checked again in the handlers.
+	api.HandleFunc("/user-migration/export", s.requireSuperAdmin(s.handleUserExport)).Methods("POST")
+	api.HandleFunc("/user-migration/preview", s.requireSuperAdmin(s.handleUserImportPreview)).Methods("POST")
+	api.HandleFunc("/user-migration/import", s.requireSuperAdmin(s.handleUserImport)).Methods("POST")
 	api.HandleFunc("/admin/change-password", s.handleAdminChangePassword).Methods("POST")
 	api.HandleFunc("/version", s.handleVersion).Methods("GET")
 	api.HandleFunc("/update/check", s.requireSuperAdmin(s.handleUpdateCheck)).Methods("POST")

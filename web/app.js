@@ -120,7 +120,7 @@ function navigateTo(pageName) {
         fetchActivityPage();
     } else if (pageName === 'settings') {
         fetchVersionInfo();
-        if (currentRole === 'super_admin') fetchGitHubTokenStatus();
+        if (currentRole === 'super_admin') { fetchGitHubTokenStatus(); initMigrationPanel(); }
         if (currentRole === 'super_admin' || currentRole === 'agency_admin') initFloorControlPanel();
     }
 }
@@ -5424,4 +5424,184 @@ function deleteMapLayer(id, name) {
             fetchMapLayers();
         })
         .catch(err => showStatus('maps-status', 'Failed to remove: ' + err.message, 'error'));
+}
+
+// --- Move users to another server (Settings, super admin) -------------------
+// Export: the server encrypts the file with the passphrase typed here; the
+// passphrase is sent once over the dashboard connection and never stored.
+// Import: the file and passphrase are sent for a preview (nothing changes),
+// then again for the import itself, with the same options.
+
+let migPreviewKey = '';   // options + file the shown preview belongs to
+
+function initMigrationPanel() {
+    const sel = document.getElementById('mig-export-agency');
+    if (!sel) return;
+    fetch('/api/agencies').then(r => r.json()).then(list => {
+        const current = sel.value;
+        sel.innerHTML = '<option value="">All agencies</option>' + (list || []).map(a =>
+            `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} (${escapeHtml(a.id)})</option>`).join('');
+        if (current && (list || []).some(a => a.id === current)) sel.value = current;
+    }).catch(() => {});
+}
+
+function migExport() {
+    const pass = document.getElementById('mig-export-pass').value;
+    const pass2 = document.getElementById('mig-export-pass2').value;
+    const agency = document.getElementById('mig-export-agency').value;
+    const withKey = document.getElementById('mig-export-identity').checked;
+    if (pass.length < 12) { showStatus('migration-status', 'The passphrase must be at least 12 characters.', 'error'); return; }
+    if (pass !== pass2) { showStatus('migration-status', 'The two passphrases are not the same.', 'error'); return; }
+    if (withKey && !confirm('The file will contain this server\'s private identity key. Anyone with the file and the passphrase can pose as this server to the phones. Continue?')) return;
+    const btn = document.getElementById('mig-export-btn');
+    btn.disabled = true;
+    showStatus('migration-status', 'Encrypting the export…', 'info');
+    fetch('/api/user-migration/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agency: agency, include_identity_key: withKey, passphrase: pass })
+    }).then(r => {
+        if (!r.ok) return r.json().catch(() => ({})).then(d => { throw new Error(d.error || ('Server error ' + r.status)); });
+        const cd = r.headers.get('Content-Disposition') || '';
+        const m = /filename="([^"]+)"/.exec(cd);
+        return r.blob().then(b => ({ blob: b, name: m ? m[1] : 'meshrelay-users.mrusers' }));
+    }).then(({ blob, name }) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        document.getElementById('mig-export-pass').value = '';
+        document.getElementById('mig-export-pass2').value = '';
+        showStatus('migration-status', 'Export downloaded: ' + name, 'success');
+        addLog('Users exported (' + (agency || 'all agencies') + ')', 'success');
+    }).catch(err => {
+        showStatus('migration-status', 'Export failed: ' + err.message, 'error');
+    }).finally(() => { btn.disabled = false; });
+}
+
+function migOptions() {
+    return {
+        mode: document.getElementById('mig-import-mode').value,
+        create_agencies: document.getElementById('mig-create-agencies').checked ? '1' : '',
+        include_guests: document.getElementById('mig-include-guests').checked ? '1' : '',
+        import_web_admins: document.getElementById('mig-import-admins').checked ? '1' : '',
+        use_identity_key: document.getElementById('mig-use-identity').checked ? '1' : ''
+    };
+}
+
+function migKey() {
+    const f = document.getElementById('mig-import-file').files[0];
+    return JSON.stringify([f ? f.name + ':' + f.size + ':' + f.lastModified : '',
+        document.getElementById('mig-import-pass').value.length, migOptions()]);
+}
+
+// Any change after a preview: the Import button waits for a new preview.
+function migInputsChanged() {
+    document.getElementById('mig-import-btn').disabled = !migPreviewKey || migPreviewKey !== migKey();
+}
+
+function migForm() {
+    const f = document.getElementById('mig-import-file').files[0];
+    const pass = document.getElementById('mig-import-pass').value;
+    if (!f) throw new Error('Choose the export file.');
+    if (!pass) throw new Error('Type the passphrase the file was exported with.');
+    const form = new FormData();
+    form.append('file', f);
+    form.append('passphrase', pass);
+    const o = migOptions();
+    Object.keys(o).forEach(k => form.append(k, o[k]));
+    return form;
+}
+
+function migPost(path) {
+    let form;
+    try { form = migForm(); } catch (e) { return Promise.reject(e); }
+    return fetch(path, { method: 'POST', body: form }).then(r => r.json().catch(() => ({})).then(d => {
+        if (!r.ok) throw new Error(d.error || ('Server error ' + r.status));
+        return d;
+    }));
+}
+
+const migActionText = {
+    create: 'Created', exists: 'Already here, kept', new: 'Added', replace: 'Replaced', skip: 'Skipped'
+};
+const migKindText = { agency: 'Agency', user: 'Phone account', dashboard: 'Dashboard account' };
+
+function migRenderPreview(d, applied) {
+    const src = d.source || {};
+    const plan = d.plan || {};
+    const items = plan.items || [];
+    const c = plan.counts || {};
+    const n = k => c[k] || 0;
+    const id = plan.identity || {};
+    const idNote = document.getElementById('mig-identity-note');
+    const idBox = document.getElementById('mig-use-identity');
+    idBox.disabled = !id.in_file || id.same;
+    if (idBox.disabled) idBox.checked = false;
+    idNote.textContent = !id.in_file ? '(this file has none)'
+        : id.same ? '(this server already has that identity)'
+        : '(file key ' + String(id.fingerprint || '').slice(0, 16) + '…, this server ' + String(id.current || '').slice(0, 16) + '…)';
+    const verb = applied ? 'Imported' : 'Would import';
+    let summary = `File from ${src.server_version || 'unknown version'}, exported ${src.exported_at || ''} by ${src.exported_by || ''}` +
+        ` (${src.scope ? 'agency ' + src.scope : 'all agencies'}). ${verb}: ` +
+        `${n('agency_create')} new agencies, ${n('user_new')} new and ${n('user_replace')} replaced phone accounts, ` +
+        `${n('dashboard_new')} new and ${n('dashboard_replace')} replaced dashboard accounts; ` +
+        `${n('agency_skip') + n('user_skip') + n('dashboard_skip')} skipped.`;
+    if (id.replace) summary += applied ? ' The server identity key was replaced.' : ' The server identity key will be replaced.';
+    document.getElementById('mig-preview-summary').textContent = summary;
+    document.getElementById('mig-preview-body').innerHTML = items.map(it => {
+        const act = migActionText[it.action] || it.action;
+        const why = it.reason ? ' — ' + it.reason : '';
+        const name = it.kind === 'agency' ? it.name : (it.name + (it.display ? ' (' + it.display + ')' : '') +
+            (it.guest ? ' · guest' : '') + (it.phones ? ' · ' + it.phones + ' phone key' + (it.phones === 1 ? '' : 's') : ''));
+        return `<tr><td>${escapeHtml(migKindText[it.kind] || it.kind)}</td><td>${escapeHtml(it.agency)}</td>` +
+            `<td>${escapeHtml(name)}</td><td>${escapeHtml(it.role || '')}</td>` +
+            `<td class="mig-act-${escapeHtml(it.action)}">${escapeHtml(act + why)}</td></tr>`;
+    }).join('');
+    document.getElementById('mig-preview').style.display = '';
+}
+
+function migPreview() {
+    const btn = document.getElementById('mig-preview-btn');
+    btn.disabled = true;
+    showStatus('migration-status', 'Checking the file…', 'info');
+    const key = migKey();
+    migPost('/api/user-migration/preview').then(d => {
+        migRenderPreview(d, false);
+        migPreviewKey = migKey() === key ? key : '';
+        migInputsChanged();
+        showStatus('migration-status', 'Preview ready. Nothing has been changed yet.', 'success');
+    }).catch(err => {
+        migPreviewKey = '';
+        migInputsChanged();
+        showStatus('migration-status', 'Preview failed: ' + err.message, 'error');
+    }).finally(() => { btn.disabled = false; });
+}
+
+function migApply() {
+    if (!migPreviewKey || migPreviewKey !== migKey()) { showStatus('migration-status', 'Preview the import first.', 'error'); return; }
+    const o = migOptions();
+    let msg = 'Import these accounts now? Copies of the current users, dashboard accounts and agencies are saved next to them first.';
+    if (o.mode === 'replace') msg += '\n\nExisting accounts will be REPLACED by the file\'s; their phones are signed out if their password or phone key changed.';
+    if (o.use_identity_key) msg += '\n\nThis server\'s identity key will be REPLACED by the one in the file. Phones that trust this server\'s current key will refuse it.';
+    if (!confirm(msg)) return;
+    const btn = document.getElementById('mig-import-btn');
+    btn.disabled = true;
+    showStatus('migration-status', 'Importing…', 'info');
+    migPost('/api/user-migration/import').then(d => {
+        migRenderPreview(d, true);
+        migPreviewKey = '';
+        document.getElementById('mig-import-pass').value = '';
+        const text = `Import done: ${d.agencies_created} agencies, ${d.users} phone accounts, ${d.dashboard} dashboard accounts` +
+            ` (${d.replaced} replaced, ${d.skipped} skipped, ${d.sessions_ended} phone sessions ended).`;
+        showStatus('migration-status', text, 'success');
+        addLog(text, 'success');
+        fetchUsers();
+    }).catch(err => {
+        showStatus('migration-status', 'Import failed: ' + err.message, 'error');
+    }).finally(() => { migInputsChanged(); });
 }

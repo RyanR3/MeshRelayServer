@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshRelay</title>
-    <link rel="stylesheet" href="style.css?v=23">
+    <link rel="stylesheet" href="style.css?v=24">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -1011,6 +1011,75 @@
                     </div>
                 </div>
 
+                <!-- Move users to another server (super admin) -->
+                <div class="panel super-admin-only" style="margin-bottom: 20px;" id="migration-panel">
+                    <h3>Move Users to Another Server</h3>
+                    <div id="migration-status" class="status-message" style="display: none;"></div>
+                    <div class="settings-description" style="margin: 4px 0 14px;">
+                        Download the user accounts (phone accounts with their passwords and phone keys, dashboard accounts,
+                        and the agencies they belong to) in one encrypted file, then upload it on the new MeshRelay server.
+                        Not included: recordings, history, channel patches, TAK, Zello and LMR bridges, map layers,
+                        guest events and server settings. Set those up again on the new server.
+                    </div>
+
+                    <div class="settings-label">Export</div>
+                    <div class="mig-grid">
+                        <label>Agencies
+                            <select id="mig-export-agency"><option value="">All agencies</option></select>
+                        </label>
+                        <label>Passphrase (12 characters or more)
+                            <input type="password" id="mig-export-pass" autocomplete="new-password">
+                        </label>
+                        <label>Passphrase again
+                            <input type="password" id="mig-export-pass2" autocomplete="new-password">
+                        </label>
+                    </div>
+                    <label class="mig-check">
+                        <input type="checkbox" id="mig-export-identity">
+                        <span><strong>Include this server's identity key.</strong> The new server then keeps this server's
+                            identity, so phones that keep the same server address go on trusting it without a new QR code.
+                            The file then holds a private key: keep it and its passphrase secret, and delete it after the move.</span>
+                    </label>
+                    <div style="display:flex; gap:8px; margin: 10px 0 22px;">
+                        <button class="btn-primary" id="mig-export-btn" onclick="migExport()">Download export</button>
+                    </div>
+
+                    <div class="settings-label">Import</div>
+                    <div class="mig-grid">
+                        <label>Export file
+                            <input type="file" id="mig-import-file" accept=".mrusers,application/json,application/octet-stream" onchange="migInputsChanged()">
+                        </label>
+                        <label>Passphrase
+                            <input type="password" id="mig-import-pass" autocomplete="off" oninput="migInputsChanged()">
+                        </label>
+                        <label>Accounts that already exist
+                            <select id="mig-import-mode" onchange="migInputsChanged()">
+                                <option value="skip">Keep them (skip)</option>
+                                <option value="replace">Replace them with the file's</option>
+                            </select>
+                        </label>
+                    </div>
+                    <label class="mig-check"><input type="checkbox" id="mig-create-agencies" checked onchange="migInputsChanged()">
+                        <span>Create agencies that are not on this server (with their settings)</span></label>
+                    <label class="mig-check"><input type="checkbox" id="mig-include-guests" onchange="migInputsChanged()">
+                        <span>Include guest accounts that have not expired</span></label>
+                    <label class="mig-check"><input type="checkbox" id="mig-import-admins" onchange="migInputsChanged()">
+                        <span>Import dashboard accounts too (your own account is never changed)</span></label>
+                    <label class="mig-check"><input type="checkbox" id="mig-use-identity" disabled onchange="migInputsChanged()">
+                        <span>Use the server identity key from the file <span id="mig-identity-note" class="settings-description">(only when the file has one)</span></span></label>
+                    <div style="display:flex; gap:8px; margin-top: 10px;">
+                        <button class="btn-secondary" id="mig-preview-btn" onclick="migPreview()">Preview</button>
+                        <button class="btn-primary" id="mig-import-btn" onclick="migApply()" disabled>Import</button>
+                    </div>
+                    <div id="mig-preview" style="display:none; margin-top: 16px;">
+                        <div class="settings-description" id="mig-preview-summary"></div>
+                        <table class="data-table" style="margin-top: 10px;">
+                            <thead><tr><th>Type</th><th>Agency</th><th>Name</th><th>Role</th><th>What happens</th></tr></thead>
+                            <tbody id="mig-preview-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <!-- Speech-to-text engine (server-wide, super admin) -->
                 <div class="panel super-admin-only" style="margin-bottom: 20px;">
                     <h3>Transcription</h3>
@@ -1314,6 +1383,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=45"></script>
+    <script src="app.js?v=46"></script>
 </body>
 </html>

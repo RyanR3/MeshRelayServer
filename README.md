@@ -145,6 +145,41 @@ quote or line break inside a name shows as `\"` or `\n`, so every log entry
 stays on one line and the name cannot pose as the address. An exact fail2ban
 pattern: `Auth failed: (unknown user|wrong password for user) "(?:[^"\\]|\\.)*" from <HOST>`.
 
+## Moving users to another server
+
+Settings -> Move Users to Another Server (super admin only):
+
+1. On the old server, choose all agencies or one, type a passphrase and
+   download the export. The file is encrypted (scrypt + AES-256-GCM) and
+   holds the agencies, the phone accounts with their passwords and phone keys,
+   and the dashboard accounts.
+2. On the new server, upload the file with the passphrase and press
+   **Preview**. Nothing changes until you press **Import**. Existing accounts
+   are kept unless you choose to replace them. Guests and dashboard accounts
+   are only imported when you tick them. Copies of `agencies.json`,
+   `users.json` and `web_admins.json` are saved next to them first
+   (`*.before-import-<time>`).
+
+Passwords and phone keys work on the new server as they are.
+
+Phones remember the server's identity key for the address they connect to:
+- **Same address (for example a DNS name moved to the new machine):** tick
+  *Include this server's identity key* when exporting and *Use the server
+  identity key from the file* when importing. The phones then connect without
+  noticing. Otherwise they need a new QR code.
+- **New address:** the phones need it anyway (QR code or settings), and they
+  trust the new server on first contact.
+
+Not moved, to set up again by hand:
+- recordings and transcripts
+- message history
+- mutual-aid patches and requests
+- guest events
+- LMR and Zello bridges
+- TAK connections
+- map layers
+- `config.json` (TLS, single sign-on, ports, update token)
+
 ## Server Requirements
 
 | | Minimum | Recommended |

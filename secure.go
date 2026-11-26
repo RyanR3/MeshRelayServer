@@ -73,13 +73,13 @@ const (
 // loadOrCreateIdentity reads the server's permanent X25519 key, creating it on
 // first run. The public half goes in enrollment QR codes; phones remember it.
 func (s *Server) loadOrCreateIdentity() error {
-	path := identityKeyFile
+	path := s.identityFile()
 	if b, err := os.ReadFile(path); err == nil {
 		raw, derr := hex.DecodeString(strings.TrimSpace(string(b)))
 		if derr == nil && len(raw) == 32 {
 			k, kerr := ecdh.X25519().NewPrivateKey(raw)
 			if kerr == nil {
-				s.identity = k
+				s.setIdentity(k)
 				return nil
 			}
 		}
@@ -94,16 +94,45 @@ func (s *Server) loadOrCreateIdentity() error {
 	if err := writeFileAtomic(path, []byte(hex.EncodeToString(k.Bytes())+"\n")); err != nil { // 0600
 		return err
 	}
-	s.identity = k
+	s.setIdentity(k)
 	log.Printf("Created the server identity key (%s). Fingerprint %s", path, s.identityFingerprint())
 	return nil
 }
 
+// identityFile is where the identity key is kept (tests use a temp dir).
+func (s *Server) identityFile() string {
+	if s.identityPath != "" {
+		return s.identityPath
+	}
+	return identityKeyFile
+}
+
+// identityKey is the server's identity key (nil when the secure protocol is
+// off). It can be replaced at run time by a user import (migration.go).
+func (s *Server) identityKey() *ecdh.PrivateKey {
+	s.identityMu.RLock()
+	defer s.identityMu.RUnlock()
+	return s.identity
+}
+
+// setIdentity installs a new identity key. Verifiers are salted with the
+// server's public key, so the remembered ones are dropped. Sessions already
+// running keep their own keys and are not affected.
+func (s *Server) setIdentity(k *ecdh.PrivateKey) {
+	s.identityMu.Lock()
+	s.identity = k
+	s.identityMu.Unlock()
+	s.verifierMu.Lock()
+	s.verifiers = nil
+	s.verifierMu.Unlock()
+}
+
 func (s *Server) identityPublic() []byte {
-	if s.identity == nil {
+	k := s.identityKey()
+	if k == nil {
 		return nil
 	}
-	return s.identity.PublicKey().Bytes()
+	return k.PublicKey().Bytes()
 }
 
 // identityFingerprint is what the dashboard shows: SHA-256 of the public key.
@@ -261,7 +290,11 @@ func (s *Server) secDeriveHello(eC, cNonce []byte, addr string, slot int64) (*se
 	if err != nil {
 		return nil, err
 	}
-	dhSE, err := s.identity.ECDH(clientEph)
+	id := s.identityKey()
+	if id == nil {
+		return nil, errors.New("no identity key")
+	}
+	dhSE, err := id.ECDH(clientEph)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +479,7 @@ func (s *Server) secReap(now time.Time) {
 
 // handleSecurePacket takes every 0x40-0x45 packet.
 func (s *Server) handleSecurePacket(data []byte, addr *net.UDPAddr) {
-	if s.identity == nil {
+	if s.identityKey() == nil {
 		return
 	}
 	switch data[0] {
