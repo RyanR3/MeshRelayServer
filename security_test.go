@@ -538,7 +538,7 @@ func TestSecretFilesAreOwnerOnly(t *testing.T) {
 		}
 	}
 
-	// Config (GitHub token) the same way.
+	// Config the same way.
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	os.WriteFile(cfgPath, []byte("{}"), 0o644)
 	if err := (&Config{}).Save(cfgPath); err != nil {

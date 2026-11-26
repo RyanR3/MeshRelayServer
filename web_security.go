@@ -226,7 +226,7 @@ var apiRolePolicy = map[string]int{
 	"POST /api/guest-events":                         allowAdmins,
 	"DELETE /api/guest-events/{id}":                  allowAdmins,
 
-	// Everything else — /config, /update/*, /github-token,
+	// Everything else — /config, /update/*,
 	// /agencies (CRUD), /mutual-aid (operator links), /lmr-bridges,
 	// /zello-bridges, /zello-channels, /groups, /debug/state — is
 	// super_admin only by omission.

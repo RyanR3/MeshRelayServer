@@ -701,20 +701,19 @@ func (t *Transcriber) fetchHelpers() ([]string, error) {
 	if want == nil {
 		return nil, fmt.Errorf("no transcription program is built for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	token := t.s.config.GitHubToken
-	api := "https://api.github.com/repos/RyanR3/MeshRelayServer/releases/latest"
+	// Public release, unauthenticated API call and public downloads.
+	api := githubReleasesAPI + "/latest"
 	if Version != "dev" && Version != "" {
-		api = "https://api.github.com/repos/RyanR3/MeshRelayServer/releases/tags/" + Version
+		api = githubReleasesAPI + "/tags/" + Version
 	}
-	req, _ := http.NewRequest("GET", api, nil)
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(api)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach GitHub: %v", err)
 	}
 	defer resp.Body.Close()
+	if limited, wait := githubRateLimitWait(resp, time.Now()); limited {
+		return nil, fmt.Errorf("%s", githubRateLimitMessage(wait))
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("release %s not found on GitHub (HTTP %d)", nonEmpty(Version, "latest"), resp.StatusCode)
 	}
@@ -726,9 +725,6 @@ func (t *Transcriber) fetchHelpers() ([]string, error) {
 	sums := ""
 	for _, a := range rel.Assets {
 		u := a.BrowserDownloadURL
-		if token != "" && a.URL != "" {
-			u = a.URL
-		}
 		urls[a.Name] = u
 		if a.Name == "SHA256SUMS" {
 			sums = u
@@ -742,11 +738,11 @@ func (t *Transcriber) fetchHelpers() ([]string, error) {
 			continue
 		}
 		tmp := filepath.Join(t.dir, name+".new")
-		if err := downloadFile(u, tmp, token, 64<<20); err != nil {
+		if err := downloadFile(u, tmp, 64<<20); err != nil {
 			lastErr = err
 			continue
 		}
-		ok, err := t.s.verifyBinaryChecksum(tmp, name, sums, token)
+		ok, err := t.s.verifyBinaryChecksum(tmp, name, sums)
 		if err != nil || !ok {
 			os.Remove(tmp)
 			lastErr = fmt.Errorf("%s failed checksum verification", name)
@@ -764,13 +760,8 @@ func (t *Transcriber) fetchHelpers() ([]string, error) {
 	return got, nil
 }
 
-func downloadFile(url, dest, token string, max int64) error {
-	req, _ := http.NewRequest("GET", url, nil)
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
-		req.Header.Set("Accept", "application/octet-stream")
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+func downloadFile(url, dest string, max int64) error {
+	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Get(url)
 	if err != nil {
 		return err
 	}

@@ -26,6 +26,10 @@ func main() {
 	if err != nil {
 		log.Printf("Warning: Could not load config file: %v. Using defaults.", err)
 		config = DefaultConfig()
+	} else if err := dropRetiredConfigKeys(*configFile); err != nil {
+		// Not fatal: the retired keys are ignored either way, and the next
+		// config save leaves them out.
+		log.Printf("Warning: could not remove retired settings from %s: %v", *configFile, err)
 	}
 
 	applyEnvOverrides(config)

@@ -167,8 +167,6 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/update/check", s.requireSuperAdmin(s.handleUpdateCheck)).Methods("POST")
 	api.HandleFunc("/update/apply", s.requireSuperAdmin(s.handleUpdateApply)).Methods("POST")
 	api.HandleFunc("/update/status", s.requireSuperAdmin(s.handleUpdateStatus)).Methods("GET")
-	api.HandleFunc("/github-token", s.requireSuperAdmin(s.handleGetGitHubToken)).Methods("GET")
-	api.HandleFunc("/github-token", s.requireSuperAdmin(s.handleSetGitHubToken)).Methods("POST")
 
 	// Agency management (super_admin only)
 	api.HandleFunc("/agencies", s.requireSuperAdmin(s.handleGetAgencies)).Methods("GET")
@@ -616,7 +614,7 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 
 // handleGetConfig / handleUpdateConfig: super_admin only (routed through
 // requireSuperAdmin and the role matrix; checked here again because the
-// config holds the GitHub token and the auth switch).
+// config holds server-wide settings).
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if !isSuperAdmin(s.getSession(r)) {
 		w.Header().Set("Content-Type", "application/json")
@@ -624,12 +622,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	// A copy without the GitHub token (/api/github-token reports only
-	// whether one is set).
 	cfg := *s.config
-	if cfg.GitHubToken != "" {
-		cfg.GitHubToken = ""
-	}
 	json.NewEncoder(w).Encode(&cfg)
 }
 
@@ -646,9 +639,6 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&newConfig); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid config")
 		return
-	}
-	if newConfig.GitHubToken == "" {
-		newConfig.GitHubToken = s.config.GitHubToken // GET never returns it
 	}
 
 	// Update config (would require restart for some changes)
@@ -2856,9 +2846,121 @@ type GitHubRelease struct {
 	Assets  []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
-		URL                string `json:"url"` // API URL for private repo downloads
 	} `json:"assets"`
 }
+
+// githubReleasesAPI is the public GitHub API for this server's releases
+// (a variable so tests can stand in for GitHub). Calls are unauthenticated:
+// GitHub allows 60 an hour per address, so the update check caches its
+// answer (updateCheckCache) and stops asking while GitHub limits it.
+var githubReleasesAPI = "https://api.github.com/repos/RyanR3/MeshRelayServer/releases"
+
+// updateCheckCacheFor is how long one answer from GitHub serves every
+// update check (page opens by any super admin, the Check button).
+const updateCheckCacheFor = 10 * time.Minute
+
+// updateCheckCache holds the last latest-release answer, or the time until
+// which GitHub is limiting this address. The mutex is held during the
+// request, so dashboards opened at the same moment make one call.
+type updateCheckCache struct {
+	mu           sync.Mutex
+	release      *GitHubRelease
+	notFound     bool
+	fetched      time.Time
+	limitedUntil time.Time
+}
+
+var latestReleaseCache = &updateCheckCache{}
+
+// githubRateLimitWait reports whether resp is GitHub limiting requests
+// (429, or 403 with no requests left / a Retry-After) and how long to wait,
+// from Retry-After or X-RateLimit-Reset (0 when neither is given).
+func githubRateLimitWait(resp *http.Response, now time.Time) (bool, time.Duration) {
+	limited := resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden &&
+			(resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""))
+	if !limited {
+		return false, 0
+	}
+	if v, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && v > 0 {
+		return true, time.Duration(v) * time.Second
+	}
+	if v, err := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("X-RateLimit-Reset")), 10, 64); err == nil {
+		if d := time.Unix(v, 0).Sub(now); d > 0 {
+			return true, d
+		}
+	}
+	return true, 0
+}
+
+// githubRateLimitMessage is what the admin sees while GitHub limits this
+// address.
+func githubRateLimitMessage(wait time.Duration) string {
+	if wait <= 0 {
+		return "GitHub is limiting requests from this address; try again later"
+	}
+	mins := int((wait + time.Minute - 1) / time.Minute)
+	unit := "minutes"
+	if mins == 1 {
+		unit = "minute"
+	}
+	return fmt.Sprintf("GitHub is limiting requests from this address; try again in %d %s", mins, unit)
+}
+
+// fetchLatestRelease returns the latest release (nil when there is none),
+// from the cache when it is recent. A rate-limited answer returns an
+// *githubRateLimitError and no call is made again until the limit resets.
+func fetchLatestRelease() (*GitHubRelease, error) {
+	c := latestReleaseCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if now.Before(c.limitedUntil) {
+		return nil, &githubRateLimitError{wait: c.limitedUntil.Sub(now)}
+	}
+	if !c.fetched.IsZero() && now.Sub(c.fetched) < updateCheckCacheFor {
+		return c.release, nil
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", githubReleasesAPI+"/latest", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to reach GitHub: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if limited, wait := githubRateLimitWait(resp, now); limited {
+		hold := wait
+		if hold <= 0 {
+			hold = 15 * time.Minute // GitHub gave no reset time
+		}
+		c.limitedUntil = now.Add(hold)
+		return nil, &githubRateLimitError{wait: wait}
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		c.release, c.fetched = nil, now
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var release GitHubRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&release); err != nil {
+		return nil, fmt.Errorf("Failed to parse GitHub response")
+	}
+	c.release, c.fetched = &release, now
+	return &release, nil
+}
+
+type githubRateLimitError struct{ wait time.Duration }
+
+func (e *githubRateLimitError) Error() string { return githubRateLimitMessage(e.wait) }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -2879,20 +2981,22 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	ghReq, _ := http.NewRequest("GET", "https://api.github.com/repos/RyanR3/MeshRelayServer/releases/latest", nil)
-	if s.config.GitHubToken != "" {
-		ghReq.Header.Set("Authorization", "token "+s.config.GitHubToken)
-	}
-	resp, err := client.Do(ghReq)
+	rel, err := fetchLatestRelease()
 	if err != nil {
+		var rl *githubRateLimitError
+		if errors.As(err, &rl) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":        err.Error(),
+				"rate_limited": true,
+			})
+			return
+		}
 		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to reach GitHub: " + err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 {
+	if rel == nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"current_version":  Version,
 			"latest_version":   Version,
@@ -2901,20 +3005,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	if resp.StatusCode != 200 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("GitHub API returned %d: %s", resp.StatusCode, string(bodyBytes))})
-		return
-	}
-
-	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse GitHub response"})
-		return
-	}
+	release := *rel
 
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
 	currentVersion := strings.TrimPrefix(Version, "v")
@@ -2922,12 +3013,8 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 
 	var binaryURL, webURL, checksumURL, binaryName string
 	for _, asset := range release.Assets {
-		// Use API URL for private repos (requires token + Accept: application/octet-stream)
-		// Use browser URL for public repos
+		// The public download URL; no token, no API asset URL.
 		dlURL := asset.BrowserDownloadURL
-		if s.config.GitHubToken != "" && asset.URL != "" {
-			dlURL = asset.URL
-		}
 		// Pick the asset matching THIS machine's architecture. Raspberry Pi
 		// deployments are aarch64 and releases ship both; without this the
 		// updater always took the amd64 "ptt-server-linux" and installed a
@@ -2992,9 +3079,9 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Public release downloads only (browser_download_url).
 	allowedPrefixes := []string{
 		"https://github.com/RyanR3/MeshRelayServer/",
-		"https://api.github.com/repos/RyanR3/MeshRelayServer/",
 	}
 
 	validateURL := func(u string) bool {
@@ -3024,7 +3111,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.performUpdate(req.BinaryURL, req.BinaryName, req.WebURL, req.ChecksumURL, s.config.GitHubToken)
+	go s.performUpdate(req.BinaryURL, req.BinaryName, req.WebURL, req.ChecksumURL)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "update_started"})
 }
@@ -3048,7 +3135,7 @@ func (s *Server) setUpdateStatus(stage string, progress int, message string, err
 	}
 }
 
-func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghToken string) {
+func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL string) {
 	s.updateStatus.mu.Lock()
 	s.updateStatus.InProgress = true
 	s.updateStatus.Error = ""
@@ -3068,12 +3155,7 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghTok
 	log.Printf("Downloading binary from: %s", binaryURL)
 
 	client := &http.Client{Timeout: 5 * time.Minute}
-	dlReq, _ := http.NewRequest("GET", binaryURL, nil)
-	if ghToken != "" {
-		dlReq.Header.Set("Authorization", "token "+ghToken)
-		dlReq.Header.Set("Accept", "application/octet-stream")
-	}
-	resp, err := client.Do(dlReq)
+	resp, err := client.Get(binaryURL)
 	if err != nil {
 		s.setUpdateStatus("error", 10, "", "Failed to download binary: "+err.Error())
 		return
@@ -3110,7 +3192,7 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghTok
 
 	// Verify SHA-256 checksum if a checksums file is available in the release
 	s.setUpdateStatus("verifying", 25, "Verifying binary checksum...", "")
-	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryName, checksumURL, ghToken)
+	verified, checksumErr := s.verifyBinaryChecksum(tmpBinary, binaryName, checksumURL)
 	if checksumErr != nil {
 		// FAIL CLOSED: cannot verify => do not install.
 		os.Remove(tmpBinary)
@@ -3136,7 +3218,7 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL, ghTok
 		log.Printf("Downloading web files from: %s", webURL)
 
 		tmpWebDir = filepath.Join(installDir, "web.new")
-		if err := downloadAndExtractTarGz(webURL, tmpWebDir, ghToken); err != nil {
+		if err := downloadAndExtractTarGz(webURL, tmpWebDir); err != nil {
 			os.Remove(tmpBinary)
 			s.setUpdateStatus("error", 30, "", "Failed to download web files: "+err.Error())
 			return
@@ -3217,18 +3299,13 @@ func archBinaryAsset() string {
 // used to look up the entry in SHA256SUMS. Returns (true, nil) if verified,
 // (false, nil) if hash mismatch, or (false, err) if checksum file unavailable.
 // NOTE: caller treats any error as fatal (fail closed) — only (true, nil) proceeds.
-func (s *Server) verifyBinaryChecksum(binaryPath, binaryName, checksumURL, ghToken string) (bool, error) {
+func (s *Server) verifyBinaryChecksum(binaryPath, binaryName, checksumURL string) (bool, error) {
 	if checksumURL == "" {
 		return false, fmt.Errorf("no checksum URL provided")
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, _ := http.NewRequest("GET", checksumURL, nil)
-	if ghToken != "" {
-		req.Header.Set("Authorization", "token "+ghToken)
-		req.Header.Set("Accept", "application/octet-stream")
-	}
-	resp, err := client.Do(req)
+	resp, err := client.Get(checksumURL)
 	if err != nil {
 		return false, fmt.Errorf("failed to download checksums: %w", err)
 	}
@@ -3296,46 +3373,9 @@ func (s *Server) verifyBinaryChecksum(binaryPath, binaryName, checksumURL, ghTok
 	return actualHash == expectedHash, nil
 }
 
-func (s *Server) handleGetGitHubToken(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	// Only return whether a token is configured, not the token itself
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"configured": s.config.GitHubToken != "",
-	})
-}
-
-func (s *Server) handleSetGitHubToken(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	var req struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request"})
-		return
-	}
-
-	s.config.GitHubToken = req.Token
-	if err := s.config.Save(s.configFile); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save config: " + err.Error()})
-		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"configured": req.Token != "",
-		"message":    "GitHub token updated",
-	})
-}
-
-func downloadAndExtractTarGz(url string, destDir string, ghToken string) error {
+func downloadAndExtractTarGz(url string, destDir string) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
-	dlReq, _ := http.NewRequest("GET", url, nil)
-	if ghToken != "" {
-		dlReq.Header.Set("Authorization", "token "+ghToken)
-		dlReq.Header.Set("Accept", "application/octet-stream")
-	}
-	resp, err := client.Do(dlReq)
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 )
 
@@ -21,7 +22,6 @@ type Config struct {
 	LMRBridgeFile         string `json:"lmr_bridge_file"`
 	MutualAidRequestsFile string `json:"mutual_aid_requests_file"`
 	ZelloBridgesFile      string `json:"zello_bridges_file"`
-	GitHubToken           string `json:"github_token,omitempty"`
 	// Radio traffic recording (recorder.go). Days to keep; 0 = default 30.
 	RecordingDir           string `json:"recording_dir,omitempty"`
 	RecordingRetentionDays int    `json:"recording_retention_days,omitempty"`
@@ -128,6 +128,49 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	return config, nil
+}
+
+// retiredConfigKeys are settings older versions wrote to config.json that
+// this version no longer reads. LoadConfig ignores them (they are not in
+// Config), Save never writes them, and dropRetiredConfigKeys removes them
+// from the file at start-up.
+var retiredConfigKeys = []struct{ key, note string }{
+	// The repository is public: the updater and the speech-to-text helper
+	// installer use the public release downloads, without a token.
+	{"github_token", "github_token is no longer used and was removed from config.json"},
+}
+
+// dropRetiredConfigKeys removes retiredConfigKeys from the config file on
+// disk, leaving every other key as it is in the file (settings from the
+// environment or the command line are not written into it). The file is
+// replaced atomically and only when a retired key is present; the values
+// are never logged.
+func dropRetiredConfigKeys(filename string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var notes []string
+	for _, k := range retiredConfigKeys {
+		if _, ok := raw[k.key]; ok {
+			delete(raw, k.key)
+			notes = append(notes, k.note)
+		}
+	}
+	if len(notes) == 0 {
+		return nil
+	}
+	if err := writeJSONFileAtomic(filename, raw); err != nil {
+		return err
+	}
+	for _, n := range notes {
+		log.Print(n)
+	}
+	return nil
 }
 
 func (c *Config) Save(filename string) error {

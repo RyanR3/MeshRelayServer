@@ -28,7 +28,11 @@ Your config, users, and agencies are preserved on update.
 
 The same source runs three ways:
 
-- **Standalone (above):** a systemd service, updated from the dashboard.
+- **Standalone (above):** a systemd service, updated from the dashboard. The update check
+  and the speech-to-text helper download use the public GitHub releases, no token needed.
+  GitHub allows 60 unauthenticated API calls an hour per address, so the server asks at most
+  once every 10 minutes and shares the answer between dashboards; a `github_token` left in an
+  older `config.json` is ignored and removed at start-up.
 - **Docker:** `docker compose up -d --build` with the included `Dockerfile` and
   `docker-compose.yml`. Non-root, read-only, data in the `meshrelay-data` volume.
   The dashboard listens on 127.0.0.1:8770 for a reverse proxy in front.
@@ -178,7 +182,7 @@ Not moved, to set up again by hand:
 - LMR and Zello bridges
 - TAK connections
 - map layers
-- `config.json` (TLS, single sign-on, ports, update token)
+- `config.json` (TLS, single sign-on, ports)
 
 ## Server Requirements
 

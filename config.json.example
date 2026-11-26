@@ -6,6 +6,5 @@
   "log_level": "INFO",
   "users_file": "users.json",
   "web_admins_file": "web_admins.json",
-  "agencies_file": "agencies.json",
-  "github_token": ""
+  "agencies_file": "agencies.json"
 }

@@ -51,7 +51,7 @@ func newWebTestServer(t *testing.T) *Server {
 			LMRBridgeFile:         dir + "/lmr.json",
 			MutualAidRequestsFile: dir + "/mar.json",
 			ZelloBridgesFile:      dir + "/zello.json",
-			GitHubToken:           "ghp_secret",
+			LogLevel:              "INFO",
 		},
 		clients:            map[string]*Client{},
 		channels:           map[string]*Channel{},
@@ -94,8 +94,7 @@ func doReq(h http.Handler, method, path, token, body string) *httptest.ResponseR
 	return rec
 }
 
-// W1: /api/config is super_admin only — it carries the GitHub token and the
-// switches that turn auth off.
+// W1: /api/config is super_admin only — it carries server-wide settings.
 func TestConfigIsSuperAdminOnly(t *testing.T) {
 	s := newWebTestServer(t)
 	h := s.webHandler()
@@ -103,15 +102,13 @@ func TestConfigIsSuperAdminOnly(t *testing.T) {
 	for _, tok := range []string{"fireadmin", "firedispatch"} {
 		if rec := doReq(h, "GET", "/api/config", tok, ""); rec.Code != http.StatusForbidden {
 			t.Errorf("%s GET /api/config = %d, want 403", tok, rec.Code)
-		} else if strings.Contains(rec.Body.String(), "ghp_secret") {
-			t.Errorf("%s got the GitHub token", tok)
 		}
-		rec := doReq(h, "POST", "/api/config", tok, `{"auth_enabled":false,"github_token":"x"}`)
+		rec := doReq(h, "POST", "/api/config", tok, `{"log_level":"DEBUG"}`)
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("%s POST /api/config = %d, want 403", tok, rec.Code)
 		}
 	}
-	if s.config.GitHubToken != "ghp_secret" {
+	if s.config.LogLevel != "INFO" {
 		t.Fatal("config was replaced by a non-super caller")
 	}
 	if rec := doReq(h, "GET", "/api/config", "super", ""); rec.Code != http.StatusOK {
@@ -140,7 +137,6 @@ func TestDispatchDeniedUsersAgenciesConfig(t *testing.T) {
 		{"POST", "/api/agencies", `{"id":"x","name":"x"}`},
 		{"GET", "/api/config", ""},
 		{"POST", "/api/update/check", ""},
-		{"GET", "/api/github-token", ""},
 		{"GET", "/api/my-agency/zello-bridges", ""},
 		{"GET", "/api/my-agency/lmr-bridges", ""},
 		{"GET", "/api/zello-bridges", ""},
