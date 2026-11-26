@@ -418,7 +418,7 @@ func (s *Server) handleLMRBridgeATAK(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
 	}
-	log.Printf("LMR: bridge %s (%s) ATAK marker %s by %s", id, name,
+	log.Printf("LMR: bridge %s (%q) ATAK marker %s by %s", id, name,
 		map[bool]string{true: "ON", false: "off"}[req.ShowInATAK], nonEmpty(mine, "super admin"))
 
 	// An agency admin sees its own TAK link only; a super admin sees all.

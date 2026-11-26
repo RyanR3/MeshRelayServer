@@ -136,7 +136,7 @@ func (s *Server) bridgeTxAllowed(client *Client, now time.Time) bool {
 	if guest && !guestsOK {
 		// Told once per transmission, through the same gate bookkeeping.
 		if s.bridgeGuestGate.note(key, now) {
-			log.Printf("%s bridge ch %d [%s]: guest %s may not transmit here (guests not allowed on this bridge)",
+			log.Printf("%s bridge ch %d [%s]: guest %q may not transmit here (guests not allowed on this bridge)",
 				kind, client.Channel, client.AgencyID, client.Username)
 			s.sendFloorToUserIn(channelKey(client.AgencyID, client.Channel), client.Username,
 				buildFloorDenied(client.Channel, 1, 0, "Guests can't transmit on this bridge"))
@@ -145,7 +145,7 @@ func (s *Server) bridgeTxAllowed(client *Client, now time.Time) bool {
 	}
 	ok, first := s.bridgeTx.allow(key, now, true)
 	if first {
-		log.Printf("%s bridge ch %d [%s]: %s reached the %s transmit limit — dropped until it unkeys",
+		log.Printf("%s bridge ch %d [%s]: %q reached the %s transmit limit — dropped until it unkeys",
 			kind, client.Channel, client.AgencyID, client.Username, bridgeMaxTx)
 		s.activityLog.Add("bridge_tx_limit", client.Username,
 			"Transmit limit reached on "+kind+" bridge channel "+itoa(client.Channel), client.AgencyID)

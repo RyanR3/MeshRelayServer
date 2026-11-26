@@ -494,7 +494,7 @@ func (t *takConn) run() {
 			msg = err.Error()
 		}
 		t.setStatus("error", msg)
-		log.Printf("TAK [%s]: %s — retrying in %v", t.cfg.AgencyID, msg, backoff)
+		log.Printf("TAK [%s]: %q — retrying in %v", t.cfg.AgencyID, msg, backoff)
 		select {
 		case <-t.stop:
 			return
@@ -523,7 +523,7 @@ func (t *takConn) session() error {
 	t.mu.Unlock()
 	defer conn.Close()
 	t.setStatus("connected", "")
-	log.Printf("TAK [%s]: connected to %s:%d as %q", t.cfg.AgencyID, t.cfg.Host, t.cfg.StreamPort, t.cfg.Callsign)
+	log.Printf("TAK [%s]: connected to %q:%d as %q", t.cfg.AgencyID, t.cfg.Host, t.cfg.StreamPort, t.cfg.Callsign)
 	t.s.lmrMarkersChanged() // LMR bridge markers (lmr_atak.go): send them again now
 	t.mu.Lock()
 	current := t.cfg
@@ -772,7 +772,7 @@ func (t *takConn) handleEmergency(ev *cotEvent) {
 	if validFix(ev.Point.Lat, ev.Point.Lon) {
 		msg["lat"], msg["lon"] = ev.Point.Lat, ev.Point.Lon
 	}
-	log.Printf("TAK [%s]: emergency %v from %s (%s, uid %s)", t.cfg.AgencyID, active, name, ev.Type, ev.UID)
+	log.Printf("TAK [%s]: emergency %v from %q (%q, uid %q)", t.cfg.AgencyID, active, name, ev.Type, ev.UID)
 	t.s.sendToConsoles(t.cfg.AgencyID, msg)
 }
 
@@ -1096,7 +1096,7 @@ func (t *takConn) phoneAlert(name string, active bool, now time.Time) (hide bool
 		t.unshowPhoneAlert(unshow)
 	}
 	if cancelOwn {
-		log.Printf("TAK [%s]: %s's phone sends its own 911 alert — server alert withdrawn", t.cfg.AgencyID, user)
+		log.Printf("TAK [%s]: %q's phone sends its own 911 alert — server alert withdrawn", t.cfg.AgencyID, user)
 		t.sendOwnAlert(user, false)
 	}
 	return hide
@@ -1120,7 +1120,7 @@ func (t *takConn) alertTick(now time.Time) {
 	}
 	t.mu.Unlock()
 	for _, u := range resume {
-		log.Printf("TAK [%s]: %s's phone alert stopped — server 911 alert sent again", t.cfg.AgencyID, u)
+		log.Printf("TAK [%s]: %q's phone alert stopped — server 911 alert sent again", t.cfg.AgencyID, u)
 		t.sendOwnAlert(u, true)
 	}
 }
@@ -1288,7 +1288,7 @@ func (s *Server) handleUpdateTak(w http.ResponseWriter, r *http.Request) {
 			// confirm that exact certificate before the password is sent.
 			info, trusted, err := takProbeCert(cfg.Host, cfg.EnrollPort, allowLocal)
 			if err != nil {
-				log.Printf("TAK [%s]: could not reach %s:%d: %v", agencyID, cfg.Host, cfg.EnrollPort, err)
+				log.Printf("TAK [%s]: could not reach %q:%d: %v", agencyID, cfg.Host, cfg.EnrollPort, err)
 				writeJSONError(w, http.StatusBadGateway, "Could not reach the TAK server's enrollment port")
 				return
 			}
@@ -1311,7 +1311,7 @@ func (s *Server) handleUpdateTak(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadGateway, msg)
 			return
 		}
-		log.Printf("TAK [%s]: enrolled with %s as %s", agencyID, cfg.Host, cfg.Username)
+		log.Printf("TAK [%s]: enrolled with %q as %q", agencyID, cfg.Host, cfg.Username)
 	}
 	m.mu.Lock()
 	m.cfgs[agencyID] = cfg

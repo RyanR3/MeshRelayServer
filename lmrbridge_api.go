@@ -195,7 +195,7 @@ func (s *Server) handleCreateLMRBridge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("LMR: created bridge %s user=%s by %s", describeLMRBridge(b), b.Username, createdBy)
+	log.Printf("LMR: created bridge %s user=%q by %q", describeLMRBridge(b), b.Username, createdBy)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "ok", "id": b.ID, "channel": b.Channel,
 	})
@@ -391,7 +391,7 @@ func (s *Server) handleDeleteLMRBridge(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save: %s", err.Error()))
 		return
 	}
-	log.Printf("LMR: deleted bridge %s (ch %d, user %s)", id, channel, username)
+	log.Printf("LMR: deleted bridge %s (ch %d, user %q)", id, channel, username)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

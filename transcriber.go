@@ -260,7 +260,7 @@ func (t *Transcriber) startHelper() (*trProc, error) {
 		p.stop()
 		return nil, fmt.Errorf("helper did not start within %v", trStartTimeout)
 	}
-	log.Printf("Transcription: helper started (model %s, %d threads)", m.Name, trThreads())
+	log.Printf("Transcription: helper started (model %q, %d threads)", m.Name, trThreads())
 	return p, nil
 }
 
@@ -482,7 +482,7 @@ func (t *Transcriber) setInstall(stage string, progress int, msg, errMsg string)
 	if errMsg != "" {
 		log.Printf("Transcription install: %s", errMsg)
 	} else if msg != "" {
-		log.Printf("Transcription install: %s", msg)
+		log.Printf("Transcription install: %q", msg)
 	}
 }
 
@@ -884,7 +884,7 @@ func (s *Server) handleTranscriptionInstall(w http.ResponseWriter, r *http.Reque
 	}
 	t.install = trInstall{InProgress: true, Stage: "starting", Message: "Starting…"}
 	t.mu.Unlock()
-	log.Printf("Transcription install of %s started by %s", req.Model, s.sessionUser(r))
+	log.Printf("Transcription install of %q started by %q", req.Model, s.sessionUser(r))
 	go t.runInstall(req.Model)
 	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
 }
@@ -912,7 +912,7 @@ func (s *Server) handleTranscriptionRemove(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("Transcription removed by %s", s.sessionUser(r))
+	log.Printf("Transcription removed by %q", s.sessionUser(r))
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

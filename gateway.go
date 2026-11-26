@@ -143,7 +143,7 @@ func (g *SipGateway) register() {
 	g.mu.Lock()
 	g.registered = true
 	g.mu.Unlock()
-	log.Printf("[SIP-GW] sent REGISTER to %s as %s", host, g.cfg.GatewayMcxID)
+	log.Printf("[SIP-GW] sent REGISTER to %q as %s", host, g.cfg.GatewayMcxID)
 }
 
 func (g *SipGateway) buildRegister() string {
@@ -208,7 +208,7 @@ func (g *SipGateway) handleSip(msg string, raddr *net.UDPAddr) {
 		g.remember(raddr)
 		g.reply(msg, raddr, "200 OK")
 		user := sipUser(headerValue(msg, "From"))
-		log.Printf("[SIP-GW] INVITE from %s (%s) -> floor request on %s", raddr, user, g.bridgeKey)
+		log.Printf("[SIP-GW] INVITE from %s (%q) -> floor request on %s", raddr, user, g.bridgeKey)
 		if g.mesh != nil {
 			_ = g.mesh.GrantFloor(g.bridgeKey, user) // stub: grant so audio can flow
 		}
@@ -266,7 +266,7 @@ func (g *SipGateway) OnFloorRequest(channelKey, userMCXID string, priority uint8
 	// A MeshRelay user took the floor on the bridged channel — signal the MCX side.
 	// Stub: log the translated 3GPP-style floor "Floor Request". Full impl sends
 	// an MBCP Floor Request over the MCX floor-control channel.
-	log.Printf("[SIP-GW] MeshRelay floor -> MCX: %s took floor on %s (pri %d)", userMCXID, channelKey, priority)
+	log.Printf("[SIP-GW] MeshRelay floor -> MCX: %q took floor on %s (pri %d)", userMCXID, channelKey, priority)
 	return nil
 }
 
@@ -274,7 +274,7 @@ func (g *SipGateway) OnFloorRelease(channelKey, userMCXID string) error {
 	if g == nil || !g.isActiveFor(channelKey) {
 		return nil
 	}
-	log.Printf("[SIP-GW] MeshRelay floor release -> MCX: %s on %s", userMCXID, channelKey)
+	log.Printf("[SIP-GW] MeshRelay floor release -> MCX: %q on %s", userMCXID, channelKey)
 	return nil
 }
 
@@ -309,7 +309,7 @@ func (g *SipGateway) OnEmergencyAlert(channelKey, userMCXID string) error {
 	if g == nil || !g.isActiveFor(channelKey) {
 		return nil
 	}
-	log.Printf("[SIP-GW] MeshRelay EMERGENCY -> MCX: %s on %s", userMCXID, channelKey)
+	log.Printf("[SIP-GW] MeshRelay EMERGENCY -> MCX: %q on %s", userMCXID, channelKey)
 	return nil
 }
 

@@ -429,7 +429,7 @@ func (s *Server) handleGroupCreateAdhoc(pkt *GroupCreateAdhoc, addr *net.UDPAddr
 			invited++
 		}
 	}
-	log.Printf("Ad-hoc group %q (ch %d, %s) created by %s [%s], invited %d of %d requested", pkt.GroupName, channel, gtype, pkt.Creator, agencyID, invited, len(pkt.Members))
+	log.Printf("Ad-hoc group %q (ch %d, %s) created by %q [%s], invited %d of %d requested", pkt.GroupName, channel, gtype, pkt.Creator, agencyID, invited, len(pkt.Members))
 }
 
 // handleGroupInviteResponse processes accept/decline of an ad-hoc invite.
@@ -508,12 +508,12 @@ func (s *Server) handleGroupDisband(pkt *GroupDisband, addr *net.UDPAddr) {
 		return // not an ad-hoc group (mutual aid / Zello rows can't be disbanded)
 	}
 	if a.createdBy != pkt.User {
-		log.Printf("Group disband refused: %s is not creator of %q (ch %d)", pkt.User, a.name, pkt.Channel)
+		log.Printf("Group disband refused: %q is not creator of %q (ch %d)", pkt.User, a.name, pkt.Channel)
 		return
 	}
 	s.groupMgr.removeAdhoc(key)
 	s.dissolveAdhocChannel(key, a.channel, a.name)
-	log.Printf("Ad-hoc group %q (ch %d) disbanded by creator %s", a.name, a.channel, pkt.User)
+	log.Printf("Ad-hoc group %q (ch %d) disbanded by creator %q", a.name, a.channel, pkt.User)
 }
 
 // AdhocLeave is called when a member leaves an ad-hoc channel (channel switch
@@ -548,7 +548,7 @@ func (s *Server) dissolveAdhocChannel(key string, channel int, name string) {
 	for _, a := range addrs {
 		s.sendPacket(pkt, a)
 	}
-	log.Printf("Ad-hoc group ch %d (%s) dissolved", channel, name)
+	log.Printf("Ad-hoc group ch %d (%q) dissolved", channel, name)
 }
 
 // usedHighChannels returns every server-allocated channel already

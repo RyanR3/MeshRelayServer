@@ -152,7 +152,7 @@ func (s *Server) handleManagedTak(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("TAK [%s]: enrolled by the managing platform with %s as %s", agencyID, host, req.Username)
+	log.Printf("TAK [%s]: enrolled by the managing platform with %q as %q", agencyID, host, req.Username)
 	s.startTak(next)
 	time.Sleep(1500 * time.Millisecond) // let the first connect attempt report
 	json.NewEncoder(w).Encode(s.takStatusJSON(agencyID))

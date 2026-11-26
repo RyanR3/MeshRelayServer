@@ -289,7 +289,7 @@ func (s *Server) notifyDispatchEmergency(agencyID string, channel int, user stri
 		msg["lat"], msg["lon"] = c.Loc.Lat, c.Loc.Lon
 	}
 	s.mu.RUnlock()
-	log.Printf("Dispatch: emergency %v by %s [%s] ch %d", active, user, agencyID, channel)
+	log.Printf("Dispatch: emergency %v by %q [%s] ch %d", active, user, agencyID, channel)
 	s.sendToConsoles(agencyID, msg)
 	s.takEmergency(agencyID, user, active) // and into the agency's TAK server
 }

@@ -346,7 +346,7 @@ func (s *Server) notifyLMRChannel(agencies []string, channel int, name string, a
 	if !active {
 		verb = "withdrew"
 	}
-	log.Printf("LMR: %s channel %d (%s) to %d client(s) across %v", verb, channel, name, len(addrs), agencies)
+	log.Printf("LMR: %s channel %d (%q) to %d client(s) across %v", verb, channel, name, len(addrs), agencies)
 }
 
 // newLMRBridgeID mints a random bridge id.
@@ -361,5 +361,5 @@ func nowRFC3339() string { return time.Now().Format(time.RFC3339) }
 
 // describeLMRBridge is used in logs and API responses.
 func describeLMRBridge(b *LMRBridge) string {
-	return fmt.Sprintf("%s (ch %d, %d agencies)", b.displayName(), b.Channel, len(b.Agencies))
+	return fmt.Sprintf("%q (ch %d, %d agencies)", b.displayName(), b.Channel, len(b.Agencies))
 }

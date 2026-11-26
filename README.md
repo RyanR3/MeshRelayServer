@@ -138,6 +138,13 @@ sudo systemctl stop ptt-server      # Stop
 journalctl -u ptt-server -f         # View logs
 ```
 
+Names that come from phones or from the dashboard (usernames, callsigns,
+bridge and channel names) are written to the log in double quotes, Go
+style: `Auth failed: unknown user "Engine 7" from 203.0.113.5:41000`. A
+quote or line break inside a name shows as `\"` or `\n`, so every log entry
+stays on one line and the name cannot pose as the address. An exact fail2ban
+pattern: `Auth failed: (unknown user|wrong password for user) "(?:[^"\\]|\\.)*" from <HOST>`.
+
 ## Server Requirements
 
 | | Minimum | Recommended |

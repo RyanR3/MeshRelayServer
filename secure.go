@@ -616,7 +616,7 @@ func (s *Server) handleSecAuth(data []byte, addr *net.UDPAddr) {
 	}
 	ip := addr.IP.String()
 	if locked, left, what := s.pttAuthLimit.blocked(ip, accts...); locked {
-		log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %s from %s",
+		log.Printf("Auth refused: %s locked for %s more (too many wrong passwords) — user %q from %s",
 			what, left.Round(time.Second), username, addr)
 		fail("Too many attempts — try again in a few minutes")
 		return
@@ -633,12 +633,12 @@ func (s *Server) handleSecAuth(data []byte, addr *net.UDPAddr) {
 	}
 	if match == nil {
 		if len(candidates) == 0 {
-			log.Printf("Auth failed: unknown user %s from %s (secure)", username, addr)
+			log.Printf("Auth failed: unknown user %q from %s (secure)", username, addr)
 		} else {
-			log.Printf("Auth failed: wrong password for user %s from %s (secure)", username, addr)
+			log.Printf("Auth failed: wrong password for user %q from %s (secure)", username, addr)
 		}
 		if s.pttAuthLimit.failed(ip, accts...) {
-			log.Printf("Auth lockout: too many wrong passwords (user %s from %s)", username, addr)
+			log.Printf("Auth lockout: too many wrong passwords (user %q from %s)", username, addr)
 		}
 		fail("Invalid username or password")
 		return

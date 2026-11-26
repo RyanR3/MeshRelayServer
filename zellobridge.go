@@ -390,7 +390,7 @@ func (s *Server) runZelloBridge(b *ZelloBridge) {
 			} else {
 				b.setStatus("error", msg)
 			}
-			log.Printf("Zello bridge %s (%s): %v", b.ID, b.Name, err)
+			log.Printf("Zello bridge %s (%q): %v", b.ID, b.Name, err)
 		} else {
 			b.setStatus("disconnected", "")
 		}
@@ -461,7 +461,7 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 	}
 	logon["channels"] = chans
 	b.inStreams = make(map[int64]string)
-	log.Printf("Zello bridge %s: logon (channels=%v, mode=%s)", b.Name, chans,
+	log.Printf("Zello bridge %q: logon (channels=%v, mode=%s)", b.Name, chans,
 		map[bool]string{true: "user/pass", false: "api_key"}[b.Username != ""])
 	if err := conn.WriteJSON(logon); err != nil {
 		return fmt.Errorf("send logon: %w", err)
@@ -512,7 +512,7 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 						// A failed keepalive ping means the write side is dead.
 						// Close so the read loop errors and we reconnect, rather
 						// than sitting in a half-open zombie (reads OK, writes hang).
-						log.Printf("Zello bridge %s: keepalive ping failed: %v — forcing reconnect", b.Name, err)
+						log.Printf("Zello bridge %q: keepalive ping failed: %v — forcing reconnect", b.Name, err)
 						b.failOutboundWrite()
 					}
 				}
@@ -571,7 +571,7 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 		if msgType != websocket.TextMessage {
 			continue
 		}
-		log.Printf("Zello bridge %s RX: %s", b.Name, string(data))
+		log.Printf("Zello bridge %q RX: %s", b.Name, string(data))
 		var msg map[string]interface{}
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
@@ -596,11 +596,11 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 			if errStr == "kicked" {
 				b.setStatus("error", "Kicked — this Zello user is logged in elsewhere. Use a dedicated bot account not signed in on any app/device.")
 				atomic.StoreInt32(&b.running, 0)
-				log.Printf("Zello bridge %s: kicked (duplicate session) — stopping to avoid a reconnect loop", b.Name)
+				log.Printf("Zello bridge %q: kicked (duplicate session) — stopping to avoid a reconnect loop", b.Name)
 				return nil
 			}
 			b.setStatus("error", "Zello: "+errStr)
-			log.Printf("Zello bridge %s on_error: %s", b.Name, errStr)
+			log.Printf("Zello bridge %q on_error: %q", b.Name, errStr)
 			continue
 		}
 
@@ -612,7 +612,7 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 				b.assignOutStreamID(sid)
 			} else {
 				b.setStatus("connected", "")
-				log.Printf("Zello bridge %s connected on %s", b.Name, b.Network)
+				log.Printf("Zello bridge %q connected on %q", b.Name, b.Network)
 			}
 		}
 		if cmd == "on_channel_status" {
@@ -633,7 +633,7 @@ func (s *Server) zelloConnectAndServe(b *ZelloBridge) error {
 			b.inStreamsMu.Lock()
 			b.inStreams[sid] = zch
 			b.inStreamsMu.Unlock()
-			log.Printf("Zello bridge %s: inbound stream %d from %q on channel %q", b.Name, sid, from, zch)
+			log.Printf("Zello bridge %q: inbound stream %d from %q on channel %q", b.Name, sid, from, zch)
 		}
 		if cmd == "on_stream_stop" {
 			sid := jsonInt(msg["stream_id"])
@@ -925,14 +925,14 @@ func (b *ZelloBridge) sendAudioToZello(idx int, opus []byte) {
 		// OS TCP timeout. On failure, force a reconnect (see failOutboundWrite).
 		b.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := b.conn.WriteJSON(start); err != nil {
-			log.Printf("Zello bridge %s: start_stream failed: %v — forcing reconnect", b.Name, err)
+			log.Printf("Zello bridge %q: start_stream failed: %v — forcing reconnect", b.Name, err)
 			b.failOutboundWrite()
 			return
 		}
 		b.pendingOutIdx = idx                // the success response's stream_id is for this mapping
 		atomic.StoreInt64(&m.outStreamID, 1) // temp until Zello confirms
 		atomic.StoreInt64(&m.outPacketID, 0)
-		log.Printf("Zello bridge %s: started outbound stream -> %s", b.Name, m.ZelloChannel)
+		log.Printf("Zello bridge %q: started outbound stream -> %q", b.Name, m.ZelloChannel)
 	}
 
 	// Binary frame: [0x01][stream_id(4 BE)][packet_id(4 BE)][opus].
@@ -945,7 +945,7 @@ func (b *ZelloBridge) sendAudioToZello(idx int, opus []byte) {
 	copy(buf[9:], opus)
 	b.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := b.conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
-		log.Printf("Zello bridge %s: audio send failed: %v — forcing reconnect", b.Name, err)
+		log.Printf("Zello bridge %q: audio send failed: %v — forcing reconnect", b.Name, err)
 		b.failOutboundWrite()
 		return
 	}
@@ -1033,7 +1033,7 @@ func (s *Server) announceChannelRemoval(agencyID string, meshChannel int, name s
 	for _, a := range addrs {
 		s.sendPacket(pkt, a)
 	}
-	log.Printf("Zello: removed channel %d (%s) from %d clients in %s", meshChannel, name, len(addrs), agencyID)
+	log.Printf("Zello: removed channel %d (%q) from %d clients in %s", meshChannel, name, len(addrs), agencyID)
 }
 
 // notifyZelloBridgeChannels announces every mapped channel of a bridge to all
@@ -1071,7 +1071,7 @@ func (s *Server) notifyZelloBridgeChannels(b *ZelloBridge, active bool) {
 			for _, a := range addrs {
 				s.sendPacket(pkt, a)
 			}
-			log.Printf("Zello bridge %s: announced channel %d as %q to %d clients in %s (active=%v)",
+			log.Printf("Zello bridge %q: announced channel %d as %q to %d clients in %s (active=%v)",
 				b.Name, m.MeshChannel, name, len(addrs), agency, active)
 		}
 	}
@@ -1153,7 +1153,7 @@ func (s *Server) handleCreateZelloBridge(w http.ResponseWriter, r *http.Request)
 	if b.Enabled {
 		s.startZelloBridge(b)
 	}
-	log.Printf("Created Zello bridge %s (%s): %s/%s <-> agency %s ch %d (by %s)",
+	log.Printf("Created Zello bridge %s (%q): %q/%q <-> agency %s ch %d (by %q)",
 		id, b.Name, b.Network, b.ZelloChannel, b.AgencyID, b.MeshChannel, createdBy)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": id})
 }
@@ -1384,7 +1384,7 @@ func (s *Server) handleMapZelloBridge(w http.ResponseWriter, r *http.Request) {
 	if err := s.saveZelloBridges(); err != nil {
 		log.Printf("Warning: failed to save zello bridges: %v", err)
 	}
-	log.Printf("Zello bridge %s remapped: %d channel(s)", b.Name, len(clean))
+	log.Printf("Zello bridge %q remapped: %d channel(s)", b.Name, len(clean))
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "mappings": clean})
 }
 
@@ -1475,7 +1475,7 @@ func (s *Server) handleDeleteZelloBridge(w http.ResponseWriter, r *http.Request)
 	if err := s.saveZelloBridges(); err != nil {
 		log.Printf("Warning: failed to save zello bridges: %v", err)
 	}
-	log.Printf("Deleted Zello bridge %s (%s)", id, b.Name)
+	log.Printf("Deleted Zello bridge %s (%q)", id, b.Name)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

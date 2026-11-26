@@ -459,7 +459,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oidcFail(w http.ResponseWriter, r *http.Request, userMsg, logMsg string) {
-	log.Printf("SSO sign-in refused from %s: %s", s.clientIP(r), logMsg)
+	log.Printf("SSO sign-in refused from %s: %q", s.clientIP(r), logMsg)
 	http.SetCookie(w, &http.Cookie{Name: "oidc_state", Value: "", Path: "/api/oidc/", MaxAge: -1, HttpOnly: true, Secure: true})
 	http.Redirect(w, r, "/login.html?sso_error="+url.QueryEscape(userMsg), http.StatusFound)
 }
@@ -588,7 +588,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "oidc_state", Value: "", Path: "/api/oidc/", MaxAge: -1, HttpOnly: true, Secure: true})
 	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true,
 		MaxAge: int(webSessionMaxLifetime / time.Second), Secure: true, SameSite: http.SameSiteStrictMode})
-	log.Printf("Web login successful (SSO): %s (role: %s, agency: %s) from %s", username, role, agency, s.clientIP(r))
+	log.Printf("Web login successful (SSO): %q (role: %s, agency: %s) from %s", username, role, agency, s.clientIP(r))
 	s.activityLog.Add("admin_login", username, fmt.Sprintf("Web dashboard login via SSO (role: %s)", role), agency)
 
 	// SameSite=Strict cookies are not sent on the redirect chain that started

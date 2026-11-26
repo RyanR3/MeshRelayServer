@@ -247,7 +247,7 @@ func (s *Server) createInvitedGuest(req *GuestInviteRequest, addr *net.UDPAddr) 
 		return fail("The server couldn't save the guest account")
 	}
 
-	log.Printf("Guest invite: %s [%s] invited %s for %dh (expires %s)",
+	log.Printf("Guest invite: %q [%s] invited %q for %dh (expires %s)",
 		inviter.Username, inviter.AgencyID, username, hours, expires.Format(time.RFC3339))
 	s.activityLog.Add("guest_invited", inviter.Username,
 		fmt.Sprintf("Invited guest %s for %d h", username, hours), inviter.AgencyID)
@@ -281,7 +281,7 @@ func (s *Server) removeExpiredInvitedGuests() []expiredGuestKick {
 		}
 		delete(s.users, key)
 		removed++
-		log.Printf("Guest %s [%s] (invited by %s) expired, removed", u.Username, u.AgencyID, u.InvitedBy)
+		log.Printf("Guest %q [%s] (invited by %q) expired, removed", u.Username, u.AgencyID, u.InvitedBy)
 		s.activityLog.Add("guest_expired", u.Username,
 			fmt.Sprintf("Guest invited by %s expired", u.InvitedBy), u.AgencyID)
 		kicks = append(kicks, s.takeAccountSessionsLocked(key)...)

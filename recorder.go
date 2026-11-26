@@ -257,7 +257,7 @@ func (r *Recorder) prune(now time.Time) {
 			if d.Before(now.AddDate(0, 0, -keep)) {
 				if os.RemoveAll(filepath.Join(dayDir, sub.Name())) == nil {
 					removed[sub.Name()] = true
-					log.Printf("Recorder: deleted %s recordings from %s (kept %d days)", sub.Name(), e.Name(), keep)
+					log.Printf("Recorder: deleted %q recordings from %q (kept %d days)", sub.Name(), e.Name(), keep)
 					continue
 				}
 			}

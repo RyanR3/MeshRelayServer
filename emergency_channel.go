@@ -205,7 +205,7 @@ func (s *Server) raiseEmergency(agencyID, user string, workingChannel int) {
 		if s.activityLog != nil {
 			s.activityLog.Add("emergency", user, "Emergency raised", agencyID)
 		}
-		log.Printf("EMERGENCY raised by %s [%s] (was on channel %d) — audio now on the EMERGENCY channel", user, agencyID, working)
+		log.Printf("EMERGENCY raised by %q [%s] (was on channel %d) — audio now on the EMERGENCY channel", user, agencyID, working)
 	}
 	// Give the caller the EMERGENCY channel (or a place in its queue).
 	if s.floor != nil {
@@ -240,7 +240,7 @@ func (s *Server) clearEmergency(agencyID, user, by string) bool {
 	if s.activityLog != nil {
 		s.activityLog.Add("emergency", user, "Emergency cleared "+who, agencyID)
 	}
-	log.Printf("Emergency of %s [%s] cleared %s", user, agencyID, who)
+	log.Printf("Emergency of %q [%s] cleared %q", user, agencyID, who)
 	return true
 }
 

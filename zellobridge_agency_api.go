@@ -198,7 +198,7 @@ func (s *Server) handleShareZelloBridge(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
 	}
-	log.Printf("Zello: bridge %s shared with agency %s by %s", id, req.AgencyID, mine)
+	log.Printf("Zello: bridge %s shared with agency %q by %s", id, req.AgencyID, mine)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
@@ -280,7 +280,7 @@ func (s *Server) handleUnshareZelloBridge(w http.ResponseWriter, r *http.Request
 			fmt.Sprintf("failed to save: %s", err.Error()))
 		return
 	}
-	log.Printf("Zello: bridge %s access removed for agency %s (by %s)", id, target, mine)
+	log.Printf("Zello: bridge %s access removed for agency %q (by %s)", id, target, mine)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
@@ -351,7 +351,7 @@ func (s *Server) handleCreateMyZelloBridge(w http.ResponseWriter, r *http.Reques
 	if enabled {
 		go s.startZelloBridge(b)
 	}
-	log.Printf("Zello: agency %s created bridge %s (%s)", mine, b.ID, b.Name)
+	log.Printf("Zello: agency %s created bridge %s (%q)", mine, b.ID, b.Name)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": b.ID})
 }
 

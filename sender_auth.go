@@ -94,7 +94,7 @@ func (s *Server) adoptSenderAddr(c *Client, addr *net.UDPAddr, why string) {
 	if addr == nil || (c.Addr != nil && c.Addr.String() == addr.String()) {
 		return
 	}
-	log.Printf("Client %s [%s] address changed %v -> %v (%s)", c.Username, c.AgencyID, c.Addr, addr, why)
+	log.Printf("Client %q [%s] address changed %v -> %v (%s)", c.Username, c.AgencyID, c.Addr, addr, why)
 	c.Addr = addr
 }
 

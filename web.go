@@ -391,7 +391,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	acct := strings.ToLower(userKey(req.AgencyID, req.Username))
 	if locked, left, what := s.loginLimit.blocked(ip, acct); locked {
 		mins := int(left.Minutes()) + 1
-		log.Printf("Web login refused (%s locked %s more after too many wrong passwords): %s [%s] from %s",
+		log.Printf("Web login refused (%s locked %s more after too many wrong passwords): %q [%q] from %s",
 			what, left.Round(time.Second), req.Username, req.AgencyID, ip)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", strconv.Itoa(int(left.Seconds())+1))
@@ -435,14 +435,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	<-loginBcryptSlots
 	if !ok {
 		if s.loginLimit.failed(ip, acct) {
-			log.Printf("Web login lockout: too many wrong passwords for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
+			log.Printf("Web login lockout: too many wrong passwords for %q [%q] from %s", req.Username, req.AgencyID, s.clientIP(r))
 		}
 		// Say WHICH half failed in the journal (never to the client): a
 		// missing account and a wrong password are different problems.
 		if !exists {
-			log.Printf("Failed web login: no dashboard account for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
+			log.Printf("Failed web login: no dashboard account for %q [%q] from %s", req.Username, req.AgencyID, s.clientIP(r))
 		} else {
-			log.Printf("Failed web login: wrong password for %s [%s] from %s", req.Username, req.AgencyID, s.clientIP(r))
+			log.Printf("Failed web login: wrong password for %q [%q] from %s", req.Username, req.AgencyID, s.clientIP(r))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -460,7 +460,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			snap.PasswordHash = newHash
 			s.saveWebAdmins()
-			log.Printf("Upgraded password hash to bcrypt for user: %s", req.Username)
+			log.Printf("Upgraded password hash to bcrypt for user: %q", req.Username)
 		}
 	}
 
@@ -479,7 +479,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	log.Printf("Web login successful: %s (role: %s) from %s", req.Username, snap.Role, s.clientIP(r))
+	log.Printf("Web login successful: %q (role: %s) from %s", req.Username, snap.Role, s.clientIP(r))
 	s.activityLog.Add("admin_login", req.Username, fmt.Sprintf("Web dashboard login (role: %s)", snap.Role), snap.AgencyID)
 	w.Header().Set("Content-Type", "application/json")
 	mustChange := snap.MustChangePassword
@@ -873,7 +873,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// An open dashboard counts as activity (keeps the session from
 			// idling out), and a revoked/expired session closes the feed.
 			if cur := s.sessionFor(token); cur == nil || cur.Role != session.Role || cur.AgencyID != session.AgencyID {
-				log.Printf("WebSocket closed: session for %s ended", session.Username)
+				log.Printf("WebSocket closed: session for %q ended", session.Username)
 				return
 			}
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -1502,7 +1502,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		// dashboard sessions (they are keyed to the old account/password).
 		s.revokeWebSessionsLocked(oldKey, "")
 		if err := s.saveWebAdmins(); err != nil {
-			log.Printf("Edit user: failed to save web admins for %s: %v", oldKey, err)
+			log.Printf("Edit user: failed to save web admins for %q: %v", oldKey, err)
 		}
 	}
 
@@ -1513,7 +1513,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("User updated: %s -> %s (agency: %s -> %s)", username, newUsername, agencyID, newAgency)
+	log.Printf("User updated: %q -> %q (agency: %s -> %s)", username, newUsername, agencyID, newAgency)
 	s.activityLog.Add("user_updated", newUsername, fmt.Sprintf("Updated user (was: %s in %s)", username, agencyID), newAgency)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1653,7 +1653,7 @@ func (s *Server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.revokeWebSessions(userKey(agencyID, username), "")
-	log.Printf("Password updated for user: %s [%s]", username, agencyID)
+	log.Printf("Password updated for user: %q [%s]", username, agencyID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
@@ -1818,11 +1818,11 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	}
 	if pttSynced {
 		if err := s.saveUsersUnlocked(); err != nil {
-			log.Printf("Password change: failed to save users for %s: %v", username, err)
+			log.Printf("Password change: failed to save users for %q: %v", username, err)
 		}
 	}
 
-	log.Printf("Web admin password changed for: %s [%s]", username, session.AgencyID)
+	log.Printf("Web admin password changed for: %q [%s]", username, session.AgencyID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
 }
@@ -1937,7 +1937,7 @@ func (s *Server) handleCreateAgency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Created agency: %s (%s)", req.Name, req.ID)
+	log.Printf("Created agency: %q (%s)", req.Name, req.ID)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": req.ID})
 }
 
@@ -2118,7 +2118,7 @@ func (s *Server) handleCreateAgencyAdmin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	log.Printf("Created agency admin: %s for agency %s", req.Username, agencyID)
+	log.Printf("Created agency admin: %q for agency %s", req.Username, agencyID)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "username": req.Username})
 }
 
@@ -2249,7 +2249,7 @@ func (s *Server) handleCreateMutualAid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Created mutual aid link: %v on channel %d (%s) (by %s)", req.Agencies, channel, req.ChannelName, createdBy)
+	log.Printf("Created mutual aid link: %v on channel %d (%q) (by %q)", req.Agencies, channel, req.ChannelName, createdBy)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": linkID})
 }
 
@@ -2634,7 +2634,7 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 	s.dispatchConns[key] = dc
 	s.mu.Unlock()
 
-	log.Printf("Dispatch connected: %s [%s]", session.Username, session.AgencyID)
+	log.Printf("Dispatch connected: %q [%s]", session.Username, session.AgencyID)
 	s.activityLog.Add("dispatch_connect", session.Username, "Dispatch console connected", session.AgencyID)
 
 	defer func() {
@@ -2648,11 +2648,11 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 			delete(s.dispatchConns, key)
 			delete(s.clients, key)
 			s.mu.Unlock()
-			log.Printf("Dispatch disconnected: %s [%s]", session.Username, session.AgencyID)
+			log.Printf("Dispatch disconnected: %q [%s]", session.Username, session.AgencyID)
 			s.activityLog.Add("dispatch_disconnect", session.Username, "Dispatch console disconnected", session.AgencyID)
 		} else {
 			s.mu.Unlock()
-			log.Printf("Dispatch stale connection closed for %s [%s] (newer connection active)", session.Username, session.AgencyID)
+			log.Printf("Dispatch stale connection closed for %q [%s] (newer connection active)", session.Username, session.AgencyID)
 		}
 	}()
 
@@ -2676,7 +2676,7 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 		for {
 			msgType, data, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("Dispatch read pump closing for %s [%s]: %v", session.Username, session.AgencyID, err)
+				log.Printf("Dispatch read pump closing for %q [%s]: %v", session.Username, session.AgencyID, err)
 				conn.Close()
 				return
 			}
@@ -2726,7 +2726,7 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 						}
 					}
 					s.mu.Unlock()
-					log.Printf("Dispatch %s switched to channel %d [%s]", session.Username, msg.Channel, msg.Agency)
+					log.Printf("Dispatch %q switched to channel %d [%q]", session.Username, msg.Channel, msg.Agency)
 				case "ptt":
 					s.dispatchPTT(key, &dc.tx, msg.Down)
 				case "status":
@@ -2814,7 +2814,7 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 			// An open console keeps its session alive (a dispatcher on shift
 			// is never idled out); a revoked or expired session disconnects.
 			if cur := s.sessionFor(token); cur == nil || cur.Role != session.Role || cur.AgencyID != session.AgencyID {
-				log.Printf("Dispatch console closed: session for %s [%s] ended", session.Username, session.AgencyID)
+				log.Printf("Dispatch console closed: session for %q [%s] ended", session.Username, session.AgencyID)
 				return
 			}
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -3461,7 +3461,7 @@ func newCertReloader(certFile, keyFile string) (*certReloader, error) {
 	}
 	r.cert, r.certMod, r.keyMod, r.lastCheck = &cert, cm, km, time.Now()
 	if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
-		log.Printf("TLS certificate loaded: %s, expires %s", leaf.Subject.CommonName, leaf.NotAfter.Format(time.RFC3339))
+		log.Printf("TLS certificate loaded: %q, expires %s", leaf.Subject.CommonName, leaf.NotAfter.Format(time.RFC3339))
 	}
 	return r, nil
 }
@@ -3493,7 +3493,7 @@ func (r *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 			} else {
 				r.cert, r.certMod, r.keyMod = &cert, cm, km
 				if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
-					log.Printf("TLS certificate reloaded: %s, expires %s", leaf.Subject.CommonName, leaf.NotAfter.Format(time.RFC3339))
+					log.Printf("TLS certificate reloaded: %q, expires %s", leaf.Subject.CommonName, leaf.NotAfter.Format(time.RFC3339))
 				} else {
 					log.Printf("TLS certificate reloaded")
 				}

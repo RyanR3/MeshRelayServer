@@ -148,7 +148,7 @@ func (s *Server) dispatchPTT(key string, tx *dispatchTX, down bool) {
 	tx.mu.Unlock()
 
 	if !down && wasKeyed {
-		log.Printf("Dispatch %s [%s] unkeyed ch %d: %d frames in %.1fs", username, agency, channel, frames, since.Seconds())
+		log.Printf("Dispatch %q [%s] unkeyed ch %d: %d frames in %.1fs", username, agency, channel, frames, since.Seconds())
 	}
 
 	if channel == EmergencyChannel && !c.DispatchAllCall {

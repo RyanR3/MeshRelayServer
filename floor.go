@@ -298,7 +298,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 			fc.server.sendFloorToUserIn(key, old, buildFloorPreempted(req.Channel, req.User, effectivePriority))
 		}
 		fc.grant(key, req.Channel, req.User, effectivePriority)
-		log.Printf("Floor %s: %s (pri %d) PREEMPTED %s (pri %d)", key, req.User, effectivePriority, old, oldPri)
+		log.Printf("Floor %s: %q (pri %d) PREEMPTED %q (pri %d)", key, req.User, effectivePriority, old, oldPri)
 		return
 	}
 
@@ -322,7 +322,7 @@ func (fc *FloorController) Request(key string, req *FloorRequest, effectivePrior
 		c.recording[req.User] = d
 		pos := fc.deferredPos(c, d)
 		fc.server.sendFloorToUserIn(key, req.User, buildFloorGranted(req.Channel, req.User, 0, uint8(pos)))
-		log.Printf("Floor %s: %s queued for replay (#%d) behind %s", key, req.User, pos, c.holder.user)
+		log.Printf("Floor %s: %q queued for replay (#%d) behind %q", key, req.User, pos, c.holder.user)
 		return
 	}
 
@@ -469,7 +469,7 @@ func (fc *FloorController) releaseAndAdvance(key string, channel int, c *floorCh
 			grantedAt: time.Now(), playback: true, cancel: make(chan struct{})}
 		c.holder = h
 		fc.server.broadcastFloorToChannel(key, buildFloorTaken(channel, d.user, d.priority))
-		log.Printf("Floor %s: replaying queued transmission from %s (%d frames%s)",
+		log.Printf("Floor %s: replaying queued transmission from %q (%d frames%s)",
 			key, d.user, len(d.frames), map[bool]string{true: "", false: ", still recording"}[d.complete])
 		go fc.replay(key, channel, c, h, d)
 		return
@@ -585,7 +585,7 @@ func (fc *FloorController) Emergency(key string, channel int, user string, activ
 		}
 		fc.grant(key, channel, user, PriorityEmergency)
 		fc.server.broadcastFloorToChannel(key, fc.server.emergencyAlertPacket(key, channel, user, true))
-		log.Printf("Floor %s: EMERGENCY activated by %s", key, user)
+		log.Printf("Floor %s: EMERGENCY activated by %q", key, user)
 	} else {
 		// Only the originator or a supervisor can cancel.
 		if c.emergBy != user && !isSupervisor {
@@ -594,7 +594,7 @@ func (fc *FloorController) Emergency(key string, channel int, user string, activ
 		c.emergency = false
 		c.emergBy = ""
 		fc.server.broadcastFloorToChannel(key, buildEmergencyAlert(channel, user, false))
-		log.Printf("Floor %s: emergency cancelled by %s", key, user)
+		log.Printf("Floor %s: emergency cancelled by %q", key, user)
 	}
 }
 
@@ -619,7 +619,7 @@ func (fc *FloorController) Tick() {
 		if c.holder != nil && !c.holder.playback && now.Sub(c.holder.lastAudio) > floorDeadManTimeout {
 			// Dead-man: holder stopped sending audio.
 			ch := channelNumFromKey(key)
-			log.Printf("Floor %s: dead-man timeout, releasing %s", key, c.holder.user)
+			log.Printf("Floor %s: dead-man timeout, releasing %q", key, c.holder.user)
 			fc.releaseAndAdvance(key, ch, c)
 		}
 		if c.emergency && now.Sub(c.emergAt) > emergencyAutoExpire {

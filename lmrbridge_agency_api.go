@@ -286,7 +286,7 @@ func (s *Server) handleShareMyLMRBridge(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
 	}
-	log.Printf("LMR: bridge %s shared with agency %s by %s", id, req.AgencyID, mine)
+	log.Printf("LMR: bridge %s shared with agency %q by %s", id, req.AgencyID, mine)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
@@ -356,7 +356,7 @@ func (s *Server) handleUnshareMyLMRBridge(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
 	}
-	log.Printf("LMR: bridge %s access removed for agency %s (by %s)", id, target, mine)
+	log.Printf("LMR: bridge %s access removed for agency %q (by %s)", id, target, mine)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
@@ -433,7 +433,7 @@ func (s *Server) handleDeleteMyLMRBridge(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
 	}
-	log.Printf("LMR: agency %s deleted bridge %s (ch %d, user %s)", mine, id, channel, username)
+	log.Printf("LMR: agency %s deleted bridge %s (ch %d, user %q)", mine, id, channel, username)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

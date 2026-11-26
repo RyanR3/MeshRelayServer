@@ -290,7 +290,7 @@ func (s *Server) handleAddMapLayer(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return
 	}
-	log.Printf("Map layer added: %q (%s) for %s by %s", l.Name, l.Kind, nonEmpty(agencyID, "every agency"), l.CreatedBy)
+	log.Printf("Map layer added: %q (%s) for %s by %q", l.Name, l.Kind, nonEmpty(agencyID, "every agency"), l.CreatedBy)
 	json.NewEncoder(w).Encode(l)
 }
 

@@ -963,7 +963,7 @@ func (s *Server) StartPTT() error {
 	log.Printf("Recording radio traffic to %s/ (kept %d days)", s.recorder.dir, s.recorder.retention)
 	s.transcriber = NewTranscriber(s, s.config.TranscribeDir)
 	if ok, m := s.transcriber.ready(); ok {
-		log.Printf("Transcription available (model %s)", m.Name)
+		log.Printf("Transcription available (model %q)", m.Name)
 	}
 	s.loadTakConnections()
 	s.startLMRMarkers()
@@ -1098,7 +1098,7 @@ func (s *Server) handleMonitorChannels(pkt *MonitorChannelsPacket, addr *net.UDP
 		if c.Addr.String() == addr.String() {
 			c.MonitoredChannels = pkt.Channels
 			s.mu.Unlock()
-			log.Printf("Client %s [%s] monitoring channels %v", c.Username, c.AgencyID, pkt.Channels)
+			log.Printf("Client %q [%s] monitoring channels %v", c.Username, c.AgencyID, pkt.Channels)
 			return
 		}
 	}
@@ -1133,7 +1133,7 @@ func (s *Server) handleAudioPacket(packet *AudioPacket, addr *net.UDPAddr) {
 	s.mu.Unlock()
 
 	if client == nil {
-		log.Printf("Audio from unknown client: %s (%s)", packet.Username, addr)
+		log.Printf("Audio from unknown client: %q (%s)", packet.Username, addr)
 		return
 	}
 	client = &snap
@@ -1349,7 +1349,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 
 	// Mutual aid partners (looked up above) — also relay to partner agencies' same channel
 	if len(partners) > 0 {
-		log.Printf("Audio mutual aid: %s [%s] ch %d has partners %v", packet.Username, client.AgencyID, client.Channel, partners)
+		log.Printf("Audio mutual aid: %q [%s] ch %d has partners %v", packet.Username, client.AgencyID, client.Channel, partners)
 	}
 	for _, partnerAgency := range partners {
 		partnerKey := channelKey(partnerAgency, client.Channel)
@@ -1398,7 +1398,7 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 		}
 	}
 
-	log.Printf("Relayed audio from %s [%s] to %d clients in channel %d (%d bytes)",
+	log.Printf("Relayed audio from %q [%s] to %d clients in channel %d (%d bytes)",
 		packet.Username, client.AgencyID, relayCount, client.Channel, len(packet.AudioData))
 
 	// Forward to a Zello bridge on this channel (Opus passthrough).
@@ -1443,12 +1443,12 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 	s.mu.Unlock()
 
 	if sender == nil {
-		log.Printf("Direct audio from unknown sender: %s (%s)", packet.Sender, addr)
+		log.Printf("Direct audio from unknown sender: %q (%s)", packet.Sender, addr)
 		return
 	}
 
 	if recipient == nil {
-		log.Printf("Direct audio to unknown recipient: %s from %s [%s] (offline, or another agency without mutual aid)", packet.Recipient, packet.Sender, senderAgency)
+		log.Printf("Direct audio to unknown recipient: %q from %q [%s] (offline, or another agency without mutual aid)", packet.Recipient, packet.Sender, senderAgency)
 		return
 	}
 
@@ -1462,7 +1462,7 @@ func (s *Server) handleDirectAudioPacket(packet *DirectAudioPacket, addr *net.UD
 	// Send only to the specific recipient
 	s.sendPacket(audioData, recipientAddr)
 
-	log.Printf("Relayed direct audio from %s [%s] to %s [%s] (%d bytes)",
+	log.Printf("Relayed direct audio from %q [%s] to %q [%s] (%d bytes)",
 		packet.Sender, senderAgency, packet.Recipient, recipientAgency, len(packet.AudioData))
 }
 
@@ -1483,7 +1483,7 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 	client := s.senderClient(packet.Sender, addr)
 	if client == nil {
 		s.mu.Unlock()
-		log.Printf("Text message from unknown client: %s (%s)", packet.Sender, addr)
+		log.Printf("Text message from unknown client: %q (%s)", packet.Sender, addr)
 		return
 	}
 	client.LastHeartbeat = time.Now()
@@ -1500,9 +1500,9 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 		s.mu.Unlock()
 		if raddr != nil {
 			s.sendPacket(textData, raddr)
-			log.Printf("Relayed private text message from %s [%s] to %s", packet.Sender, agencyID, packet.Recipient)
+			log.Printf("Relayed private text message from %q [%s] to %q", packet.Sender, agencyID, packet.Recipient)
 		} else {
-			log.Printf("Private text from %s to %s not delivered (recipient offline or other agency)", packet.Sender, packet.Recipient)
+			log.Printf("Private text from %q to %q not delivered (recipient offline or other agency)", packet.Sender, packet.Recipient)
 		}
 		return
 	}
@@ -1535,7 +1535,7 @@ func (s *Server) handleTextPacket(packet *TextMessagePacket, addr *net.UDPAddr) 
 		s.sendPacket(textData, a)
 	}
 
-	log.Printf("Relayed text message from %s [%s] to %d clients in channel %d",
+	log.Printf("Relayed text message from %q [%s] to %d clients in channel %d",
 		packet.Sender, agencyID, len(addrs)-1, chNum)
 }
 
@@ -1562,7 +1562,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		if blocked {
 			// The callsign is online under another login account (or is a
 			// dispatch console): not this address's to refresh or re-home.
-			log.Printf("Heartbeat for %s from %s dropped: callsign belongs to another session", packet.Username, addr)
+			log.Printf("Heartbeat for %q from %s dropped: callsign belongs to another session", packet.Username, addr)
 			return
 		}
 		// Client not registered (record expired, or the server restarted while
@@ -1572,7 +1572,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 		// on its channel while the server relayed its audio to channel 0, and
 		// nothing on either side flagged it.
 		ch := s.lastChannelFor(packet.Username, addr)
-		log.Printf("Heartbeat from unregistered client %s — auto-registering on channel %d", packet.Username, ch)
+		log.Printf("Heartbeat from unregistered client %q — auto-registering on channel %d", packet.Username, ch)
 		s.handleJoin(&JoinPacket{Username: packet.Username, Channel: ch}, addr)
 		if lowPower {
 			s.mu.Lock()
@@ -1655,7 +1655,7 @@ func (s *Server) handleHeartbeat(packet *HeartbeatPacket, addr *net.UDPAddr) {
 	}
 
 	if len(relayTo) > 0 {
-		log.Printf("Relayed heartbeat from %s [%s] to %d clients in channel %d",
+		log.Printf("Relayed heartbeat from %q [%s] to %d clients in channel %d",
 			packet.Username, agencyID, len(relayTo), chNum)
 	}
 }
@@ -1684,7 +1684,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 	agencyID := s.authenticatedAddrs[addr.String()]
 	if agencyID == "" {
 		s.mu.Unlock()
-		log.Printf("JOIN rejected: %s from %s (session ended)", packet.Username, addr)
+		log.Printf("JOIN rejected: %q from %s (session ended)", packet.Username, addr)
 		return
 	}
 
@@ -1700,7 +1700,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		if !s.bridgeGuestGate.note("join#"+addr.String(), time.Now()) {
 			return // already said so a moment ago
 		}
-		log.Printf("JOIN refused: %q [%s] from %s — that callsign is the name of another account (signed in as %s)",
+		log.Printf("JOIN refused: %q [%s] from %s — that callsign is the name of another account (signed in as %q)",
 			packet.Username, agencyID, addr, account)
 		s.activityLog.Add("join_refused", packet.Username,
 			"Callsign belongs to another account; signed in as "+strings.TrimPrefix(account, agencyID+":"), agencyID)
@@ -1720,7 +1720,7 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		// SAME account re-joining from a new address (network switch, stale
 		// old session) passes mayActAs and moves the record as before.
 		s.mu.Unlock()
-		log.Printf("JOIN refused: %s [%s] from %s — callsign is online under another account (%s at %v)",
+		log.Printf("JOIN refused: %q [%s] from %s — callsign is online under another account (%q at %v)",
 			packet.Username, agencyID, addr, client.Account, client.Addr)
 		return
 	}
@@ -1782,27 +1782,27 @@ func (s *Server) handleJoin(packet *JoinPacket, addr *net.UDPAddr) {
 		channel.mu.Lock()
 		channel.Clients[ck] = client
 		channel.mu.Unlock()
-		log.Printf("Client %s [%s] joined channel %d from %s", packet.Username, agencyID, packet.Channel, addr)
+		log.Printf("Client %q [%s] joined channel %d from %s", packet.Username, agencyID, packet.Channel, addr)
 	} else {
-		log.Printf("JOIN warning: channel %s not found for client %s [%s]", key, packet.Username, agencyID)
+		log.Printf("JOIN warning: channel %s not found for client %q [%s]", key, packet.Username, agencyID)
 	}
 
 	// The agency's channel count and names (phones lock and show these).
 	if a := s.agencies[agencyID]; a != nil {
 		toSend = append(toSend, pendingPacket{buildChannelNames(a), addr,
-			fmt.Sprintf("Sent channel names (%d) to %s [%s]", a.talkgroupCount(), packet.Username, agencyID)})
+			fmt.Sprintf("Sent channel names (%d) to %q [%s]", a.talkgroupCount(), packet.Username, agencyID)})
 	}
 
 	// The EMERGENCY channel (always heard, listen-only).
 	if a := s.agencies[agencyID]; a != nil && s.lmrBridgeByUsername(agencyID, packet.Username) == nil {
 		toSend = append(toSend, pendingPacket{buildEmergencyChannel(a), addr,
-			fmt.Sprintf("Sent emergency channel to %s [%s]", packet.Username, agencyID)})
+			fmt.Sprintf("Sent emergency channel to %q [%s]", packet.Username, agencyID)})
 	}
 
 	// Channels to announce to the joining client (mutual aid, Zello, LMR).
 	for _, a := range s.joinAnnouncements(agencyID, packet.Username, packet.Channel) {
 		pkt := SerializeChannelSwitch(&ChannelSwitchPacket{Channel: a.channel, ChannelName: a.name, Active: true})
-		toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent %s channel %d (%s) to newly joined %s [%s]", a.kind, a.channel, a.name, packet.Username, agencyID)})
+		toSend = append(toSend, pendingPacket{pkt, addr, fmt.Sprintf("Sent %s channel %d (%q) to newly joined %q [%s]", a.kind, a.channel, a.name, packet.Username, agencyID)})
 	}
 
 	s.mu.Unlock()
@@ -1857,7 +1857,7 @@ func (s *Server) handleLeave(addr *net.UDPAddr) {
 	leftAgency := ""
 	if clientToRemove != nil {
 		leftAgency = clientToRemove.AgencyID
-		log.Printf("LEAVE: removing client %s [%s] from channel %d (addr: %s)", clientToRemove.Username, clientToRemove.AgencyID, clientToRemove.Channel, addr)
+		log.Printf("LEAVE: removing client %q [%s] from channel %d (addr: %s)", clientToRemove.Username, clientToRemove.AgencyID, clientToRemove.Channel, addr)
 		s.removeClient(clientToRemove)
 	}
 	s.mu.Unlock()
@@ -1891,7 +1891,7 @@ func (s *Server) removeClient(client *Client) {
 
 	// Remove from clients map
 	delete(s.clients, ck)
-	log.Printf("Client %s [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
+	log.Printf("Client %q [%s] left channel %d", client.Username, client.AgencyID, client.Channel)
 	s.activityLog.Add("client_disconnect", client.Username, fmt.Sprintf("Left channel %d", client.Channel), client.AgencyID)
 }
 
@@ -2180,7 +2180,7 @@ func (s *Server) checkHeartbeats() {
 	}
 
 	for _, client := range toRemove {
-		log.Printf("Client %s timed out (no heartbeat for %v)", client.Username, now.Sub(client.LastHeartbeat).Round(time.Second))
+		log.Printf("Client %q timed out (no heartbeat for %v)", client.Username, now.Sub(client.LastHeartbeat).Round(time.Second))
 		s.removeClient(client)
 	}
 	s.mu.Unlock()
@@ -2378,7 +2378,7 @@ func (s *Server) relayGroupPacket(packetType byte, packet *GroupPacket, addr *ne
 	for _, a := range addrs {
 		s.sendPacket(relayData, a)
 	}
-	log.Printf("Relayed group packet 0x%02X %q (creator %s) to %d clients [%s]", packetType, packet.GroupName, packet.Creator, len(addrs), creatorAgency)
+	log.Printf("Relayed group packet 0x%02X %q (creator %q) to %d clients [%s]", packetType, packet.GroupName, packet.Creator, len(addrs), creatorAgency)
 }
 
 func (s *Server) GetGroups() []map[string]interface{} {
@@ -2688,7 +2688,7 @@ func (s *Server) handleAuthRequest(packet *AuthRequestPacket, addr *net.UDPAddr)
 	}
 
 	if !authOk {
-		log.Printf("Auth failed: wrong password for user %s from %s", packet.Username, addr)
+		log.Printf("Auth failed: wrong password for user %q from %s", packet.Username, addr)
 		authFailed()
 		return
 	}
@@ -2730,7 +2730,7 @@ func (s *Server) completeSignInLocked(user *UserAccount, usedEnrollToken, device
 	case usedEnrollToken != "" && s.enrollmentTokens[usedEnrollToken].IsGuest:
 		// Guest event QR: shared by everyone at the event, ends with it.
 		cred = credGuest
-		log.Printf("Auth (guest token, %s) success: user %s from %s — guest event login", how, user.Username, addr)
+		log.Printf("Auth (guest token, %s) success: user %q from %s — guest event login", how, user.Username, addr)
 	case usedEnrollToken != "":
 		// One-time QR: this phone gets its own key and the token is spent.
 		et := s.enrollmentTokens[usedEnrollToken]
@@ -2741,7 +2741,7 @@ func (s *Server) completeSignInLocked(user *UserAccount, usedEnrollToken, device
 		}
 		c, suffix, err := s.issueDeviceKeyLocked(user, et, nonce, flags, addr, legacy == nil)
 		if err != nil {
-			log.Printf("Auth (enrollment token) for %s from %s: could not issue a device key: %v", user.Username, addr, err)
+			log.Printf("Auth (enrollment token) for %q from %s: could not issue a device key: %v", user.Username, addr, err)
 			return "", err
 		}
 		cred, devSuffix = c, suffix
@@ -2750,7 +2750,7 @@ func (s *Server) completeSignInLocked(user *UserAccount, usedEnrollToken, device
 		if suffix == "" {
 			kind = "older app: token kept as this phone's key (update the app for one-time QR codes)"
 		}
-		log.Printf("Auth (enrollment token, %s) success: user %s [%s] from %s — QR used, %s", how, user.Username, user.AgencyID, addr, kind)
+		log.Printf("Auth (enrollment token, %s) success: user %q [%s] from %s — QR used, %s", how, user.Username, user.AgencyID, addr, kind)
 		s.activityLog.Add("qr_enrolled", user.Username, fmt.Sprintf("QR code used from %s (%s)", addr.IP, kind), user.AgencyID)
 	case deviceID != "":
 		cred = deviceCred(deviceID)
@@ -2759,9 +2759,9 @@ func (s *Server) completeSignInLocked(user *UserAccount, usedEnrollToken, device
 				d.LastUsed = now.Format(time.RFC3339)
 			}
 		}
-		log.Printf("Auth (device key, %s) success: user %s from %s", how, user.Username, addr)
+		log.Printf("Auth (device key, %s) success: user %q from %s", how, user.Username, addr)
 	default:
-		log.Printf("Auth (%s) success: user %s from %s", how, user.Username, addr)
+		log.Printf("Auth (%s) success: user %q from %s", how, user.Username, addr)
 	}
 
 	// A phone that moved addresses re-JOINs and the JOIN clears its old
@@ -2871,7 +2871,7 @@ func (s *Server) GenerateEnrollmentToken(username, agencyID, passwordHash string
 		PasswordHash: passwordHash,
 		ExpiresAt:    now.Add(enrollTokenLife),
 	}
-	log.Printf("Enrollment QR created for user %s (agency: %s): one use, expires in 15 minutes", username, agencyID)
+	log.Printf("Enrollment QR created for user %q (agency: %s): one use, expires in 15 minutes", username, agencyID)
 	return token
 }
 
@@ -2883,7 +2883,7 @@ func (s *Server) cleanupExpiredTokens() {
 	for token, et := range s.enrollmentTokens {
 		if now.After(et.ExpiresAt) && !et.IsGuest {
 			delete(s.enrollmentTokens, token)
-			log.Printf("Enrollment token expired for user %s", et.Username)
+			log.Printf("Enrollment token expired for user %q", et.Username)
 		}
 	}
 
@@ -3038,7 +3038,7 @@ func (s *Server) updatePasswordLocked(agencyID, username, password string) ([]ex
 		}
 	}
 
-	log.Printf("Updated password for %s [%s] (ptt=%v dashboard=%v)",
+	log.Printf("Updated password for %q [%s] (ptt=%v dashboard=%v)",
 		username, agencyID, userExists, adminExists)
 	return kicks, nil
 }
@@ -3120,7 +3120,7 @@ func (s *Server) UpdateUserRole(agencyID, username, newRole string, dashboardPas
 		return err
 	}
 
-	log.Printf("Updated role for user %s [%s]: %s -> %s", username, agencyID, oldRole, newRole)
+	log.Printf("Updated role for user %q [%s]: %s -> %s", username, agencyID, oldRole, newRole)
 	return nil
 }
 
@@ -3129,7 +3129,7 @@ func (s *Server) RemoveUser(agencyID, username string) error {
 	kicks, err := s.removeUserLocked(agencyID, username)
 	s.mu.Unlock()
 	if len(kicks) > 0 {
-		log.Printf("Removed user %s [%s]: ended %d live session(s)", username, agencyID, len(kicks))
+		log.Printf("Removed user %q [%s]: ended %d live session(s)", username, agencyID, len(kicks))
 		s.finishSessionKicks(kicks, "Your account was removed")
 	}
 	return err
@@ -3149,7 +3149,7 @@ func (s *Server) removeUserLocked(agencyID, username string) ([]expiredGuestKick
 			if err := s.saveWebAdmins(); err != nil {
 				return nil, fmt.Errorf("failed to remove dispatch user: %w", err)
 			}
-			log.Printf("Removed dispatch user: %s [%s]", username, agencyID)
+			log.Printf("Removed dispatch user: %q [%s]", username, agencyID)
 			s.activityLog.Add("dispatch_user_deleted", username, fmt.Sprintf("Removed from agency %s", agencyID), agencyID)
 			return nil, nil
 		}
@@ -3160,7 +3160,7 @@ func (s *Server) removeUserLocked(agencyID, username string) ([]expiredGuestKick
 	if user.Role == "admin" || user.Role == "super_admin" {
 		delete(s.webAdmins, key)
 		if err := s.saveWebAdmins(); err != nil {
-			log.Printf("Warning: failed to remove web admin for %s: %v", username, err)
+			log.Printf("Warning: failed to remove web admin for %q: %v", username, err)
 		}
 	}
 
@@ -3172,7 +3172,7 @@ func (s *Server) removeUserLocked(agencyID, username string) ([]expiredGuestKick
 		return kicks, err
 	}
 
-	log.Printf("Removed user account: %s [%s]", username, agencyID)
+	log.Printf("Removed user account: %q [%s]", username, agencyID)
 	s.activityLog.Add("user_deleted", username, fmt.Sprintf("Removed from agency %s", agencyID), agencyID)
 	return kicks, nil
 }
@@ -3525,7 +3525,7 @@ func (s *Server) AddUser(username, name, password, agencyID, role string) (strin
 			MustChangePassword: false,
 		}
 		if err := s.saveWebAdmins(); err != nil {
-			log.Printf("Warning: failed to save web admin for %s: %v", username, err)
+			log.Printf("Warning: failed to save web admin for %q: %v", username, err)
 		}
 	} else if role == "super_admin" {
 		s.webAdmins[key] = &WebAdmin{
@@ -3535,7 +3535,7 @@ func (s *Server) AddUser(username, name, password, agencyID, role string) (strin
 			MustChangePassword: false,
 		}
 		if err := s.saveWebAdmins(); err != nil {
-			log.Printf("Warning: failed to save web admin for %s: %v", username, err)
+			log.Printf("Warning: failed to save web admin for %q: %v", username, err)
 		}
 	}
 
@@ -3547,7 +3547,7 @@ func (s *Server) AddUser(username, name, password, agencyID, role string) (strin
 	// Generate enrollment token for QR code (expires in 15 minutes)
 	enrollToken := s.GenerateEnrollmentToken(username, agencyID, pwHash)
 
-	log.Printf("Created user account: %s (agency: %s, role: %s)", username, agencyID, role)
+	log.Printf("Created user account: %q (agency: %s, role: %s)", username, agencyID, role)
 	s.activityLog.Add("user_created", username, fmt.Sprintf("Created in agency %s with role %s", agencyID, role), agencyID)
 	return enrollToken, nil
 }
@@ -3587,7 +3587,7 @@ func (s *Server) AddDispatchUser(username, name, password, agencyID string) erro
 		return err
 	}
 
-	log.Printf("Created dispatch user: %s (agency: %s)", username, agencyID)
+	log.Printf("Created dispatch user: %q (agency: %s)", username, agencyID)
 	s.activityLog.Add("dispatch_user_created", username, fmt.Sprintf("Dispatch user created in agency %s", agencyID), agencyID)
 	return nil
 }
@@ -3743,14 +3743,14 @@ func (s *Server) notifyMutualAidChannel(agencies []string, channel int, channelN
 
 	for _, t := range targets {
 		s.sendPacket(pkt, t.addr)
-		log.Printf("Mutual aid notify: sent to %s [%s]", t.username, t.agencyID)
+		log.Printf("Mutual aid notify: sent to %q [%s]", t.username, t.agencyID)
 	}
 
 	action := "added"
 	if !active {
 		action = "removed"
 	}
-	log.Printf("Mutual aid channel %s: notified %d clients in %v about channel %d (%s)", action, len(targets), agencies, channel, channelName)
+	log.Printf("Mutual aid channel %s: notified %d clients in %v about channel %d (%q)", action, len(targets), agencies, channel, channelName)
 }
 
 // pickMutualAidChannel picks the highest free channel in the shared 10-19 block,
@@ -3796,7 +3796,7 @@ func (s *Server) loadGuestEvents() {
 	for _, ev := range events {
 		// Skip already-expired events on load
 		if ev.ExpiresAt != nil && now.After(*ev.ExpiresAt) {
-			log.Printf("Guest event %s (%s) expired, skipping on load", ev.ID, ev.Name)
+			log.Printf("Guest event %s (%q) expired, skipping on load", ev.ID, ev.Name)
 			continue
 		}
 		s.guestEvents[ev.ID] = ev
@@ -3974,7 +3974,7 @@ func (s *Server) CreateGuestEvent(name, ownerAgencyID string, channel int, expir
 		log.Printf("Warning: failed to save guest events: %v", err)
 	}
 
-	log.Printf("Created guest event: %s (%s) agency=%s channel=%d by %s", eventID, name, eventAgencyID, channel, createdBy)
+	log.Printf("Created guest event: %s (%q) agency=%s channel=%d by %q", eventID, name, eventAgencyID, channel, createdBy)
 	s.activityLog.Add("guest_event_created", createdBy, fmt.Sprintf("Guest event '%s' created (user: %s, agency: %s)", name, username, eventAgencyID), eventAgencyID)
 	return ev, nil
 }
@@ -4070,7 +4070,7 @@ func (s *Server) DeleteGuestEvent(eventID string) error {
 		log.Printf("Warning: failed to save guest events: %v", err)
 	}
 
-	log.Printf("Deleted guest event: %s (%s), removed agency %s, kicked %d clients", eventID, ev.Name, ev.AgencyID, len(kicks))
+	log.Printf("Deleted guest event: %s (%q), removed agency %s, kicked %d clients", eventID, ev.Name, ev.AgencyID, len(kicks))
 	s.activityLog.Add("guest_event_deleted", "", fmt.Sprintf("Guest event '%s' deleted (agency %s removed), kicked %d clients", ev.Name, ev.AgencyID, len(kicks)), ev.AgencyID)
 	return nil
 }
@@ -4229,7 +4229,7 @@ func (s *Server) autoFloorForGateway(client *Client, fkey string) bool {
 	s.floor.Request(fkey, &FloorRequest{Channel: client.Channel, User: client.Username, Priority: pri}, pri)
 	granted := s.floor.HasFloor(fkey, client.Username)
 	if granted {
-		log.Printf("Floor %s: auto-granted to gateway %s (radio audio)", fkey, client.Username)
+		log.Printf("Floor %s: auto-granted to gateway %q (radio audio)", fkey, client.Username)
 	}
 	return granted
 }

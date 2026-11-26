@@ -306,13 +306,13 @@ func (s *Server) handleCreateMutualAidRequest(w http.ResponseWriter, r *http.Req
 
 	if link != nil {
 		s.finishMutualAidLink(link)
-		log.Printf("Mutual aid: %s -> %s auto-accepted, channel %d (%s)",
+		log.Printf("Mutual aid: %s -> %q auto-accepted, channel %d (%q)",
 			mine, req.ToAgency, link.Channel, channelName)
 		if err := s.saveMutualAid(); err != nil {
 			log.Printf("Mutual aid: failed to save links: %v", err)
 		}
 	} else {
-		log.Printf("Mutual aid: %s requested a patch with %s (%s), pending approval",
+		log.Printf("Mutual aid: %s requested a patch with %q (%q), pending approval",
 			mine, req.ToAgency, channelName)
 	}
 
@@ -380,7 +380,7 @@ func (s *Server) handleApproveMutualAidRequest(w http.ResponseWriter, r *http.Re
 	s.mu.Unlock()
 
 	s.finishMutualAidLink(link)
-	log.Printf("Mutual aid: %s approved %s's request, channel %d (%s)",
+	log.Printf("Mutual aid: %q approved %s's request, channel %d (%q)",
 		mar.ToAgency, mar.FromAgency, link.Channel, link.ChannelName)
 
 	if err := s.saveMutualAid(); err != nil {
@@ -429,7 +429,7 @@ func (s *Server) handleDeclineMutualAidRequest(w http.ResponseWriter, r *http.Re
 	from, to := mar.FromAgency, mar.ToAgency
 	s.mu.Unlock()
 
-	log.Printf("Mutual aid: request %s -> %s declined by %s", from, to, by)
+	log.Printf("Mutual aid: request %s -> %s declined by %q", from, to, by)
 	if err := s.saveMutualAidRequests(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to save: "+err.Error())
 		return

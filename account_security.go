@@ -336,7 +336,7 @@ func (s *Server) SignOutDevices(agencyID, username string) (int, error) {
 	err := s.saveUsers()
 	s.mu.Unlock()
 	s.finishSessionKicks(kicks, "Signed out by an administrator")
-	log.Printf("Signed out phones for %s [%s]: %d device key(s) removed, %d session(s) ended", username, agencyID, n, len(kicks))
+	log.Printf("Signed out phones for %q [%s]: %d device key(s) removed, %d session(s) ended", username, agencyID, n, len(kicks))
 	s.activityLog.Add("devices_signed_out", username, fmt.Sprintf("%d phone key(s) removed, %d session(s) ended", n, len(kicks)), agencyID)
 	return n, err
 }

@@ -50,7 +50,7 @@ func applyEnvOverrides(c *Config) {
 		if v, ok := os.LookupEnv(name); ok && strings.TrimSpace(v) != "" {
 			n, err := strconv.Atoi(strings.TrimSpace(v))
 			if err != nil || n <= 0 || n > 65535 {
-				log.Printf("Ignoring %s=%q: not a port number", name, v)
+				log.Printf("Ignoring %q=%q: not a port number", name, v)
 				return
 			}
 			*dst = n
@@ -122,7 +122,7 @@ func (c *Config) trustedProxyNets() []*net.IPNet {
 				log.Printf("Trusted proxy \"gateway\": no default gateway found")
 				continue
 			}
-			log.Printf("Trusted proxy: container gateway %s", gw)
+			log.Printf("Trusted proxy: container gateway %q", gw)
 			e = gw.String()
 		}
 		if !strings.Contains(e, "/") {

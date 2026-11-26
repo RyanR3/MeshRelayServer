@@ -172,7 +172,7 @@ func (s *Server) setUnitStatus(agency, user string, code uint8, note, by string)
 	o.mu.Lock()
 	o.status[userKey(agency, user)] = &unitStatus{Code: code, Note: note, At: time.Now(), SetBy: by}
 	o.mu.Unlock()
-	log.Printf("Unit status: %s [%s] -> %q (by %s)", user, agency, unitStatusNames[code], nonEmpty(by, "unit"))
+	log.Printf("Unit status: %q [%s] -> %q (by %q)", user, agency, unitStatusNames[code], nonEmpty(by, "unit"))
 	s.sendToConsoles(agency, map[string]interface{}{
 		"type": "status", "agency": agency, "user": user, "code": code,
 		"name": unitStatusNames[code], "note": note, "by": by, "at": time.Now().Format(time.RFC3339),
@@ -388,7 +388,7 @@ func (s *Server) recordMessage(m dispatchMsg) {
 	}
 	o.history[m.Agency] = h
 	o.mu.Unlock()
-	log.Printf("Dispatch message %s [%s] %s -> %s (%d chars)", m.Dir, m.Agency, m.From, m.To, len(m.Text))
+	log.Printf("Dispatch message %s [%s] %q -> %q (%d chars)", m.Dir, m.Agency, m.From, m.To, len(m.Text))
 	msg := map[string]interface{}{"type": "message"}
 	b, _ := json.Marshal(m)
 	var fields map[string]interface{}
@@ -433,7 +433,7 @@ func (s *Server) deliverPending(agency, user string, addr *net.UDPAddr) {
 		}
 	}
 	if len(q) > 0 {
-		log.Printf("Delivered %d waiting dispatch message(s) to %s [%s]", len(q), user, agency)
+		log.Printf("Delivered %d waiting dispatch message(s) to %q [%s]", len(q), user, agency)
 	}
 }
 
