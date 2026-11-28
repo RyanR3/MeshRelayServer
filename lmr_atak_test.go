@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -550,4 +551,74 @@ func TestLMRMarkerOverTakConnection(t *testing.T) {
 		_, del := countMarker(f.got(), "e2e")
 		return del == 1
 	})
+}
+
+// A TAK server delivers direct GeoChat only to the first UID a connection
+// announces, so the connection's own presence must be the first event on a
+// new stream even when LMR markers are waiting to go out, including a marker
+// pass that lands while the connection is coming up. Each reconnect is a new
+// stream and is checked again.
+func TestTakPresenceIsFirstEventWithMarkersPending(t *testing.T) {
+	s := newLMRTestServer()
+	s.agencies = map[string]*Agency{"ag": {ID: "ag", Name: "Agency"}}
+	f := startFakeTAK(t)
+	enrollPort, _ := strconv.Atoi(strings.Split(f.enroll.Listener.Addr().String(), ":")[1])
+	cfg := TakConfig{AgencyID: "ag", Host: "127.0.0.1", StreamPort: f.stream.Addr().(*net.TCPAddr).Port,
+		EnrollPort: enrollPort, Username: "dispatch", Callsign: "MeshRelay Dispatch", UID: "MeshRelay-Dispatch-ag-first", Enabled: true}
+	if err := takEnroll(&cfg, "secret"); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	for _, id := range []string{"m1", "m2"} {
+		s.lmrBridges[id] = &LMRBridge{ID: id, Agencies: []string{"ag"}, Channel: 101, ChannelName: "Ch " + id,
+			Enabled: true, ShowInATAK: true, Lat: f64(41.6), Lon: f64(-74.7)}
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go s.lmrMarkers().run(stop)
+	// Keep asking for marker passes the whole time, so one is always ready
+	// to run the moment the link counts as up.
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.lmrMarkersChanged()
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+
+	firstUID := func(stream string) string {
+		evs := strings.SplitN(stream, "<event ", 2)
+		if len(evs) < 2 {
+			return ""
+		}
+		m := regexp.MustCompile(`uid="([^"]*)"`).FindStringSubmatch(evs[1])
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+
+	s.startTak(cfg)
+	defer s.stopTak("ag")
+	for round := 0; round < 3; round++ {
+		select {
+		case <-f.connCh:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("round %d: connector never connected", round)
+		}
+		waitFor(t, "markers on the stream", func() bool {
+			a, _ := countMarker(f.gotOn(round), "m1")
+			b, _ := countMarker(f.gotOn(round), "m2")
+			return a >= 1 && b >= 1
+		})
+		if got := firstUID(f.gotOn(round)); got != cfg.UID {
+			t.Fatalf("round %d: first event on the stream is %q, want the dispatch presence %q", round, got, cfg.UID)
+		}
+		f.mu.Lock()
+		f.conn.Close() // the connector reconnects on a new stream
+		f.mu.Unlock()
+	}
 }

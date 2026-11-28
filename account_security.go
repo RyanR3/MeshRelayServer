@@ -72,6 +72,9 @@ type DeviceKey struct {
 type authSession struct {
 	at   time.Time
 	cred string // credPassword, credGuest, or "dev:<id>"
+	// client: the client name the secure sign-in carried ("android 4.0.4",
+	// "ios", "atak-plugin", ...; "" for the older challenge-response sign-in).
+	client string
 }
 
 func deviceCred(id string) string { return "dev:" + id }

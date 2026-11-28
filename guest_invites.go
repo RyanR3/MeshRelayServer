@@ -160,7 +160,7 @@ func (s *Server) createInvitedGuest(req *GuestInviteRequest, addr *net.UDPAddr) 
 		return fail("Gateways can't invite guests")
 	}
 	// The account this connection signed in with — not the callsign it
-	// joined under, which can differ (login "Dev1", callsign "Xcover").
+	// joined under, which can differ (login "Unit1", callsign "Medic4").
 	accountKey := s.authAccounts[addr.String()]
 	if accountKey == "" {
 		accountKey = userKey(client.AgencyID, client.Username)

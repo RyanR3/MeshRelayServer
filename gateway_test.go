@@ -93,7 +93,7 @@ func TestSipInviteTranslatesToFloor(t *testing.T) {
 	defer conn.Close()
 	invite := "INVITE sip:group@meshrelay SIP/2.0\r\n" +
 		"Via: SIP/2.0/UDP 127.0.0.1:6000;branch=z9hG4bKtest\r\n" +
-		"From: <sip:raptor7@sullivan.meshrelayptt.com>;tag=abc\r\n" +
+		"From: <sip:medic1@alpha.mcptt.example.com>;tag=abc\r\n" +
 		"To: <sip:group@meshrelay>\r\n" +
 		"Call-ID: test@meshrelay\r\n" +
 		"CSeq: 1 INVITE\r\n\r\n"
@@ -107,17 +107,17 @@ func TestSipInviteTranslatesToFloor(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := mesh.grantedUser(); got != "raptor7" {
-		t.Fatalf("INVITE should grant floor to raptor7, got %q", got)
+	if got := mesh.grantedUser(); got != "medic1" {
+		t.Fatalf("INVITE should grant floor to medic1, got %q", got)
 	}
 }
 
 // TestSipUserParse checks the From/To URI user extraction.
 func TestSipUserParse(t *testing.T) {
 	cases := map[string]string{
-		"<sip:raptor7@domain>;tag=x": "raptor7",
-		"sip:medic3@d.com":           "medic3",
-		"\"IC\" <sip:ic@sc.com>":     "ic",
+		"<sip:medic1@domain>;tag=x":   "medic1",
+		"sip:medic3@example.net":      "medic3",
+		"\"IC\" <sip:ic@example.org>": "ic",
 	}
 	for in, want := range cases {
 		if got := sipUser(in); got != want {

@@ -19,7 +19,7 @@ func TestZelloMappingSharedWithMultipleAgencies(t *testing.T) {
 	s := &Server{
 		config: &Config{ZelloBridgesFile: t.TempDir() + "/zb.json"},
 		agencies: map[string]*Agency{
-			"default": {ID: "default"}, "dev": {ID: "dev"}, "dev1": {ID: "dev1"},
+			"default": {ID: "default"}, "bravo": {ID: "bravo"}, "charlie": {ID: "charlie"},
 		},
 		zelloBridges: map[string]*ZelloBridge{},
 		clients:      map[string]*Client{},
@@ -32,7 +32,7 @@ func TestZelloMappingSharedWithMultipleAgencies(t *testing.T) {
 			"zello_channel":  "Ops",
 			"mesh_channel":   11,
 			"agency_id":      "default",
-			"extra_agencies": []string{"dev", "dev1"},
+			"extra_agencies": []string{"bravo", "charlie"},
 		}},
 	})
 	req := httptest.NewRequest("POST", "/api/zello-bridges/b1/map", bytes.NewReader(body))
@@ -48,11 +48,11 @@ func TestZelloMappingSharedWithMultipleAgencies(t *testing.T) {
 		t.Errorf("primary agency = %q, want default", m.AgencyID)
 	}
 	if len(m.ExtraAgencies) != 2 {
-		t.Fatalf("extra agencies = %v, want [dev dev1]", m.ExtraAgencies)
+		t.Fatalf("extra agencies = %v, want [bravo charlie]", m.ExtraAgencies)
 	}
 	got := m.targetAgencies()
 	if len(got) != 3 || got[0] != "default" {
-		t.Errorf("targetAgencies = %v, want default first then dev, dev1", got)
+		t.Errorf("targetAgencies = %v, want default first then bravo, charlie", got)
 	}
 	t.Logf("OK: mapping shared with %v on ch %d", got, m.MeshChannel)
 }
@@ -61,7 +61,7 @@ func TestZelloMappingSharedWithMultipleAgencies(t *testing.T) {
 func TestZelloExtraAgenciesRejectsUnknown(t *testing.T) {
 	s := &Server{
 		config:       &Config{ZelloBridgesFile: t.TempDir() + "/zb.json"},
-		agencies:     map[string]*Agency{"default": {ID: "default"}, "dev": {ID: "dev"}},
+		agencies:     map[string]*Agency{"default": {ID: "default"}, "bravo": {ID: "bravo"}},
 		zelloBridges: map[string]*ZelloBridge{},
 		clients:      map[string]*Client{},
 		channels:     map[string]*Channel{},
@@ -73,7 +73,7 @@ func TestZelloExtraAgenciesRejectsUnknown(t *testing.T) {
 			"zello_channel":  "Ops",
 			"mesh_channel":   12,
 			"agency_id":      "default",
-			"extra_agencies": []string{"dev", "ghost", "default"},
+			"extra_agencies": []string{"bravo", "ghost", "default"},
 		}},
 	})
 	req := httptest.NewRequest("POST", "/api/zello-bridges/b1/map", bytes.NewReader(body))
@@ -101,14 +101,14 @@ func TestNotifySharedChannelReachesAllAgencies(t *testing.T) {
 
 	s := &Server{
 		agencies: map[string]*Agency{
-			"default": {ID: "default"}, "dev": {ID: "dev"}, "unrelated": {ID: "unrelated"},
+			"default": {ID: "default"}, "bravo": {ID: "bravo"}, "unrelated": {ID: "unrelated"},
 		},
 		zelloBridges: map[string]*ZelloBridge{},
 		clients:      map[string]*Client{},
 		channels:     map[string]*Channel{},
 	}
 	s.clients["a"] = &Client{Username: "a", AgencyID: "default", Addr: defAddr}
-	s.clients["b"] = &Client{Username: "b", AgencyID: "dev", Addr: devAddr}
+	s.clients["b"] = &Client{Username: "b", AgencyID: "bravo", Addr: devAddr}
 	s.clients["c"] = &Client{Username: "c", AgencyID: "unrelated", Addr: otherAddr}
 
 	sent := map[string]int{}
@@ -119,7 +119,7 @@ func TestNotifySharedChannelReachesAllAgencies(t *testing.T) {
 		ID: "b1", Name: "T", AgencyID: "default", Enabled: true,
 		Mappings: []ZelloMapping{{
 			ZelloChannel: "Ops", MeshChannel: 11,
-			AgencyID: "default", ExtraAgencies: []string{"dev"},
+			AgencyID: "default", ExtraAgencies: []string{"bravo"},
 		}},
 	}
 	s.notifyZelloBridgeChannels(b, true)

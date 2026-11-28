@@ -299,7 +299,7 @@ func TestDeviceKeyReplyIsTagged(t *testing.T) {
 }
 
 func TestCallsignValidation(t *testing.T) {
-	for _, ok := range []string{"Xcover", "Engine 12", "medic1 (Fire Dept)", "O'Brien", "Müller-7"} {
+	for _, ok := range []string{"Medic4", "Engine 12", "medic1 (Fire Dept)", "O'Brien", "Müller-7"} {
 		if !validCallsign(ok) {
 			t.Errorf("%q should be allowed", ok)
 		}

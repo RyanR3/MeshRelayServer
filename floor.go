@@ -77,10 +77,19 @@ func ParseFloorRequest(data []byte) (*FloorRequest, error) {
 }
 
 // EmergencyAlert parsed from a client.
+//
+// Wire: i32 channel | str user | u8 active [| f64 lat | f64 lon]. The
+// position tail is optional: the MeshRelayTAK plugin appends the unit's ATAK
+// position to a set when it has a fix (its position reaches the TAK server,
+// not this one, so the alert is the only place the server learns it). A
+// packet without the tail, a short tail or a tail that is not a valid fix
+// (NaN, Inf, out of range, exactly 0,0) parses as before, without a position.
 type EmergencyAlert struct {
-	Channel int
-	User    string
-	Active  bool
+	Channel  int
+	User     string
+	Active   bool
+	HasFix   bool
+	Lat, Lon float64
 }
 
 func ParseEmergencyAlert(data []byte) (*EmergencyAlert, error) {
@@ -97,7 +106,17 @@ func ParseEmergencyAlert(data []byte) (*EmergencyAlert, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &EmergencyAlert{Channel: int(ch), User: user, Active: active == 1}, nil
+	a := &EmergencyAlert{Channel: int(ch), User: user, Active: active == 1}
+	if r.Len() >= 16 {
+		var b [16]byte
+		r.Read(b[:])
+		lat := math.Float64frombits(binary.BigEndian.Uint64(b[0:8]))
+		lon := math.Float64frombits(binary.BigEndian.Uint64(b[8:16]))
+		if validFix(lat, lon) {
+			a.HasFix, a.Lat, a.Lon = true, lat, lon
+		}
+	}
+	return a, nil
 }
 
 // ---- server -> client builders ----
@@ -161,8 +180,9 @@ func buildEmergencyAlert(channel int, user string, active bool) []byte {
 }
 
 // emergencyAlertPacket builds the 0x26 broadcast for an emergency on the
-// channel at key, with the alerting unit's last reported position appended
-// when it is set and known, so phones can show where the unit is.
+// channel at key, with the alerting unit's position (unitPosition) appended
+// when it is set and known, so phones can show where the unit is. Apps and
+// the plugin read the tail; older parsers stop after the state byte.
 func (s *Server) emergencyAlertPacket(key string, channel int, user string, active bool) []byte {
 	pkt := buildEmergencyAlert(channel, user, active)
 	if !active || s == nil {
@@ -172,18 +192,12 @@ func (s *Server) emergencyAlertPacket(key string, channel int, user string, acti
 	if i := strings.LastIndexByte(key, ':'); i >= 0 {
 		agency = key[:i]
 	}
-	s.mu.RLock()
-	var loc *UnitLocation
-	if c := s.clients[userKey(agency, user)]; c != nil && c.Loc != nil {
-		l := *c.Loc
-		loc = &l
-	}
-	s.mu.RUnlock()
-	if loc == nil {
+	lat, lon, ok := s.unitPosition(agency, user)
+	if !ok {
 		return pkt
 	}
-	pkt = binary.BigEndian.AppendUint64(pkt, math.Float64bits(loc.Lat))
-	return binary.BigEndian.AppendUint64(pkt, math.Float64bits(loc.Lon))
+	pkt = binary.BigEndian.AppendUint64(pkt, math.Float64bits(lat))
+	return binary.BigEndian.AppendUint64(pkt, math.Float64bits(lon))
 }
 
 // ---- floor state machine ----
@@ -859,7 +873,11 @@ func (s *Server) handleEmergencyAlert(alert *EmergencyAlert, addr *net.UDPAddr) 
 	key := channelKey(client.AgencyID, client.Channel)
 	if alert.Active {
 		first := !s.emergencyActiveFor(client.AgencyID, alert.User)
-		s.raiseEmergency(client.AgencyID, alert.User, client.Channel)
+		var fix *emergencyFix
+		if alert.HasFix {
+			fix = &emergencyFix{Lat: alert.Lat, Lon: alert.Lon, At: time.Now()}
+		}
+		s.raiseEmergencyAt(client.AgencyID, alert.User, client.Channel, fix)
 		// MCX Step 5: propagate an emergency set to the external MCX platform.
 		if first && s.sipGateway != nil {
 			s.sipGateway.OnEmergencyAlert(key, userMCXID(alert.User, client.AgencyID, s.config.McpttDomain))

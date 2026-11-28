@@ -201,6 +201,15 @@ func (s *Server) webRouter() *mux.Router {
 	api.HandleFunc("/my-agency/tak/groups", s.requireAdmin(s.handleUpdateTakGroups)).Methods("PUT")
 	api.HandleFunc("/my-agency/tak", s.requireAdmin(s.handleGetTak)).Methods("GET")
 	api.HandleFunc("/my-agency/tak", s.requireAdmin(s.handleUpdateTak)).Methods("PUT")
+	// Sharing with the master TAK server: the agency's admin or a super admin.
+	api.HandleFunc("/my-agency/tak/share-master", s.requireAdmin(s.handleUpdateTakShareMaster)).Methods("PUT")
+	// The master TAK server (tak_master.go): super admin only (not in
+	// apiRolePolicy, and checked again here).
+	api.HandleFunc("/tak-master", s.requireSuperAdmin(s.handleGetTakMaster)).Methods("GET")
+	api.HandleFunc("/tak-master", s.requireSuperAdmin(s.handleUpdateTakMaster)).Methods("PUT")
+	api.HandleFunc("/tak-master/groups", s.requireSuperAdmin(s.handleGetTakMasterGroups)).Methods("GET")
+	api.HandleFunc("/tak-master/groups", s.requireSuperAdmin(s.handleUpdateTakMasterGroups)).Methods("PUT")
+	api.HandleFunc("/tak-master/home", s.requireSuperAdmin(s.handleUpdateTakMasterHome)).Methods("PUT")
 	api.HandleFunc("/my-agency/recording", s.requireAdmin(s.handleGetRecordingSetting)).Methods("GET")
 	api.HandleFunc("/my-agency/recording", s.requireAdmin(s.handleUpdateRecordingSetting)).Methods("PUT")
 	api.HandleFunc("/transcription", s.requireSuperAdmin(s.handleTranscriptionStatus)).Methods("GET")
@@ -2699,6 +2708,9 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 					Tak     *struct {
 						Agency string `json:"agency"`
 						UID    string `json:"uid"`
+						Source string `json:"source"` // "master": a user on the master TAK server
+						// Callsign: what the console showed; a display fallback only.
+						Callsign string `json:"callsign"`
 					} `json:"tak"`
 				}
 				if err := json.Unmarshal(data, &msg); err != nil {
@@ -2736,7 +2748,7 @@ func (s *Server) handleDispatchWebSocket(w http.ResponseWriter, r *http.Request)
 					c := s.clients[key]
 					s.mu.RUnlock()
 					if c != nil && msg.Tak != nil {
-						s.consoleSendTakMessage(c, msg.Tak.Agency, msg.Tak.UID, msg.Text)
+						s.consoleSendTakMessage(c, msg.Tak.Agency, msg.Tak.UID, msg.Text, msg.Tak.Source, msg.Tak.Callsign)
 					} else if c != nil {
 						s.consoleSendMessage(c, msg.Text, msg.Unit, msg.ToChan, msg.ToAll)
 					}

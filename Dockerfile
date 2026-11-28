@@ -1,6 +1,6 @@
 # MeshRelay Server container image (used by the infra-TAK MeshRelay module).
 #
-#   docker build --build-arg VERSION=v4.9.1 -t meshrelay-server .
+#   docker build --build-arg VERSION=v4.10.0 -t meshrelay-server .
 #
 # Multi-arch (linux/amd64 + linux/arm64) is built by CI with buildx; a plain
 # `docker build` produces the image for the machine it runs on.

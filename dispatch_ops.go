@@ -118,8 +118,14 @@ type dispatchMsg struct {
 	UnitAt int64  `json:"unit_at,omitempty"` // "in": the unit's own timestamp (its receipts key)
 	Read   bool   `json:"read,omitempty"`    // "in": a console has shown it
 	TakUID string `json:"tak_uid,omitempty"` // TAK user (GeoChat) on the other end
-	Sent   int    `json:"sent,omitempty"`    // units it reached now
-	Queued int    `json:"queued,omitempty"`  // offline units it will reach on join
+	// TakSource "master": that TAK user is on the master TAK server.
+	TakSource string `json:"tak_source,omitempty"`
+	Sent      int    `json:"sent,omitempty"`   // units it reached now
+	Queued    int    `json:"queued,omitempty"` // offline units it will reach on join
+	// NotSent: why a message to a TAK user did not go out ("" when it did).
+	NotSent string `json:"not_sent,omitempty"`
+	// unlisted: the TAK user was not in the connection's unit list (log only).
+	unlisted bool
 }
 
 type pendingMsg struct {
@@ -239,6 +245,7 @@ func (s *Server) consoleSendMessage(console *Client, text string, unit *messageT
 	}
 	var rcpts []rcpt
 	var agency, label string
+	viaTak := false // the unit's client takes no texts: its TAK unit does
 
 	s.mu.RLock()
 	allowed := func(a string) bool { return console.AgencyID == "" || console.AgencyID == a }
@@ -249,6 +256,7 @@ func (s *Server) consoleSendMessage(console *Client, text string, unit *messageT
 		var addr *net.UDPAddr
 		if c := s.clients[k]; c != nil {
 			addr = c.Addr
+			viaTak = s.clientKindLocked(c) == clientATAKPlugin
 		}
 		rcpts = append(rcpts, rcpt{k, addr})
 	case channel != "" && allowed(agencyFromKey(channel)):
@@ -273,6 +281,18 @@ func (s *Server) consoleSendMessage(console *Client, text string, unit *messageT
 	}
 	s.mu.RUnlock()
 	if agency == "" {
+		return
+	}
+	if viaTak {
+		// An ATAK plugin user: the message goes as GeoChat to the person's
+		// TAK unit (same callsign), through the connection that sees it,
+		// like any console message to a TAK user (prefix, reply routing).
+		if u, source := s.takUnitOf(agency, unit.User, now, false); u != nil {
+			s.consoleSendTakMessage(console, agency, u.UID, text, source, u.Callsign)
+			return
+		}
+		s.recordMessage(dispatchMsg{At: now.UnixMilli(), Agency: agency, Dir: "out", From: console.Username,
+			To: label, Text: text, NotSent: "the unit's ATAK plugin takes no texts and its ATAK is not on TAK"})
 		return
 	}
 
@@ -310,13 +330,14 @@ func (s *Server) handleDispatchMessage(p *DispatchMessagePacket, addr *net.UDPAd
 	if len(text) > maxMessageLen {
 		text = text[:maxMessageLen]
 	}
-	s.mu.RLock()
+	s.mu.Lock()
 	c, _ := s.findClientByAddr(addr)
 	var agency, user string
 	if c != nil {
 		agency, user = c.AgencyID, c.Username
+		c.SentText = true
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if c == nil {
 		return
 	}
@@ -388,7 +409,18 @@ func (s *Server) recordMessage(m dispatchMsg) {
 	}
 	o.history[m.Agency] = h
 	o.mu.Unlock()
-	log.Printf("Dispatch message %s [%s] %q -> %q (%d chars)", m.Dir, m.Agency, m.From, m.To, len(m.Text))
+	switch {
+	case m.NotSent != "":
+		why := m.NotSent
+		if m.unlisted {
+			why += ", TAK user not listed"
+		}
+		log.Printf("Dispatch message %s [%s] %q -> %q (%d chars) NOT sent: %s", m.Dir, m.Agency, m.From, m.To, len(m.Text), why)
+	case m.unlisted:
+		log.Printf("Dispatch message %s [%s] %q -> %q (%d chars) sent to a TAK user not listed", m.Dir, m.Agency, m.From, m.To, len(m.Text))
+	default:
+		log.Printf("Dispatch message %s [%s] %q -> %q (%d chars)", m.Dir, m.Agency, m.From, m.To, len(m.Text))
+	}
 	msg := map[string]interface{}{"type": "message"}
 	b, _ := json.Marshal(m)
 	var fields map[string]interface{}

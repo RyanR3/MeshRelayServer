@@ -8,7 +8,7 @@ From your Mac, copy the entire PTTServer directory to your Ubuntu server:
 
 ```bash
 # Replace with your server details
-scp -r /Users/ryanfridlich/PTTServer user@your-ubuntu-server:/home/user/
+scp -r /path/to/PTTServer user@your-ubuntu-server:/home/user/
 ```
 
 ## Step 2: Install Go on Ubuntu Server

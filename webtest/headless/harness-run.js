@@ -79,6 +79,21 @@
     await wait(100);
     ok(cards().length === 2, 'a re-raised emergency is unacknowledged again');
     ok(!/[\u{1F300}-\u{1FAFF}☀-➿]/u.test($('emerg-banner').textContent), 'no emoji in banner');
+    // Messages to TAK users: one delivered, one not.
+    __emit({ type: 'message', id: 'm1', at: Date.now(), agency: 'ag', dir: 'out', from: 'desk', to: 'Echo-1 (TAK)', text: 'sent one', sent: 1, tak_uid: 'ANDROID-1' });
+    __emit({ type: 'message', id: 'm2', at: Date.now(), agency: 'ag', dir: 'out', from: 'desk', to: 'Echo-2 (TAK)', text: 'unsent one', tak_uid: 'ANDROID-2', tak_source: 'master', not_sent: 'master TAK not connected' });
+    await wait(100);
+    const msgs = [...document.querySelectorAll('#msg-list .msg')];
+    const m1 = msgs.find(m => /sent one/.test(m.textContent) && !/unsent/.test(m.textContent)), m2 = msgs.find(m => /unsent one/.test(m.textContent));
+    ok(m1 && !/not delivered/.test(m1.textContent), 'delivered TAK message not flagged');
+    ok(m2 && /not delivered \(master TAK not connected\)/.test(m2.textContent), 'undelivered TAK message flagged with the reason: ' + (m2 && m2.textContent));
+    // The console sends the callsign it showed along with the uid.
+    const sock = __server.sockets[__server.sockets.length - 1], sentMsgs = [];
+    sock.send = (d) => sentMsgs.push(JSON.parse(d));
+    messageTak('ag', 'ANDROID-9', 'Echo-9', 'master');
+    $('msg-text').value = 'hello'; sendMessage();
+    const sm = sentMsgs.find(m => m.type === 'message');
+    ok(sm && sm.tak && sm.tak.uid === 'ANDROID-9' && sm.tak.source === 'master' && sm.tak.callsign === 'Echo-9', 'TAK message carries the shown callsign: ' + JSON.stringify(sm));
   }
   run().catch(e => { out.push('FAIL exception ' + e.stack); fail++; }).finally(() => {
     const pre = document.createElement('pre'); pre.id = 'harness-result';

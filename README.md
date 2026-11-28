@@ -52,6 +52,29 @@ Every setting can come from `MESHRELAY_*` environment variables (see `infratak.g
 - **Client Management**: Automatic timeout and cleanup
 - **Statistics Tracking**: Monitor packets, bandwidth, and connections
 - **WebSocket Updates**: Live dashboard updates
+- **TAK Server links**: each agency can connect its dispatch console to its own TAK Server
+  (TAK users on the map, GeoChat both ways, emergencies both ways, LMR channel markers).
+  A super admin can also set up one **master TAK server** for the whole server; agencies
+  that switch on "Share with the master TAK server" (off by default) send their alerts,
+  radio-channel markers and console messages to it and see its TAK users and alerts on
+  their consoles. In TAK the master is one contact: a console's message goes out from it with
+  the agency's name in front (`[Alpha] ...`), and MeshRelay remembers (in memory) which agencies
+  wrote to which TAK user. A TAK user's message to that contact goes to every agency that wrote
+  to that user in the last 12 hours and still shares; when none did, it goes to the **home
+  agency** the super admin picks on the master settings (if none is picked, the agency
+  `default`, otherwise the first agency). The home agency always takes part. When an agency's
+  own link and the master go to the same TAK server, items are sent once and each TAK user is
+  shown once. A console message to one TAK user is addressed to that user's UID, so the TAK
+  Server delivers it to that user only.
+- **Emergency alerts on TAK**: the server's 911 alert is placed at the unit's own position
+  (from the alert, the phone's location reports, or the unit's TAK position), draws no line
+  to the dispatch contact, names the unit, and is sent again every 4 minutes while the
+  emergency lasts. When the unit's ATAK raises its own alert, the server does not add a
+  second one. (The TAK Server itself repeats a 911 alert to its clients every 3 seconds;
+  that is expected.)
+- **One console entry per person**: a user signed in to MeshRelay whose ATAK also reports
+  to TAK is listed once. Texts to them go to the MeshRelay app, or as ATAK chat for users of
+  the MeshRelay ATAK plugin.
 
 ## Architecture
 
@@ -93,6 +116,8 @@ Edit `config.json`:
   "log_level": "INFO"      // Logging level (DEBUG, INFO, WARN, ERROR)
 }
 ```
+
+`adhoc_group_audio_tag` (default `false`): send ad-hoc group audio channel-tagged to members who are on another channel; leave it off until the phone apps play tagged audio for groups they have not selected.
 
 ## MCX SIP Gateway (optional, off by default)
 
@@ -180,7 +205,8 @@ Not moved, to set up again by hand:
 - mutual-aid patches and requests
 - guest events
 - LMR and Zello bridges
-- TAK connections
+- TAK connections, the master TAK server, and each agency's "Share with the master TAK
+  server" switch (imported agencies start with it off)
 - map layers
 - `config.json` (TLS, single sign-on, ports)
 

@@ -66,6 +66,7 @@ type emergencyCall struct {
 	WorkingChannel int // the channel the unit was on when it raised it
 	Since          time.Time
 	LastActive     time.Time
+	Fix            *emergencyFix // position sent with the alert (nil: none)
 }
 
 func (a *Agency) emergencyChannelName() string {
@@ -177,6 +178,13 @@ func (s *Server) ensureEmergencyChannel(agencyID string) {
 
 // raiseEmergency handles an alert set (first raise or a re-send).
 func (s *Server) raiseEmergency(agencyID, user string, workingChannel int) {
+	s.raiseEmergencyAt(agencyID, user, workingChannel, nil)
+}
+
+// raiseEmergencyAt is raiseEmergency with the position the alert carried
+// (nil: none). A re-send that moves the unit (or gives the first position)
+// updates the consoles and the server's TAK alert.
+func (s *Server) raiseEmergencyAt(agencyID, user string, workingChannel int, fix *emergencyFix) {
 	now := time.Now()
 	s.emergMu.Lock()
 	if s.emergCalls == nil {
@@ -192,6 +200,13 @@ func (s *Server) raiseEmergency(agencyID, user string, workingChannel int) {
 		s.emergCalls[agencyID][user] = e
 	}
 	e.LastActive = now
+	moved, movedM := false, 0.0
+	if fix != nil {
+		moved = !first && fixMoved(e.Fix, fix)
+		movedM = fixDistanceM(e.Fix, fix)
+		cp := *fix
+		e.Fix = &cp
+	}
 	working := e.WorkingChannel
 	s.emergMu.Unlock()
 
@@ -206,6 +221,8 @@ func (s *Server) raiseEmergency(agencyID, user string, workingChannel int) {
 			s.activityLog.Add("emergency", user, "Emergency raised", agencyID)
 		}
 		log.Printf("EMERGENCY raised by %q [%s] (was on channel %d) — audio now on the EMERGENCY channel", user, agencyID, working)
+	} else if moved {
+		s.emergencyPositionChanged(agencyID, working, user, movedM)
 	}
 	// Give the caller the EMERGENCY channel (or a place in its queue).
 	if s.floor != nil {

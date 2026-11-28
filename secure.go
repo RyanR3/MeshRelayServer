@@ -607,6 +607,8 @@ func (s *Server) handleSecAuth(data []byte, addr *net.UDPAddr) {
 		return
 	}
 	_ = flags
+	clientName, _ := secReadStr(r) // what the phone runs (clientKind); may be absent
+	clientName = printable(clientName, 64)
 	authMessage := secHash([]byte("MRS1-auth"), k.th1[:], []byte(username))
 
 	// Who could this be, and what could they hold? (Read under the lock;
@@ -700,6 +702,12 @@ func (s *Server) handleSecAuth(data []byte, addr *net.UDPAddr) {
 		return
 	}
 	msg, err := s.completeSignInLocked(user, match.token, match.deviceID, addr, nil)
+	if err == nil {
+		if sess, ok := s.authSessions[addr.String()]; ok {
+			sess.client = clientName
+			s.authSessions[addr.String()] = sess
+		}
+	}
 	s.mu.Unlock()
 	if err != nil {
 		fail("Server error — try again")

@@ -482,7 +482,7 @@ func TestMustChangePasswordNotBypassedByCase(t *testing.T) {
 
 // W5: account-name checks refuse markup but keep ordinary callsigns.
 func TestAccountNameValidation(t *testing.T) {
-	for _, ok := range []string{"Engine 7-1", "O'Brien", "K9 #2", "dev3", "Ünit_5", "medic.1", "A&B"} {
+	for _, ok := range []string{"Engine 7-1", "O'Brien", "K9 #2", "unit3", "Ünit_5", "medic.1", "A&B"} {
 		if err := validateAccountName(ok); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
 		}

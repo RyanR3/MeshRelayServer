@@ -9,9 +9,9 @@ func TestUserMCXID(t *testing.T) {
 	cases := []struct {
 		callsign, agency, domain, want string
 	}{
-		{"RAPTOR7", "sullivan", "meshrelayptt.com", "raptor7@sullivan.meshrelayptt.com"},
-		{"Ryan F.", "default", "meshrelayptt.com", "ryan-f@default.meshrelayptt.com"},
-		{"unit 12", "sc911", "r3systems.com", "unit-12@sc911.r3systems.com"},
+		{"MEDIC1", "alpha", "mcptt.example.com", "medic1@alpha.mcptt.example.com"},
+		{"Alex B.", "default", "mcptt.example.com", "alex-b@default.mcptt.example.com"},
+		{"unit 12", "bravo", "example.org", "unit-12@bravo.example.org"},
 		{"nodomain", "default", "", "nodomain@default"}, // unconfigured domain
 	}
 	for _, c := range cases {
@@ -23,16 +23,16 @@ func TestUserMCXID(t *testing.T) {
 }
 
 func TestGroupMCXID(t *testing.T) {
-	got := groupMCXID("Tactical 1", "sullivan", "meshrelayptt.com")
-	want := "tactical-1@sullivan.meshrelayptt.com"
+	got := groupMCXID("Tactical 1", "alpha", "mcptt.example.com")
+	want := "tactical-1@alpha.mcptt.example.com"
 	if got != want {
 		t.Errorf("groupMCXID = %q, want %q", got, want)
 	}
 }
 
 func TestValidMCXID(t *testing.T) {
-	valid := []string{"raptor7@sullivan.meshrelayptt.com", "a@b.c", "unit-12@sc911.r3systems.com"}
-	invalid := []string{"", "noatsign", "@domain.com", "user@", "user@@domain"}
+	valid := []string{"medic1@alpha.mcptt.example.com", "a@b.c", "unit-12@bravo.example.org"}
+	invalid := []string{"", "noatsign", "@example.com", "user@", "user@@domain"}
 	for _, v := range valid {
 		if !validMCXID(v) {
 			t.Errorf("validMCXID(%q) = false, want true", v)
@@ -46,14 +46,14 @@ func TestValidMCXID(t *testing.T) {
 }
 
 func TestMCXDomainMatches(t *testing.T) {
-	dom := "meshrelayptt.com"
-	if !mcxDomainMatches("raptor7@sullivan.meshrelayptt.com", dom) {
+	dom := "mcptt.example.com"
+	if !mcxDomainMatches("medic1@alpha.mcptt.example.com", dom) {
 		t.Error("agency subdomain should match configured domain")
 	}
-	if !mcxDomainMatches("x@meshrelayptt.com", dom) {
+	if !mcxDomainMatches("x@mcptt.example.com", dom) {
 		t.Error("exact domain should match")
 	}
-	if mcxDomainMatches("intruder@evil.com", dom) {
+	if mcxDomainMatches("intruder@example.net", dom) {
 		t.Error("foreign domain must NOT match")
 	}
 	if !mcxDomainMatches("anything@whatever", "") {

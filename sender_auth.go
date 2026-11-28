@@ -26,7 +26,7 @@ import (
 //     from a new address after a network switch).
 //
 // Anything else is dropped. The callsign can differ from the login account
-// (login "Xcover", callsign "Dev1"): Client.Account records which login
+// (login "Medic4", callsign "Unit1"): Client.Account records which login
 // account owns a callsign, set when the callsign is JOINed.
 
 // mayActAs reports whether a packet from addr may act as client c. Caller

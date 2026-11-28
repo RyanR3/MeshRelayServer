@@ -915,6 +915,29 @@
                         <button class="btn-primary" onclick="saveTak()" id="tak-save-btn">Save &amp; Connect</button>
                         <button class="btn-secondary" onclick="removeTak()">Remove</button>
                     </div>
+                    <div class="settings-row" id="tak-share-row" style="margin-top:14px; border-top:1px solid #1E2733; padding-top:14px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Share with the master TAK server</div>
+                            <div class="settings-description">
+                                When on, this agency's emergency alerts, radio-channel markers and console messages become visible
+                                to the master TAK server's users, and its TAK users and alerts appear on this agency's console.
+                            </div>
+                            <div class="settings-description" id="tak-share-state">Master TAK server: not set up</div>
+                            <div class="settings-description" id="tak-share-routing" style="display:none;"></div>
+                            <div class="settings-description" id="tak-share-home" style="display:none;">
+                                This agency is the master TAK server's home agency, so it always takes part and the switch cannot be
+                                turned off. A super admin can choose another home agency in the master TAK server settings.
+                            </div>
+                            <div class="settings-description" id="tak-share-same" style="display:none;">
+                                This agency's own TAK connection goes to the same TAK server as the master: its alerts and markers
+                                are sent once (on its own connection) and each TAK user is shown once.
+                            </div>
+                        </div>
+                        <label class="toggle-switch" id="tak-share-switch" style="display:none;">
+                            <input type="checkbox" id="tak-share-master" onchange="saveTakShareMaster()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
                     <div id="tak-groups-section" style="display:none; margin-top:18px; border-top:1px solid #1E2733; padding-top:14px;">
                         <div class="settings-label">TAK channels (groups)</div>
                         <div class="settings-description" style="margin-bottom:8px;">
@@ -925,6 +948,68 @@
                         <div style="display:flex; gap:8px; margin-top:10px;">
                             <button class="btn-secondary" onclick="loadTakGroups()">Reload from TAK</button>
                             <button class="btn-primary" onclick="saveTakGroups()" id="tak-groups-save">Save channels</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Master TAK server (server-wide, super admin) -->
+                <div class="panel super-admin-only" style="margin-bottom: 20px;">
+                    <h3>Master TAK Server</h3>
+                    <div id="takm-status-msg" class="status-message" style="display: none;"></div>
+                    <div class="settings-description" style="margin: 4px 0 12px;">
+                        One TAK Server connection for the whole server. Only agencies that switch on
+                        "Share with the master TAK server" on their TAK settings take part: their emergency alerts, radio-channel
+                        markers and console messages go to it, and its TAK users and alerts appear on their consoles. In TAK the
+                        connection is one contact; console messages go out from it with the agency's name in front. The password is
+                        not stored.
+                    </div>
+                    <div class="tak-grid">
+                        <label>Server address<input type="text" id="takm-host" placeholder="tak.example.org or 10.0.0.5"></label>
+                        <label>Streaming port<input type="number" id="takm-stream-port" placeholder="8089"></label>
+                        <label>Enrollment port<input type="number" id="takm-enroll-port" placeholder="8446"></label>
+                        <label>API port<input type="number" id="takm-api-port" placeholder="8443"></label>
+                        <label>TAK username<input type="text" id="takm-username" autocomplete="off"></label>
+                        <label>TAK password<input type="password" id="takm-password" autocomplete="new-password" placeholder="needed to enroll"></label>
+                        <label>Name in TAK<input type="text" id="takm-callsign" placeholder="MeshRelay"></label>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <div class="settings-label">Connected</div>
+                            <div class="settings-description" id="takm-state">Not configured</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="takm-enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div style="display:flex; gap:8px; margin-top:10px;">
+                        <button class="btn-primary" onclick="saveTakMaster()" id="takm-save-btn">Save &amp; Connect</button>
+                        <button class="btn-secondary" onclick="removeTakMaster()">Remove</button>
+                    </div>
+                    <div class="settings-row" id="takm-home-row" style="display:none; margin-top:18px; border-top:1px solid #1E2733; padding-top:14px;">
+                        <div class="settings-info">
+                            <div class="settings-label">Home agency</div>
+                            <div class="settings-description">
+                                A TAK user's message to this contact goes to the agencies that wrote to that user in the last 12 hours.
+                                When none did, it goes to the home agency's console. The home agency always takes part.
+                            </div>
+                            <div class="settings-description" id="takm-home-state"></div>
+                        </div>
+                        <select id="takm-home" class="agency-filter" onchange="saveTakMasterHome()"></select>
+                    </div>
+                    <div style="margin-top:18px; border-top:1px solid #1E2733; padding-top:14px;">
+                        <div class="settings-label">Agencies sharing</div>
+                        <div class="settings-description" id="takm-sharing" style="margin-top:6px;">None</div>
+                    </div>
+                    <div id="takm-groups-section" style="display:none; margin-top:18px; border-top:1px solid #1E2733; padding-top:14px;">
+                        <div class="settings-label">TAK channels (groups)</div>
+                        <div class="settings-description" style="margin-bottom:8px;">
+                            Which TAK groups the master connection is part of. Applied again every time the connection comes back.
+                        </div>
+                        <div id="takm-groups-list" class="tak-groups"></div>
+                        <div style="display:flex; gap:8px; margin-top:10px;">
+                            <button class="btn-secondary" onclick="loadTakMasterGroups()">Reload from TAK</button>
+                            <button class="btn-primary" onclick="saveTakMasterGroups()" id="takm-groups-save">Save channels</button>
                         </div>
                     </div>
                 </div>
@@ -986,7 +1071,7 @@
                         <div class="settings-info">
                             <div class="settings-label">Words to recognise</div>
                             <div class="settings-description">Optional. Unit names, places and terms your agency uses, so they are spelled right
-                                (e.g. <em>Engine 41, Medic 3, Monticello, Route 17B</em>). Keep it short — a long list can make results worse.</div>
+                                (e.g. <em>Engine 41, Medic 3, Riverside, Route 9</em>). Keep it short — a long list can make results worse.</div>
                             <div style="display:flex; gap:8px; margin-top:8px;">
                                 <input type="text" id="transcribe-words" maxlength="400" placeholder="Engine 41, Medic 3, Route 17B" style="flex:1; margin-bottom:0;">
                                 <button class="btn-primary" onclick="saveTranscribeWords()">Save</button>
@@ -1367,6 +1452,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=47"></script>
+    <script src="app.js?v=49"></script>
 </body>
 </html>

@@ -27,7 +27,7 @@ func TestSelfSignedTLS(t *testing.T) {
 		t.Fatal("replaced a configured certificate")
 	}
 
-	c = &Config{TLSSelfSigned: true, TLSHosts: []string{"192.168.2.228", "infrapi"}}
+	c = &Config{TLSSelfSigned: true, TLSHosts: []string{"192.0.2.28", "meshrelay.example.org"}}
 	if err := ensureSelfSignedTLS(c); err != nil {
 		t.Fatal(err)
 	}
@@ -40,16 +40,16 @@ func TestSelfSignedTLS(t *testing.T) {
 	raw, _ := os.ReadFile(c.TLSCertFile)
 	b, _ := pem.Decode(raw)
 	cert, _ := x509.ParseCertificate(b.Bytes)
-	if err := cert.VerifyHostname("192.168.2.228"); err != nil {
+	if err := cert.VerifyHostname("192.0.2.28"); err != nil {
 		t.Fatalf("IP not in certificate: %v", err)
 	}
-	if err := cert.VerifyHostname("infrapi"); err != nil {
+	if err := cert.VerifyHostname("meshrelay.example.org"); err != nil {
 		t.Fatalf("name not in certificate: %v", err)
 	}
 
 	// Same hosts: kept. New address: replaced.
 	before := cert.SerialNumber.String()
-	c2 := &Config{TLSSelfSigned: true, TLSHosts: []string{"infrapi", "192.168.2.228"}}
+	c2 := &Config{TLSSelfSigned: true, TLSHosts: []string{"meshrelay.example.org", "192.0.2.28"}}
 	ensureSelfSignedTLS(c2)
 	raw, _ = os.ReadFile(c2.TLSCertFile)
 	b, _ = pem.Decode(raw)
@@ -69,7 +69,7 @@ func TestSelfSignedTLS(t *testing.T) {
 
 func TestSelfSignedFromEnv(t *testing.T) {
 	t.Setenv("MESHRELAY_TLS_SELF_SIGNED", "1")
-	t.Setenv("MESHRELAY_TLS_HOSTS", "192.168.2.228,infrapi")
+	t.Setenv("MESHRELAY_TLS_HOSTS", "192.0.2.28,meshrelay.example.org")
 	c := &Config{}
 	applyEnvOverrides(c)
 	if !c.TLSSelfSigned || len(c.TLSHosts) != 2 {

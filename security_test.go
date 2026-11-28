@@ -306,41 +306,41 @@ func TestCrossAgencyImpersonationIsDropped(t *testing.T) {
 
 func TestJoinCannotTakeOverAnotherAccountsCallsign(t *testing.T) {
 	s, sink := newSecTestServer(t)
-	addUser(s, "a1", "xcover", "px") // login account; callsign differs
+	addUser(s, "a1", "medic4", "px") // login account; callsign differs
 	addUser(s, "a1", "other", "po")
 	first, other := udp(7001), udp(7002)
-	mustLogin(t, s, sink, first, "xcover", "a1", "px")
+	mustLogin(t, s, sink, first, "medic4", "a1", "px")
 	mustLogin(t, s, sink, other, "other", "a1", "po")
-	s.handleJoin(&JoinPacket{Username: "Dev1", Channel: 2}, first)
+	s.handleJoin(&JoinPacket{Username: "Unit1", Channel: 2}, first)
 
-	c := s.clients[userKey("a1", "Dev1")]
-	if c == nil || c.Account != userKey("a1", "xcover") {
-		t.Fatalf("Dev1 should be owned by login xcover, got %+v", c)
+	c := s.clients[userKey("a1", "Unit1")]
+	if c == nil || c.Account != userKey("a1", "medic4") {
+		t.Fatalf("Unit1 should be owned by login medic4, got %+v", c)
 	}
 
 	// Another account in the same agency cannot take the callsign.
-	s.handleJoin(&JoinPacket{Username: "Dev1", Channel: 3}, other)
-	s.handleHeartbeat(&HeartbeatPacket{Username: "Dev1"}, other)
-	if c := s.clients[userKey("a1", "Dev1")]; c.Addr.String() != first.String() || c.Channel != 2 {
-		t.Fatalf("other account took over Dev1: %+v", c)
+	s.handleJoin(&JoinPacket{Username: "Unit1", Channel: 3}, other)
+	s.handleHeartbeat(&HeartbeatPacket{Username: "Unit1"}, other)
+	if c := s.clients[userKey("a1", "Unit1")]; c.Addr.String() != first.String() || c.Channel != 2 {
+		t.Fatalf("other account took over Unit1: %+v", c)
 	}
 
 	// The SAME account after a network switch: new address, fresh login,
 	// heartbeat alone re-homes the callsign (no JOIN needed) ...
 	moved := udp(7003)
-	mustLogin(t, s, sink, moved, "xcover", "a1", "px")
-	s.handleHeartbeat(&HeartbeatPacket{Username: "Dev1"}, moved)
-	if c := s.clients[userKey("a1", "Dev1")]; c.Addr.String() != moved.String() {
-		t.Fatalf("same account's heartbeat from its new address did not move Dev1 (at %v)", c.Addr)
+	mustLogin(t, s, sink, moved, "medic4", "a1", "px")
+	s.handleHeartbeat(&HeartbeatPacket{Username: "Unit1"}, moved)
+	if c := s.clients[userKey("a1", "Unit1")]; c.Addr.String() != moved.String() {
+		t.Fatalf("same account's heartbeat from its new address did not move Unit1 (at %v)", c.Addr)
 	}
 	if sink.countType(moved, PacketTypeHeartbeat) != 1 {
 		t.Fatal("heartbeat from the new address was not echoed")
 	}
 	// ... and so does a JOIN from yet another address.
 	again := udp(7004)
-	mustLogin(t, s, sink, again, "xcover", "a1", "px")
-	s.handleJoin(&JoinPacket{Username: "Dev1", Channel: 4}, again)
-	if c := s.clients[userKey("a1", "Dev1")]; c.Addr.String() != again.String() || c.Channel != 4 {
+	mustLogin(t, s, sink, again, "medic4", "a1", "px")
+	s.handleJoin(&JoinPacket{Username: "Unit1", Channel: 4}, again)
+	if c := s.clients[userKey("a1", "Unit1")]; c.Addr.String() != again.String() || c.Channel != 4 {
 		t.Fatalf("same account re-join failed: %+v", c)
 	}
 }
@@ -554,7 +554,7 @@ func TestSecretFilesAreOwnerOnly(t *testing.T) {
 func TestRosterExcludesDispatchConsoles(t *testing.T) {
 	s, sink := newSecTestServer(t)
 	addUser(s, "a1", "phone", "pp")
-	s.clients[userKey("a1", "WCDRT900")] = &Client{Username: "WCDRT900", AgencyID: "a1",
+	s.clients[userKey("a1", "UNIT900")] = &Client{Username: "UNIT900", AgencyID: "a1",
 		Addr: newDispatchAddr(), LastHeartbeat: time.Now()}
 	ph := udp(7301)
 	mustLogin(t, s, sink, ph, "phone", "a1", "pp")
@@ -573,7 +573,7 @@ func TestRosterExcludesDispatchConsoles(t *testing.T) {
 	if !bytes.Contains(roster, []byte("phone")) {
 		t.Fatal("roster is missing the phone itself")
 	}
-	if bytes.Contains(roster, []byte("WCDRT900")) {
+	if bytes.Contains(roster, []byte("UNIT900")) {
 		t.Fatal("dispatch console listed in the phone roster")
 	}
 }

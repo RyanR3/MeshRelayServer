@@ -188,15 +188,15 @@ func TestExpiredGuestIsRemovedAndKicked(t *testing.T) {
 	}
 }
 
-// The app signs in with an account but joins under its callsign ("Dev1" vs
-// "Xcover" on the dev Pi); the inviter is the account, found via the auth.
+// The app signs in with an account but joins under its callsign ("Unit1" vs
+// "Medic4"); the inviter is the account, found via the auth.
 func TestGuestInviteWhenCallsignDiffersFromAccount(t *testing.T) {
 	s, addr, sent := guestTestServer(t)
 	c := s.clients[userKey("ag", "alice")]
 	delete(s.clients, userKey("ag", "alice"))
-	c.Username = "Xcover"
-	s.clients[userKey("ag", "Xcover")] = c
-	sent["Xcover"] = nil
+	c.Username = "Medic4"
+	s.clients[userKey("ag", "Medic4")] = c
+	sent["Medic4"] = nil
 
 	s.handleGuestInviteRequest(inviteRequest(1, "pat"), addr)
 	resp := decodeInviteResponse(t, sent["alice"][len(sent["alice"])-1])

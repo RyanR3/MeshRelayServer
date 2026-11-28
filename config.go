@@ -59,7 +59,7 @@ type Config struct {
 	TLSSelfSigned bool     `json:"-"`
 	TLSHosts      []string `json:"-"`
 	// MCX Step 2: the MCPTT domain for this deployment. Per-agency MCX identities
-	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. raptor7@sullivan.meshrelayptt.com).
+	// are <callsign>@<agencyID>.<mcptt_domain> (e.g. medic1@alpha.mcptt.example.com).
 	// Empty disables MCX id derivation (ids fall back to the plain domain).
 	McpttDomain string `json:"mcptt_domain,omitempty"`
 	// MCX Step 3: agencies with server-enforced floor control (priority preemption,
@@ -78,6 +78,12 @@ type Config struct {
 	// MCX Step 5: SIP gateway to an external MCX platform (FirstNet PTT, carrier
 	// MCPTT). Disabled by default — zero impact until an interop requirement exists.
 	SipGateway *SipGatewayConfig `json:"sip_gateway,omitempty"`
+	// AdhocGroupAudioTag sends ad-hoc group audio channel-tagged (0x14) to
+	// members who are on another channel, so it plays as the group's
+	// channel. Off by default: current phone apps drop tagged audio for a
+	// channel they are not listening to, so with it off members get the
+	// frame untagged, as before.
+	AdhocGroupAudioTag bool `json:"adhoc_group_audio_tag,omitempty"`
 }
 
 // SipGatewayConfig configures the MCX SIP gateway (Step 5 stub).

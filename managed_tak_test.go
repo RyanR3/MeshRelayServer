@@ -105,7 +105,7 @@ func TestManagedTakRefusals(t *testing.T) {
 		{"no token", "", nil, nil, 401},
 		{"wrong token", "tok-124", nil, nil, 401},
 		{"through the proxy", "tok-123", map[string]string{"X-Forwarded-For": "203.0.113.9"}, nil, 404},
-		{"from the LAN", "tok-123", map[string]string{"RemoteAddr": "192.168.2.50:5555"}, nil, 404},
+		{"from the LAN", "tok-123", map[string]string{"RemoteAddr": "10.0.0.50:5555"}, nil, 404},
 		{"no trust bundle", "tok-123", nil, func(m map[string]interface{}) { delete(m, "trust_pems") }, 400},
 		{"bad host", "tok-123", nil, func(m map[string]interface{}) { m["host"] = "a b" }, 400},
 		{"unknown agency", "tok-123", nil, func(m map[string]interface{}) { m["agency_id"] = "nope" }, 404},

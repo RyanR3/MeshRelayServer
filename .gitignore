@@ -40,3 +40,20 @@ docker-compose.override.yml
 
 # Server identity key (secure protocol). NEVER commit.
 server_identity.key
+
+# More runtime state written next to the binary. NEVER commit.
+agencies.json
+tak*.json
+activity_log.json
+last_channels.json
+lmr_bridges.json
+map_layers.json
+mutual_aid.json
+mutual_aid_requests.json
+settings.json
+*.before-import-*
+*.key
+*.pem
+*.crt
+*.log
+logs/

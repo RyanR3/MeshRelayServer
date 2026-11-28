@@ -197,6 +197,7 @@ var apiRolePolicy = map[string]int{
 	"PUT /api/my-agency/tak/groups":                  allowAdmins,
 	"GET /api/my-agency/tak":                         allowAdmins,
 	"PUT /api/my-agency/tak":                         allowAdmins,
+	"PUT /api/my-agency/tak/share-master":            allowAdmins,
 	"GET /api/my-agency/recording":                   allowAdmins,
 	"PUT /api/my-agency/recording":                   allowAdmins,
 	"GET /api/my-agency/guest-invites":               allowAdmins,

@@ -40,6 +40,29 @@ window.fetch = async (url, opts) => {
   if (url.startsWith('/api/user-migration/import')) {
     return json(Object.assign({ status: 'ok', agencies_created: 1, users: 1, dashboard: 0, replaced: 0, skipped: 2, sessions_ended: 0, identity_replaced: false, backups: [] }, PLAN));
   }
+  if (url.startsWith('/api/tak-master/home')) {
+    window.__homeBody = JSON.parse(opts.body);
+    return json({ configured: true, status: 'connected', home_agency: window.__homeBody.agency_id, effective_home_agency: window.__homeBody.agency_id,
+      home_agency_how: 'chosen', agencies: [{ id: 'ems', name: 'EMS' }, { id: 'fire', name: 'Fire <b>Dept</b>' }],
+      sharing: [{ agency_id: 'ems', name: 'EMS', same_server: false, home: window.__homeBody.agency_id === 'ems' }] });
+  }
+  if (url.startsWith('/api/tak-master')) {
+    if (method === 'PUT') window.__takMasterBody = JSON.parse(opts.body);
+    return json({ configured: true, host: 'tak.example.org', stream_port: 8089, enroll_port: 8446, api_port: 8443, username: 'svc',
+      callsign: 'MeshRelay', enabled: true, enrolled: true, status: 'connected', tak_users: 3,
+      sharing: [{ agency_id: 'fire', name: 'Fire <b>Dept</b>', same_server: true, home: true }, { agency_id: 'ems', name: 'EMS', same_server: false }],
+      home_agency: '', effective_home_agency: 'fire', home_agency_how: 'fallback',
+      agencies: [{ id: 'ems', name: 'EMS' }, { id: 'fire', name: 'Fire <b>Dept</b>' }] });
+  }
+  if (url.startsWith('/api/my-agency/tak/share-master')) {
+    window.__shareBody = JSON.parse(opts.body);
+    return json({ agency_id: 'fire', configured: true, share_master: window.__shareBody.share, master: { configured: true, status: 'connected', home_agency_name: 'EMS' }, same_server_as_master: true, master_home: false });
+  }
+  if (url.startsWith('/api/my-agency/tak/groups')) return json({ groups: [], selected: [] });
+  if (url.startsWith('/api/my-agency/tak')) {
+    return json({ agency_id: 'fire', configured: true, host: 'tak.example.org', stream_port: 8089, enrolled: false, status: 'connected',
+      share_master: false, master: { configured: true, status: 'connected', home_agency_name: 'EMS' }, same_server_as_master: true, master_home: false });
+  }
   if (url.startsWith('/api/users')) return json([]);
   if (url.startsWith('/api/activity')) return json([]);
   return json({});

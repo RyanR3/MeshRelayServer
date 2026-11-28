@@ -38,7 +38,7 @@ func buildClientRtpPacket(user string, opus []byte, marker bool, seq uint16, ts,
 
 func TestParseRtpAudioPacket(t *testing.T) {
 	opus := []byte{0x01, 0x02, 0x03, 0x04}
-	pkt := buildClientRtpPacket("raptor7", opus, true, 42, 320*3, 0xDEADBEEF)
+	pkt := buildClientRtpPacket("medic1", opus, true, 42, 320*3, 0xDEADBEEF)
 
 	ptype, payload, err := ParsePacket(pkt)
 	if err != nil {
@@ -51,8 +51,8 @@ func TestParseRtpAudioPacket(t *testing.T) {
 	if !ok {
 		t.Fatalf("payload is not *AudioPacket")
 	}
-	if ap.Username != "raptor7" {
-		t.Errorf("username = %q, want raptor7", ap.Username)
+	if ap.Username != "medic1" {
+		t.Errorf("username = %q, want medic1", ap.Username)
 	}
 	if string(ap.AudioData) != string(opus) {
 		t.Errorf("audio data mismatch")

@@ -351,7 +351,7 @@ function renderUnits() {
         <div class="unit-row${t.stale ? ' stale-row' : ''}" onclick="focusUnit('tak|${escAttr(t.uid)}')">
             <div class="unit-avatar tak-avatar" style="background:${takTeamColor(t.group)}">${escHtml(t.callsign.charAt(0).toUpperCase())}</div>
             <div style="min-width:0"><div class="unit-name">${escHtml(t.callsign)} <span class="tak-tag">TAK</span></div>
-                <div class="unit-meta">${escHtml([t.group, t.role].filter(Boolean).join(' · ') || 'TAK user')}${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''}</div></div>
+                <div class="unit-meta">${escHtml([t.group, t.role].filter(Boolean).join(' · ') || 'TAK user')}${t.source === 'master' ? ' · master TAK server' : ''}${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''}</div></div>
             <div class="unit-right">${t.battery ? `<span class="${t.battery <= 20 ? 'batt-low' : ''}">${t.battery}%</span> · ` : ''}${ago(Date.parse(t.at))}</div>
         </div>`).join('') : '';
     document.getElementById('units-tab-count').textContent = units.length + takUnits.length;
@@ -1466,9 +1466,9 @@ function renderMessages() {
     el.innerHTML = messages.slice(-80).map(m => {
         const who = m.dir === 'in'
             ? (m.tak_uid
-                ? `<b onclick="messageTak('${escAttr(m.agency)}', '${escAttr(m.tak_uid)}', '${escAttr(m.from)}')">${escHtml(m.from)}</b> <span class="tak-tag">TAK</span> → Dispatch`
+                ? `<b onclick="messageTak('${escAttr(m.agency)}', '${escAttr(m.tak_uid)}', '${escAttr(m.from)}', '${escAttr(m.tak_source || '')}')">${escHtml(m.from)}</b> <span class="tak-tag">TAK</span>${m.tak_source === 'master' ? ' (master)' : ''} → Dispatch`
                 : `<b onclick="messageUnit('${escAttr(m.agency)}', '${escAttr(m.from)}')">${escHtml(m.from)}</b> → Dispatch`)
-            : `${escHtml(m.from)} → <b>${escHtml(m.to)}</b>${m.queued ? ` · ${m.queued} offline (will deliver)` : ''}${m.sent === 0 && !m.queued ? ' · nobody reached' : ''}`;
+            : `${escHtml(m.from)} → <b>${escHtml(m.to)}</b>${m.queued ? ` · ${m.queued} offline (will deliver)` : ''}${!m.sent && !m.queued ? (m.tak_uid ? ` · not delivered${m.not_sent ? ' (' + escHtml(m.not_sent) + ')' : ''}` : ' · nobody reached') : ''}`;
         const unreadCls = m.dir === 'in' && !m.read && !m.readSent ? ' unread' : '';
         return `<div class="msg ${m.dir}${unreadCls}"><div class="msg-meta">${who} · ${fmtTime(m.at)}</div>${escHtml(m.text)}</div>`;
     }).join('');
@@ -1489,7 +1489,7 @@ function renderMsgTargets() {
         html += `<option value="unit|${escHtml(u.agency_id)}|${escHtml(u.username)}">${escHtml(unitLabel(u.agency_id, u.username))}</option>`;
     }
     for (const t of [...takUnits].sort((x, y) => x.callsign.localeCompare(y.callsign))) {
-        html += `<option value="tak|${escHtml(t.agency)}|${escHtml(t.uid)}">${escHtml(t.callsign)} (TAK)</option>`;
+        html += `<option value="${takTargetValue(t.agency, t.uid, t.source)}" data-callsign="${escHtml(t.callsign)}">${escHtml(t.callsign)} (${t.source === 'master' ? 'TAK, master' : 'TAK'})</option>`;
     }
     sel.innerHTML = html;
     if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
@@ -1508,13 +1508,20 @@ function messageUnit(agency, user) {
     document.getElementById('msg-text').focus();
 }
 
-function messageTak(agency, uid, callsign) {
+// A TAK user as a message target: "tak|agency|uid", or "takm|agency|uid" for
+// a user on the master TAK server (sent from the agency's contact there).
+function takTargetValue(agency, uid, source) {
+    return escHtml(`${source === 'master' ? 'takm' : 'tak'}|${agency}|${uid}`);
+}
+
+function messageTak(agency, uid, callsign, source) {
     renderMsgTargets();
     const sel = document.getElementById('msg-target');
-    const v = `tak|${agency}|${uid}`;
+    const v = `${source === 'master' ? 'takm' : 'tak'}|${agency}|${uid}`;
     if (![...sel.options].some(o => o.value === v)) {
         const o = document.createElement('option');
-        o.value = v; o.textContent = `${callsign || uid} (TAK)`;
+        o.value = v; o.textContent = `${callsign || 'TAK user'} (${source === 'master' ? 'TAK, master' : 'TAK'})`;
+        o.dataset.callsign = callsign || '';
         sel.appendChild(o);
     }
     sel.value = v;
@@ -1526,14 +1533,14 @@ function takPopup(uid) {
     if (!t) return 'No longer reporting';
     const rows = [
         [t.group, t.role].filter(Boolean).join(' · '),
-        `TAK user${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''}${t.device ? ' · ' + escHtml(t.device) : ''}`,
+        `TAK user${t.source === 'master' ? ' · via the master TAK server' : ''}${!currentAgency ? ' · ' + escHtml(agencyName(t.agency)) : ''}${t.device ? ' · ' + escHtml(t.device) : ''}`,
         `Position ${ago(Date.parse(t.at))}${t.stale ? ' (stale)' : ''}`,
         t.speed > 0.5 ? `Moving ${Math.round(t.speed * 2.237)} mph, heading ${Math.round(t.course || 0)}°` : '',
         t.battery ? `Battery ${t.battery}%` : '',
         `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)}`,
     ].filter(Boolean).map(r => `<div class="popup-row">${escHtml(r)}</div>`).join('');
     return `<div class="popup-title">${escHtml(t.callsign)} <span class="tak-tag">TAK</span></div>${rows}
-        <div class="popup-actions"><button onclick="messageTak('${escAttr(t.agency)}', '${escAttr(t.uid)}', '${escAttr(t.callsign)}')">Message</button></div>`;
+        <div class="popup-actions"><button onclick="messageTak('${escAttr(t.agency)}', '${escAttr(t.uid)}', '${escAttr(t.callsign)}', '${escAttr(t.source || '')}')">Message</button></div>`;
 }
 
 // ATAK team colors.
@@ -1545,12 +1552,17 @@ function takTeamColor(group) { return TAK_TEAMS[(group || '').toLowerCase()] || 
 function sendMessage() {
     const input = document.getElementById('msg-text');
     const text = input.value.trim();
-    const target = document.getElementById('msg-target').value;
+    const sel = document.getElementById('msg-target');
+    const target = sel.value;
     if (!text || !target || !ws || ws.readyState !== WebSocket.OPEN) return;
     const parts = target.split('|');
     const msg = { type: 'message', text };
     if (parts[0] === 'unit') msg.unit = { agency: parts[1], user: parts.slice(2).join('|') };
     else if (parts[0] === 'tak') msg.tak = { agency: parts[1], uid: parts.slice(2).join('|') };
+    else if (parts[0] === 'takm') msg.tak = { agency: parts[1], uid: parts.slice(2).join('|'), source: 'master' };
+    // The callsign the console shows: the server's history label when it
+    // does not list the TAK user (never used for routing).
+    if (msg.tak) msg.tak.callsign = (sel.selectedOptions[0]?.dataset.callsign || '').slice(0, 64);
     else if (parts[0] === 'ch') msg.to_channel = parts[1];
     else msg.to_agency = parts[1];
     ws.send(JSON.stringify(msg));

@@ -425,11 +425,11 @@ func TestGatewayLoginHearsOnlyItsOwnBridge(t *testing.T) {
 	s := newMARTestServer()
 	s.agencies["a"] = &Agency{ID: "a", Name: "A"}
 	s.lmrBridges["b1"] = &LMRBridge{ID: "b1", Name: "Pi bridge", Username: "pi", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 100, Enabled: true}
-	s.lmrBridges["b2"] = &LMRBridge{ID: "b2", Name: "Pixel Bridge", Username: "pixelgw", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 101, Enabled: true}
+	s.lmrBridges["b2"] = &LMRBridge{ID: "b2", Name: "Phone Bridge", Username: "phonegw", OwnerAgencyID: "a", Agencies: []string{"a"}, Channel: 101, Enabled: true}
 	// The agency also has a Zello bridge on two live channels and a mutual-aid
 	// patch — a gateway must never be told about those (it would adopt them).
 	s.zelloBridges["z"] = &ZelloBridge{ID: "z", Enabled: true, AgencyID: "a", announced: true,
-		Mappings: []ZelloMapping{{ZelloChannel: "SC911", MeshChannel: 150}, {ZelloChannel: "SO-NEW", MeshChannel: 151}}}
+		Mappings: []ZelloMapping{{ZelloChannel: "TAC 1", MeshChannel: 150}, {ZelloChannel: "TAC 2", MeshChannel: 151}}}
 	s.mutualAidLinks["m"] = &MutualAidLink{ID: "m", Active: true, Channel: 98, ChannelName: "Rh test", Agencies: []string{"a", "b"}}
 
 	channels := func(username string) []int {
@@ -439,8 +439,8 @@ func TestGatewayLoginHearsOnlyItsOwnBridge(t *testing.T) {
 		}
 		return out
 	}
-	if got := channels("pixelgw"); len(got) != 1 || got[0] != 101 {
-		t.Fatalf("gateway pixelgw should hear only ch 101, got %v", got)
+	if got := channels("phonegw"); len(got) != 1 || got[0] != 101 {
+		t.Fatalf("gateway phonegw should hear only ch 101, got %v", got)
 	}
 	if got := channels("pi"); len(got) != 1 || got[0] != 100 {
 		t.Fatalf("gateway pi should hear only ch 100, got %v", got)

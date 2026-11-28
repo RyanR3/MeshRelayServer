@@ -56,6 +56,8 @@ type Client struct {
 	DispatchTxAgency string
 	DispatchMonitor  map[string]bool
 	DispatchAllCall  bool // transmit to every talkgroup of the TX agency
+	// SentText: the unit has sent dispatch a text (0x30), so it receives them.
+	SentText bool
 }
 
 type Channel struct {
@@ -127,6 +129,12 @@ type Agency struct {
 
 	// NoRecording stops recording this agency's radio traffic (recorder.go).
 	NoRecording bool `json:"no_recording,omitempty"`
+
+	// ShareMasterTAK opts this agency into the server-wide master TAK
+	// connection (tak_master.go): its emergencies, LMR channel markers and
+	// console messages reach the master's TAK users, and the master's TAK
+	// users and alerts show on its consoles. Off by default.
+	ShareMasterTAK bool `json:"share_master_tak,omitempty"`
 	// Transcribe turns this agency's recordings into text (transcriber.go);
 	// TranscribeWords are names and terms given to the model as a hint.
 	Transcribe      bool   `json:"transcribe,omitempty"`
@@ -317,7 +325,7 @@ type Server struct {
 	opsOnce                sync.Once
 	recorder               *Recorder    // radio traffic recording (recorder.go)
 	transcriber            *Transcriber // speech-to-text of recordings (transcriber.go)
-	takMgr                 *takManager  // TAK Server connectors per agency (tak.go)
+	takMgr                 *takManager  // TAK Server connectors per agency + the master (tak.go, tak_master.go)
 	takOnce                sync.Once
 	lmrPub                 *lmrMarkerPublisher // LMR bridge markers on TAK (lmr_atak.go)
 	lmrPubOnce             sync.Once
@@ -968,6 +976,7 @@ func (s *Server) StartPTT() error {
 		log.Printf("Transcription available (model %q)", m.Name)
 	}
 	s.loadTakConnections()
+	s.loadTakMaster()
 	s.startLMRMarkers()
 
 	// Start heartbeat checker
@@ -1342,7 +1351,18 @@ func (s *Server) relayAudioData(client *Client, packet *AudioPacket, audioData [
 			if mc == nil || sentTo[mc.Addr.String()] || s.gatewayPaused(mc) {
 				continue
 			}
-			s.sendPacket(audioData, mc.Addr)
+			// A member joined to the group channel gets the frame as
+			// before. With adhoc_group_audio_tag on, one that is on
+			// another channel gets it tagged with the group's channel,
+			// like a monitor copy: untagged, it plays as if it were on
+			// the member's selected channel. Off (default), every member
+			// gets it untagged, because current apps drop tagged audio
+			// for a channel they are not listening to.
+			if s.config.AdhocGroupAudioTag && mc.Channel != client.Channel {
+				s.sendPacket(monitorAudioData(), mc.Addr)
+			} else {
+				s.sendPacket(audioData, mc.Addr)
+			}
 			sentTo[mc.Addr.String()] = true
 			relayCount++
 		}
@@ -2260,7 +2280,13 @@ func (s *Server) GetStats(agencyFilter string) map[string]interface{} {
 // GetClients returns list of connected clients, optionally filtered by agency.
 func (s *Server) GetClients(agencyFilter string) []map[string]interface{} {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	type known struct {
+		entry        map[string]interface{}
+		agency, user string
+		kind         string
+		loc          *UnitLocation
+	}
+	var withTak []known // units whose TAK entry their MeshRelay entry stands for
 
 	clients := make([]map[string]interface{}, 0, len(s.clients))
 	for _, client := range s.clients {
@@ -2295,8 +2321,27 @@ func (s *Server) GetClients(agencyFilter string) []map[string]interface{} {
 		if st := s.statusFor(client.AgencyID, client.Username); st != nil {
 			clients[len(clients)-1]["status"] = st
 		}
+		if kind := s.clientKindLocked(client); kind != clientUnknown {
+			withTak = append(withTak, known{clients[len(clients)-1], client.AgencyID, client.Username, kind, client.Loc})
+		}
 	}
+	s.mu.RUnlock()
 
+	// One entry per person: the TAK unit of the same callsign is not listed
+	// (takUnitsFor); its uid and, when fresher, its position go here.
+	now := time.Now()
+	for _, k := range withTak {
+		u, source := s.takUnitOf(k.agency, k.user, now, false)
+		if u == nil {
+			continue
+		}
+		k.entry["tak"] = map[string]interface{}{"uid": u.UID, "source": source, "callsign": u.Callsign}
+		if now.Before(u.Stale) && (k.loc == nil || u.At.After(k.loc.At)) {
+			k.entry["location"] = map[string]interface{}{
+				"lat": u.Lat, "lon": u.Lon, "at": u.At.Format(time.RFC3339), "source": "tak",
+			}
+		}
+	}
 	return clients
 }
 
@@ -2522,7 +2567,7 @@ func (s *Server) lastChannelFor(username string, addr *net.UDPAddr) int {
 // client that never noticed the restart (UDP: its heartbeats were simply
 // answered again) was auto-registered on channel 0 and its audio went nowhere
 // — the Pi bridge carried radio traffic to channel 0 for ten minutes after
-// the v4.2.10 update (scny, 2026-10-22 21:16 UTC).
+// the v4.2.10 update (seen in the field, 2026-10-22).
 
 func (s *Server) lastChannelsFile() string {
 	return "last_channels.json"
@@ -4201,7 +4246,7 @@ func (s *Server) ownLMRBridge(c *Client) *LMRBridge {
 // whose radio just started sending audio. A radio cannot press PTT the way a
 // phone does: the gateway streams whatever the radio receives and never sends
 // a FLOOR_REQUEST, so with floor control on, every radio transmission was
-// dropped as "not the holder" (2026-10-22, scny). The request goes through the
+// dropped as "not the holder" (seen in the field, 2026-10-22). The request goes through the
 // normal arbiter — an idle channel grants it, a busy one applies the agency's
 // policy (busy: dropped, queue: recorded and replayed) — and the dead-man
 // timer releases it when the radio goes quiet. Throttled to one request per

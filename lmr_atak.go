@@ -7,7 +7,9 @@ package main
 //
 // An administrator gives an LMR bridge a location and switches on "Show in
 // ATAK". The server then publishes one CoT marker for the bridge's channel on
-// the TAK connection (tak.go) of every agency in the bridge. ATAK users with
+// the TAK connection (tak.go) of every agency in the bridge, and on the master
+// TAK connection (tak_master.go) when an agency in the bridge shares with it
+// and its own connection is not to that same server. ATAK users with
 // the MeshRelay plugin tap it to listen through their own MeshRelay login.
 //
 // The marker carries the channel number and name, nothing else: no stream
@@ -133,12 +135,17 @@ func lmrMarkerCoT(m lmrMarker, server string, now time.Time, stale time.Duration
 // lmrMarkerDeleteCoT is ATAK's own delete message (t-x-d-d): ATAK removes the
 // map item named by the link uid. tak.go handles incoming deletes the same way.
 func lmrMarkerDeleteCoT(bridgeID string, now time.Time) string {
+	return cotDeleteCoT(lmrMarkerUID(bridgeID), now)
+}
+
+// cotDeleteCoT: the t-x-d-d delete for the map item uid.
+func cotDeleteCoT(uid string, now time.Time) string {
 	ts := cotStamp(now)
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
 		`<event version="2.0" uid="%s" type="t-x-d-d" how="h-g-i-g-o" time="%s" start="%s" stale="%s">`+
 		`<point lat="0" lon="0" hae="9999999.0" ce="9999999.0" le="9999999.0"/>`+
 		`<detail><link uid="%s" relation="none" type="none"/><__forcedelete/></detail></event>`,
-		newUUID(), ts, ts, cotStamp(now.Add(20*time.Second)), xmlEsc(lmrMarkerUID(bridgeID)))
+		newUUID(), ts, ts, cotStamp(now.Add(20*time.Second)), xmlEsc(uid))
 }
 
 // lmrMarkerWithdrawCoT: the marker once more with stale = now (so the TAK
@@ -214,9 +221,15 @@ func (p *lmrMarkerPublisher) run(stop <-chan struct{}) {
 	}
 }
 
-// takDeliver sends on the agency's TAK connection if it is connected.
+// takDeliver sends on the agency's TAK connection (or, for takMasterTarget,
+// on the master) if it is connected.
 func (s *Server) takDeliver(agency, cot string) bool {
-	tc := s.takConnFor(agency) // takes and releases the manager lock
+	var tc *takConn
+	if agency == takMasterTarget {
+		tc = s.takMasterConn()
+	} else {
+		tc = s.takConnFor(agency) // takes and releases the manager lock
+	}
 	if tc == nil {
 		return false
 	}
@@ -230,8 +243,13 @@ func (s *Server) takDeliver(agency, cot string) bool {
 }
 
 // lmrDesiredMarkers snapshots which markers belong on which agency's TAK
-// connection. Takes s.mu for reading and returns plain values.
+// connection (and on the master, under takMasterTarget). Takes s.mu for
+// reading and returns plain values.
 func (s *Server) lmrDesiredMarkers() map[string]map[string]lmrMarker {
+	viaMaster := map[string]bool{}
+	for _, a := range s.takMasterOutboundAgencies() { // before s.mu: it takes the TAK locks
+		viaMaster[a] = true
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := map[string]map[string]lmrMarker{}
@@ -245,9 +263,23 @@ func (s *Server) lmrDesiredMarkers() map[string]map[string]lmrMarker {
 				out[a] = map[string]lmrMarker{}
 			}
 			out[a][b.ID] = m
+			if viaMaster[a] {
+				if out[takMasterTarget] == nil {
+					out[takMasterTarget] = map[string]lmrMarker{}
+				}
+				out[takMasterTarget][b.ID] = m
+			}
 		}
 	}
 	return out
+}
+
+// lmrTargetName names a publisher target in the log.
+func lmrTargetName(agency string) string {
+	if agency == takMasterTarget {
+		return "the master TAK server"
+	}
+	return "agency " + agency
 }
 
 // lmrServerID is the value of the marker's server attribute: the server's
@@ -292,7 +324,7 @@ func (p *lmrMarkerPublisher) pass() {
 			case wanted:
 				delete(ws, id) // wanted again: the send below replaces it
 			case p.deliver(agency, lmrMarkerWithdrawCoT(w.m, server, now)):
-				log.Printf("LMR: ATAK marker for %q (ch %d) withdrawn from agency %s", w.m.Name, w.m.Channel, agency)
+				log.Printf("LMR: ATAK marker for %q (ch %d) withdrawn from %s", w.m.Name, w.m.Channel, lmrTargetName(agency))
 				delete(ws, id)
 			case now.Sub(w.since) > lmrWithdrawKeep:
 				delete(ws, id)
@@ -312,7 +344,7 @@ func (p *lmrMarkerPublisher) pass() {
 				p.shown[agency] = map[string]lmrMarker{}
 			}
 			if prev, ok := p.shown[agency][id]; !ok || prev != m {
-				log.Printf("LMR: ATAK marker for %q (ch %d) published to agency %s", m.Name, m.Channel, agency)
+				log.Printf("LMR: ATAK marker for %q (ch %d) published to %s", m.Name, m.Channel, lmrTargetName(agency))
 			}
 			p.shown[agency][id] = m
 		}

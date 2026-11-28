@@ -336,7 +336,8 @@ func validFreeText(v string, maxBytes int) bool {
 }
 
 // checkImportAgency validates an agency from a file and returns the copy to
-// store (its LMR bridge link is cleared: bridges are not moved).
+// store (its LMR bridge link and its master TAK sharing switch are cleared:
+// bridges and TAK connections are not moved).
 func checkImportAgency(a *Agency) (*Agency, error) {
 	if a == nil {
 		return nil, errors.New("empty record")
@@ -376,6 +377,9 @@ func checkImportAgency(a *Agency) (*Agency, error) {
 		return nil, errors.New("too many trusted agencies")
 	}
 	cp := *a
+	// Sharing with the master TAK server is this server's setting, like the
+	// TAK connections (not moved): an imported agency starts with it off.
+	cp.ShareMasterTAK = false
 	cp.AutoAcceptFrom = nil
 	for _, id := range a.AutoAcceptFrom {
 		if validateAgencyID(id) == nil {

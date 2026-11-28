@@ -5,7 +5,7 @@ Follow these steps to get your PTT Server running on Ubuntu.
 ## ☐ Step 1: Copy to Server
 
 ```bash
-scp -r /Users/ryanfridlich/PTTServer user@YOUR_SERVER_IP:/home/user/
+scp -r /path/to/PTTServer user@YOUR_SERVER_IP:/home/user/
 ```
 
 ## ☐ Step 2: SSH into Server

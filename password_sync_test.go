@@ -16,7 +16,7 @@ func newPwTestServer() *Server {
 	return &Server{
 		users:     map[string]*UserAccount{},
 		webAdmins: map[string]*WebAdmin{},
-		agencies:  map[string]*Agency{"dev1": {ID: "dev1", Name: "Dev1"}},
+		agencies:  map[string]*Agency{"alpha": {ID: "alpha", Name: "Alpha"}},
 		config:    &Config{UsersFile: "/dev/null", WebAdminsFile: "/dev/null"},
 	}
 }
@@ -26,20 +26,20 @@ func newPwTestServer() *Server {
 // after a restart, which reads as the password "reverting".
 func TestUpdatePasswordSyncsBothStores(t *testing.T) {
 	s := newPwTestServer()
-	key := userKey("dev1", "Dev3")
-	s.users[key] = &UserAccount{Username: "Dev3", AgencyID: "dev1", Role: "admin",
+	key := userKey("alpha", "Unit3")
+	s.users[key] = &UserAccount{Username: "Unit3", AgencyID: "alpha", Role: "admin",
 		PasswordHash: hashPassword("old")}
-	s.webAdmins[key] = &WebAdmin{Username: "Dev3", AgencyID: "dev1",
+	s.webAdmins[key] = &WebAdmin{Username: "Unit3", AgencyID: "alpha",
 		Role: "agency_admin", PasswordHash: hashPassword("old")}
 
-	if err := s.UpdatePassword("dev1", "Dev3", "Dev3"); err != nil {
+	if err := s.UpdatePassword("alpha", "Unit3", "Unit3"); err != nil {
 		t.Fatalf("UpdatePassword: %v", err)
 	}
 
-	if got := s.users[key].PasswordHash; got != hashPassword("Dev3") {
+	if got := s.users[key].PasswordHash; got != hashPassword("Unit3") {
 		t.Error("PTT account hash was not updated")
 	}
-	if !checkPassword("Dev3", s.webAdmins[key].PasswordHash) {
+	if !checkPassword("Unit3", s.webAdmins[key].PasswordHash) {
 		t.Error("dashboard account does not accept the new password")
 	}
 	if checkPassword("old", s.webAdmins[key].PasswordHash) {
@@ -51,11 +51,11 @@ func TestUpdatePasswordSyncsBothStores(t *testing.T) {
 // the old code returned "user not found" and changed nothing.
 func TestUpdatePasswordWorksForDashboardOnlyAccount(t *testing.T) {
 	s := newPwTestServer()
-	key := userKey("dev1", "WebOnly")
-	s.webAdmins[key] = &WebAdmin{Username: "WebOnly", AgencyID: "dev1",
+	key := userKey("alpha", "WebOnly")
+	s.webAdmins[key] = &WebAdmin{Username: "WebOnly", AgencyID: "alpha",
 		Role: "agency_admin", PasswordHash: hashPassword("old")}
 
-	if err := s.UpdatePassword("dev1", "WebOnly", "fresh"); err != nil {
+	if err := s.UpdatePassword("alpha", "WebOnly", "fresh"); err != nil {
 		t.Fatalf("dashboard-only account should be updatable: %v", err)
 	}
 	if !checkPassword("fresh", s.webAdmins[key].PasswordHash) {
@@ -66,11 +66,11 @@ func TestUpdatePasswordWorksForDashboardOnlyAccount(t *testing.T) {
 // A PTT-only user (no dashboard login) keeps working as before.
 func TestUpdatePasswordWorksForPttOnlyUser(t *testing.T) {
 	s := newPwTestServer()
-	key := userKey("dev1", "Responder")
-	s.users[key] = &UserAccount{Username: "Responder", AgencyID: "dev1",
+	key := userKey("alpha", "Responder")
+	s.users[key] = &UserAccount{Username: "Responder", AgencyID: "alpha",
 		Role: "user", PasswordHash: hashPassword("old")}
 
-	if err := s.UpdatePassword("dev1", "Responder", "fresh"); err != nil {
+	if err := s.UpdatePassword("alpha", "Responder", "fresh"); err != nil {
 		t.Fatalf("PTT-only user should be updatable: %v", err)
 	}
 	if s.users[key].PasswordHash != hashPassword("fresh") {
@@ -80,7 +80,7 @@ func TestUpdatePasswordWorksForPttOnlyUser(t *testing.T) {
 
 func TestUpdatePasswordRejectsUnknownAccount(t *testing.T) {
 	s := newPwTestServer()
-	if err := s.UpdatePassword("dev1", "ghost", "x"); err == nil {
+	if err := s.UpdatePassword("alpha", "ghost", "x"); err == nil {
 		t.Fatal("expected an error for an account in neither store")
 	}
 }
@@ -91,13 +91,13 @@ func TestUpdatePasswordRejectsUnknownAccount(t *testing.T) {
 // until a super admin reset the password.
 func TestUpdateUserRoleKeepsDashboardPassword(t *testing.T) {
 	s := newPwTestServer()
-	key := userKey("dev1", "Dev3")
-	s.users[key] = &UserAccount{Username: "Dev3", AgencyID: "dev1", Role: "admin",
+	key := userKey("alpha", "Unit3")
+	s.users[key] = &UserAccount{Username: "Unit3", AgencyID: "alpha", Role: "admin",
 		PasswordHash: hashPassword("enrollment-token-nobody-knows")}
 	bcryptHash, _ := hashPasswordSecure("dashboard-pass")
-	s.webAdmins[key] = &WebAdmin{Username: "Dev3", AgencyID: "dev1", Role: "agency_admin", PasswordHash: bcryptHash}
+	s.webAdmins[key] = &WebAdmin{Username: "Unit3", AgencyID: "alpha", Role: "agency_admin", PasswordHash: bcryptHash}
 
-	if err := s.UpdateUserRole("dev1", "Dev3", "admin"); err != nil {
+	if err := s.UpdateUserRole("alpha", "Unit3", "admin"); err != nil {
 		t.Fatal(err)
 	}
 	if !checkPassword("dashboard-pass", s.webAdmins[key].PasswordHash) {
@@ -105,7 +105,7 @@ func TestUpdateUserRoleKeepsDashboardPassword(t *testing.T) {
 	}
 	// Demote and re-promote: the entry is recreated from the PTT hash (all we
 	// have), which is the documented behaviour — but the demotion must remove it.
-	if err := s.UpdateUserRole("dev1", "Dev3", "user"); err != nil {
+	if err := s.UpdateUserRole("alpha", "Unit3", "user"); err != nil {
 		t.Fatal(err)
 	}
 	if _, still := s.webAdmins[key]; still {

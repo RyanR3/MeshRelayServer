@@ -39,6 +39,7 @@ type fakeTAK struct {
 	mu       sync.Mutex
 	conn     net.Conn
 	received strings.Builder
+	streams  []*strings.Builder // what each accepted connection carried, in order
 	connCh   chan struct{}
 }
 
@@ -69,7 +70,7 @@ func startFakeTAK(t *testing.T) *fakeTAK {
 			w.WriteHeader(401)
 			return
 		}
-		io.WriteString(w, `<certificateConfig><nameEntries><nameEntry name="O" value="TAK Test"/><nameEntry name="OU" value="Sullivan"/></nameEntries></certificateConfig>`)
+		io.WriteString(w, `<certificateConfig><nameEntries><nameEntry name="O" value="TAK Test"/><nameEntry name="OU" value="Alpha"/></nameEntries></certificateConfig>`)
 	})
 	mux.HandleFunc("/Marti/api/tls/signClient/v2", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(r) {
@@ -159,8 +160,10 @@ func startFakeTAK(t *testing.T) *fakeTAK {
 			if err != nil {
 				return
 			}
+			own := &strings.Builder{}
 			f.mu.Lock()
 			f.conn = c
+			f.streams = append(f.streams, own)
 			f.mu.Unlock()
 			f.connCh <- struct{}{}
 			go func() {
@@ -171,6 +174,7 @@ func startFakeTAK(t *testing.T) *fakeTAK {
 					if n > 0 {
 						f.mu.Lock()
 						f.received.Write(buf[:n])
+						own.Write(buf[:n])
 						f.mu.Unlock()
 					}
 					if err != nil {
@@ -196,6 +200,16 @@ func (f *fakeTAK) got() string {
 	return f.received.String()
 }
 
+// gotOn is what the i-th accepted connection carried ("" if there is none yet).
+func (f *fakeTAK) gotOn(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.streams) {
+		return ""
+	}
+	return f.streams[i].String()
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	for i := 0; i < 100; i++ {
@@ -212,6 +226,7 @@ func TestTakConnectorEndToEnd(t *testing.T) {
 	dc.Text = make(chan []byte, 64)
 	s.agencies = map[string]*Agency{"ag": {ID: "ag", Name: "Agency"}}
 	s.clients[userKey("ag", "alice")].Loc = &UnitLocation{Lat: 41.65, Lon: -74.69}
+	signedInAs(s, s.clients[userKey("ag", "alice")], "android 4.0.4") // the app: one entry
 	f := startFakeTAK(t)
 
 	enrollPort, _ := strconv.Atoi(strings.Split(f.enroll.Listener.Addr().String(), ":")[1])
@@ -256,11 +271,11 @@ func TestTakConnectorEndToEnd(t *testing.T) {
 	}
 
 	// Console -> TAK user.
-	s.consoleSendTakMessage(s.clients[userKey("ag", "dispatcher")], "ag", "ANDROID-abc", "Water en route")
+	s.consoleSendTakMessage(s.clients[userKey("ag", "dispatcher")], "ag", "ANDROID-abc", "Water en route", "", "")
 	waitFor(t, "chat out", func() bool {
 		g := f.got()
 		return strings.Contains(g, `type="b-t-f"`) && strings.Contains(g, "Water en route") && strings.Contains(g, `uid1="ANDROID-abc"`) &&
-			!strings.Contains(g, "<marti>") && regexp.MustCompile(`messageId="[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"`).MatchString(g)
+			strings.Contains(g, `<marti><dest uid="ANDROID-abc"/></marti>`) && regexp.MustCompile(`messageId="[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"`).MatchString(g)
 	})
 
 	// TAK 911 -> console emergency; MeshRelay emergency -> TAK.
@@ -389,7 +404,7 @@ func TestTakEnrollmentIsPinnedAndNotInternal(t *testing.T) {
 			t.Errorf("host %q accepted", bad)
 		}
 	}
-	if takHostAllowed("tak.county.example", 8089, 8446, 8443) != nil || takHostAllowed("192.168.5.120", 8089) != nil {
+	if takHostAllowed("tak.county.example", 8089, 8446, 8443) != nil || takHostAllowed("192.0.2.10", 8089) != nil {
 		t.Error("an ordinary host was refused")
 	}
 	if takHostAllowed("tak.example", 0) == nil || takHostAllowed("tak.example", 70000) == nil {

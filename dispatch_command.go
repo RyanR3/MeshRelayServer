@@ -279,19 +279,22 @@ func (s *Server) noteDispatchTalk(agencyID string, channel int, user string) {
 }
 
 // notifyDispatchEmergency puts an emergency (set or cleared) on every console
-// of the agency, with the unit's last position when known.
+// of the agency, with the unit's position when known (unitPosition: the
+// alert's own, a location report, or the unit's TAK position).
 func (s *Server) notifyDispatchEmergency(agencyID string, channel int, user string, active bool) {
 	msg := map[string]interface{}{
 		"type": "emergency", "agency": agencyID, "channel": channel, "user": user, "active": active,
 	}
-	s.mu.RLock()
-	if c := s.clients[userKey(agencyID, user)]; c != nil && c.Loc != nil {
-		msg["lat"], msg["lon"] = c.Loc.Lat, c.Loc.Lon
+	if lat, lon, ok := s.unitPosition(agencyID, user); ok {
+		msg["lat"], msg["lon"] = lat, lon
 	}
-	s.mu.RUnlock()
 	log.Printf("Dispatch: emergency %v by %q [%s] ch %d", active, user, agencyID, channel)
 	s.sendToConsoles(agencyID, msg)
-	s.takEmergency(agencyID, user, active) // and into the agency's TAK server
+	why := "raise"
+	if !active {
+		why = "cleared"
+	}
+	s.takEmergency(agencyID, user, active, why) // and into the agency's TAK server
 }
 
 // Active emergencies, so a console that opens later still sees them.

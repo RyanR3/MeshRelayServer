@@ -339,7 +339,7 @@ func headerValue(msg, name string) string {
 }
 
 // sipUser extracts the user part from a From/To header like
-// "<sip:raptor7@domain>;tag=..." -> "raptor7".
+// "<sip:medic1@domain>;tag=..." -> "medic1".
 func sipUser(header string) string {
 	s := header
 	if i := strings.Index(s, "sip:"); i >= 0 {

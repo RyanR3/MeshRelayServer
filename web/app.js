@@ -150,7 +150,8 @@ function initFloorControlPanel() {
             fetchRecordingSetting();
             fetchTranscription();
             fetchTak();
-        }).catch(() => { fetchFloorControl(); fetchGuestInvites(); fetchRecordingSetting(); fetchTak(); });
+            fetchTakMaster();
+        }).catch(() => { fetchFloorControl(); fetchGuestInvites(); fetchRecordingSetting(); fetchTak(); fetchTakMaster(); });
     } else {
         fetchFloorControl();
         fetchGuestInvites();
@@ -202,8 +203,228 @@ function fetchTak() {
             document.getElementById('tak-enabled').checked = d.configured ? !!d.enabled : true;
             document.getElementById('tak-password').placeholder = d.enrolled ? 'only to re-enroll' : 'needed to enroll';
             renderTakState(d);
+            renderTakShare(d);
         })
         .catch(err => showStatus('tak-status-msg', 'Failed to load: ' + err.message, 'error'));
+}
+
+// The agency's "Share with the master TAK server" switch, the master's
+// status, and the same-server note. No master set up: the switch is hidden
+// (unless it is still on, so it can be switched off).
+const TAK_MASTER_STATES = { connected: 'connected', connecting: 'connecting…', disabled: 'switched off', error: 'not connected (retrying)' };
+let takShareLocked = false;
+function renderTakShare(d) {
+    const master = d.master || {};
+    const sw = document.getElementById('tak-share-switch');
+    if (!sw) return;
+    const box = document.getElementById('tak-share-master');
+    box.checked = !!d.share_master;
+    // The home agency always takes part: shown on, cannot be switched off.
+    takShareLocked = !!d.master_home;
+    box.disabled = takShareLocked;
+    sw.title = d.master_home ? 'The home agency always shares with the master TAK server' : '';
+    sw.style.display = (master.configured || d.share_master) ? '' : 'none';
+    document.getElementById('tak-share-home').style.display = d.master_home ? '' : 'none';
+    const routing = document.getElementById('tak-share-routing');
+    if (master.configured && master.home_agency_name) {
+        routing.textContent = 'Replies from TAK users come back to the agency that wrote to them. Messages from TAK users nobody has written to go to '
+            + master.home_agency_name + '\'s console.';
+        routing.style.display = '';
+    } else {
+        routing.style.display = 'none';
+    }
+    const state = document.getElementById('tak-share-state');
+    state.textContent = master.configured
+        ? 'Master TAK server: ' + (TAK_MASTER_STATES[master.status] || master.status || 'unknown')
+        : 'Master TAK server: not set up';
+    state.style.color = master.status === 'connected' ? '#3FB950' : master.status === 'error' ? '#F85149' : '';
+    document.getElementById('tak-share-same').style.display = d.same_server_as_master ? '' : 'none';
+}
+
+function saveTakShareMaster() {
+    const box = document.getElementById('tak-share-master');
+    const body = { share: box.checked };
+    const agency = takAgencyId();
+    if (agency) body.agency_id = agency;
+    box.disabled = true;
+    fetch('/api/my-agency/tak/share-master', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('tak-status-msg', d.error, 'error'); box.checked = !body.share; return; }
+            renderTakShare(d);
+            showStatus('tak-status-msg', body.share ? 'Sharing with the master TAK server' : 'No longer sharing with the master TAK server', 'success');
+            if (currentRole === 'super_admin') fetchTakMaster();
+        })
+        .catch(err => { box.checked = !body.share; showStatus('tak-status-msg', 'Failed: ' + err.message, 'error'); })
+        .finally(() => { box.disabled = takShareLocked; });
+}
+
+// --- Master TAK server (Settings, super admin) ---------------------------------
+
+function renderTakMasterState(d) {
+    const el = document.getElementById('takm-state');
+    if (!el) return;
+    if (!d.configured) { el.textContent = 'Not configured'; el.style.color = ''; return; }
+    const exp = d.cert_expires ? ` · certificate valid until ${new Date(d.cert_expires).toLocaleDateString()}` : '';
+    const states = {
+        connected: `Connected — ${d.tak_users || 0} TAK user${d.tak_users === 1 ? '' : 's'} seen`,
+        connecting: 'Connecting…', disabled: 'Off', error: `Not connected: ${d.error || 'error'} (retrying)`,
+    };
+    el.textContent = (states[d.status] || d.status) + exp;
+    el.style.color = d.status === 'connected' ? '#3FB950' : d.status === 'error' ? '#F85149' : '';
+}
+
+function renderTakMasterSharing(d) {
+    const el = document.getElementById('takm-sharing');
+    if (!el) return;
+    const list = d.sharing || [];
+    if (!list.length) { el.textContent = 'None. An agency admin switches sharing on in the agency\'s TAK settings.'; return; }
+    el.innerHTML = list.map(a => `<div>${escapeHtml(a.name || a.agency_id)}${a.home
+        ? ' <span style="color:#8B949E;">· home agency (always takes part)</span>' : ''}${a.same_server
+        ? ' <span style="color:#8B949E;">· own TAK connection goes to this same server (sent once)</span>' : ''}</div>`).join('');
+}
+
+// The home agency selector: the agencies, with the one in effect selected.
+function renderTakMasterHome(d) {
+    const row = document.getElementById('takm-home-row');
+    if (!row) return;
+    row.style.display = d.configured ? '' : 'none';
+    const sel = document.getElementById('takm-home');
+    const eff = d.effective_home_agency || '';
+    sel.innerHTML = (d.agencies || []).map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name || a.id)}</option>`).join('');
+    sel.value = eff;
+    const name = ((d.agencies || []).find(a => a.id === eff) || {}).name || eff;
+    document.getElementById('takm-home-state').textContent = eff
+        ? 'In effect: ' + name + (d.home_agency_how === 'fallback' ? ' (not chosen yet: the default agency, or the first one)' : '')
+        : 'No agencies';
+}
+
+function saveTakMasterHome() {
+    const sel = document.getElementById('takm-home');
+    sel.disabled = true;
+    fetch('/api/tak-master/home', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agency_id: sel.value }) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('takm-status-msg', d.error, 'error'); fetchTakMaster(); return; }
+            renderTakMasterHome(d);
+            renderTakMasterSharing(d);
+            showStatus('takm-status-msg', 'Home agency saved', 'success');
+            fetchTak();
+        })
+        .catch(err => showStatus('takm-status-msg', 'Failed: ' + err.message, 'error'))
+        .finally(() => { sel.disabled = false; });
+}
+
+function fetchTakMaster() {
+    const host = document.getElementById('takm-host');
+    if (!host || currentRole !== 'super_admin') return;
+    fetch('/api/tak-master')
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('takm-status-msg', d.error, 'error'); return; }
+            host.value = d.host || '';
+            document.getElementById('takm-stream-port').value = d.stream_port || 8089;
+            document.getElementById('takm-enroll-port').value = d.enroll_port || 8446;
+            document.getElementById('takm-api-port').value = d.api_port || 8443;
+            document.getElementById('takm-username').value = d.username || '';
+            document.getElementById('takm-password').value = '';
+            document.getElementById('takm-password').placeholder = d.enrolled ? 'only to re-enroll' : 'needed to enroll';
+            document.getElementById('takm-callsign').value = d.callsign || 'MeshRelay';
+            document.getElementById('takm-enabled').checked = d.configured ? !!d.enabled : true;
+            const gs = document.getElementById('takm-groups-section');
+            gs.style.display = d.enrolled ? 'block' : 'none';
+            if (d.enrolled && d.status === 'connected') loadTakMasterGroups();
+            else if (d.enrolled) document.getElementById('takm-groups-list').innerHTML =
+                '<span style="color:#8B949E;font-size:12px;">Groups load once the connection is up.</span>';
+            renderTakMasterState(d);
+            renderTakMasterSharing(d);
+            renderTakMasterHome(d);
+        })
+        .catch(err => showStatus('takm-status-msg', 'Failed to load: ' + err.message, 'error'));
+}
+
+function saveTakMaster(trustFingerprint) {
+    const body = {
+        host: document.getElementById('takm-host').value.trim(),
+        stream_port: parseInt(document.getElementById('takm-stream-port').value, 10) || 8089,
+        enroll_port: parseInt(document.getElementById('takm-enroll-port').value, 10) || 8446,
+        api_port: parseInt(document.getElementById('takm-api-port').value, 10) || 8443,
+        username: document.getElementById('takm-username').value.trim(),
+        password: document.getElementById('takm-password').value,
+        callsign: document.getElementById('takm-callsign').value.trim(),
+        enabled: document.getElementById('takm-enabled').checked,
+    };
+    if (trustFingerprint) body.trust_fingerprint = trustFingerprint;
+    const btn = document.getElementById('takm-save-btn');
+    btn.disabled = true; btn.textContent = body.password ? 'Enrolling…' : 'Saving…';
+    fetch('/api/tak-master', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.needs_trust && d.certificate) {
+                // Nothing has been sent yet: confirm the exact certificate,
+                // then the password goes only to it (as for an agency link).
+                const c = d.certificate;
+                const fp = (c.fingerprint || '').toUpperCase().match(/.{1,2}/g).join(':');
+                const okToTrust = confirm('Confirm the TAK server\'s certificate before your password is sent.\n\n'
+                    + 'Server: ' + body.host + ':' + body.enroll_port + '\n'
+                    + 'Issued to: ' + c.subject + '\nIssued by: ' + c.issuer + '\nExpires: ' + new Date(c.not_after).toLocaleDateString() + '\n\n'
+                    + 'SHA-256 fingerprint:\n' + fp + '\n\n'
+                    + 'If you can, compare the fingerprint with the TAK server administrator. Continue only if this is your TAK server.');
+                if (okToTrust) { saveTakMaster(c.fingerprint); } else { showStatus('takm-status-msg', 'Not connected: certificate not confirmed', 'error'); }
+                return;
+            }
+            if (d.error) { showStatus('takm-status-msg', d.error, 'error'); return; }
+            document.getElementById('takm-password').value = '';
+            renderTakMasterState(d);
+            renderTakMasterSharing(d);
+            renderTakMasterHome(d);
+            showStatus('takm-status-msg', d.status === 'connected' ? 'Connected to the master TAK Server' : 'Saved', d.status === 'error' ? 'error' : 'success');
+            setTimeout(() => { fetchTakMaster(); fetchTak(); }, 4000);
+        })
+        .catch(err => showStatus('takm-status-msg', 'Failed: ' + err.message, 'error'))
+        .finally(() => { btn.disabled = false; btn.textContent = 'Save & Connect'; });
+}
+
+function removeTakMaster() {
+    if (!confirm('Disconnect from the master TAK Server and forget its certificate? Markers and alerts it carries are withdrawn.')) return;
+    fetch('/api/tak-master', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove: true }) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('takm-status-msg', d.error, 'error'); return; }
+            fetchTakMaster(); fetchTak();
+            showStatus('takm-status-msg', 'Master TAK connection removed', 'success');
+        })
+        .catch(err => showStatus('takm-status-msg', 'Failed: ' + err.message, 'error'));
+}
+
+function loadTakMasterGroups() {
+    const list = document.getElementById('takm-groups-list');
+    list.innerHTML = '<span style="color:#8B949E;font-size:12px;">Loading…</span>';
+    fetch('/api/tak-master/groups')
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(d.error)}</span>`; return; }
+            const groups = d.groups || [];
+            if (!groups.length) { list.innerHTML = '<span style="color:#8B949E;font-size:12px;">This TAK account is not in any groups.</span>'; return; }
+            list.innerHTML = groups.map(g => `<label><input type="checkbox" value="${escapeHtml(g.name)}" ${g.active ? 'checked' : ''}>
+                <span>${escapeHtml(g.name)}${g.description ? `<small>${escapeHtml(g.description)}</small>` : ''}</span></label>`).join('');
+        })
+        .catch(err => { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(err.message)}</span>`; });
+}
+
+function saveTakMasterGroups() {
+    const groups = [...document.querySelectorAll('#takm-groups-list input:checked')].map(i => i.value);
+    const btn = document.getElementById('takm-groups-save');
+    btn.disabled = true;
+    fetch('/api/tak-master/groups', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups }) })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { showStatus('takm-status-msg', d.error, 'error'); return; }
+            showStatus('takm-status-msg', `The master connection is now in: ${groups.join(', ')}`, 'success');
+            loadTakMasterGroups();
+        })
+        .catch(err => showStatus('takm-status-msg', 'Failed: ' + err.message, 'error'))
+        .finally(() => { btn.disabled = false; });
 }
 
 function saveTak(trustFingerprint) {
@@ -848,8 +1069,8 @@ function getAvatarColor(username) {
 }
 
 // Online = a live connection signed in with this ACCOUNT. The callsign a phone
-// joins under can differ from its login account (login "Dev1", callsign
-// "Xcover"), so match the connection's account, not just its callsign.
+// joins under can differ from its login account (login "Unit1", callsign
+// "Medic4"), so match the connection's account, not just its callsign.
 function isUserOnline(user) {
     if (typeof user === 'string') user = { username: user };
     return connectedClients.some(c =>

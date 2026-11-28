@@ -54,6 +54,31 @@
     migApply(); await wait(300);
     ok(/Import done: 1 agencies, 1 phone accounts/.test(status()), 'import result shown: ' + status());
     ok($('mig-import-btn').disabled && $('mig-import-pass').value === '', 'after import: button off, passphrase cleared');
+
+    // TAK: the agency's share switch (master set up) and the master panel.
+    await wait(200);
+    ok($('tak-share-switch').style.display !== 'none' && !$('tak-share-master').checked, 'share switch shown, off');
+    ok(/Master TAK server: connected/.test($('tak-share-state').textContent), 'master status on the agency page: ' + $('tak-share-state').textContent);
+    ok($('tak-share-same').style.display !== 'none', 'same-server note shown');
+    ok(/come back to the agency that wrote to them/.test($('tak-share-routing').textContent) && /go to EMS's console/.test($('tak-share-routing').textContent),
+       'routing line: ' + $('tak-share-routing').textContent);
+    ok(!$('tak-share-master').disabled && $('tak-share-home').style.display === 'none', 'not the home agency: switch free');
+    renderTakShare({ share_master: true, master_home: true, master: { configured: true, status: 'connected', home_agency_name: 'Fire' } });
+    ok($('tak-share-master').checked && $('tak-share-master').disabled && $('tak-share-home').style.display !== 'none', 'home agency: switch on, locked, reason shown');
+    renderTakShare({ share_master: false, master_home: false, master: { configured: true, status: 'connected', home_agency_name: 'EMS' } });
+    $('tak-share-master').checked = true; saveTakShareMaster(); await wait(200);
+    ok(window.__shareBody && window.__shareBody.share === true && window.__shareBody.agency_id === 'fire', 'share switch PUT: ' + JSON.stringify(window.__shareBody));
+    ok($('takm-host').value === 'tak.example.org' && /Connected/.test($('takm-state').textContent), 'master panel filled');
+    ok(/Fire <b>Dept<\/b>/.test($('takm-sharing').textContent) && !document.querySelector('#takm-sharing b') &&
+       /same server/.test($('takm-sharing').textContent) && /EMS/.test($('takm-sharing').textContent), 'sharing list, escaped: ' + $('takm-sharing').textContent);
+    ok(/home agency/.test($('takm-sharing').textContent), 'home agency marked in the sharing list');
+    ok($('takm-home-row').style.display !== 'none' && $('takm-home').value === 'fire' && $('takm-home').options.length === 2 &&
+       /Fire <b>Dept<\/b>/.test($('takm-home').options[1].textContent) && /not chosen yet/.test($('takm-home-state').textContent), 'home selector: ' + $('takm-home-state').textContent);
+    $('takm-home').value = 'ems'; saveTakMasterHome(); await wait(200);
+    ok(window.__homeBody && window.__homeBody.agency_id === 'ems' && $('takm-home').value === 'ems' && /In effect: EMS$/.test($('takm-home-state').textContent), 'home PUT: ' + JSON.stringify(window.__homeBody));
+    $('takm-password').value = 'pw-not-kept'; saveTakMaster(); await wait(200);
+    ok(window.__takMasterBody && window.__takMasterBody.host === 'tak.example.org' && window.__takMasterBody.password === 'pw-not-kept' &&
+       $('takm-password').value === '', 'master save PUT, password field cleared');
     ok(window.__errors.length === 0, 'no script errors: ' + window.__errors.join(' | '));
   }
   run().catch(e => { ok(false, 'harness threw: ' + e.message); }).finally(() => {
