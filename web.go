@@ -1753,13 +1753,53 @@ func (s *Server) handleAdminChangePassword(w http.ResponseWriter, r *http.Reques
 	username := session.Username
 
 	var req struct {
-		NewPassword string `json:"new_password"`
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil ||
+		len(req.CurrentPassword) > 1024 || len(req.NewPassword) > 1024 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid request"}`))
 		return
+	}
+
+	// Only a session in the forced first-login (or admin-reset) state may set
+	// a new password without the current one. Any other session must prove
+	// it knows the current password, so a stolen session cookie cannot be
+	// turned into the account itself. Wrong guesses count against the same
+	// limits as the login page.
+	s.mu.RLock()
+	var mustChange bool
+	var curHash string
+	if admin, ok := s.webAdmins[session.adminKey]; ok {
+		mustChange, curHash = admin.MustChangePassword, admin.PasswordHash
+	}
+	s.mu.RUnlock()
+	if !mustChange {
+		ip := s.clientIP(r)
+		acct := strings.ToLower(session.adminKey)
+		if locked, left, _ := s.loginLimit.blocked(ip, acct); locked {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", strconv.Itoa(int(left.Seconds())+1))
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprintf(w, `{"error":"too many attempts, try again in %d minute(s)"}`, int(left.Minutes())+1)
+			return
+		}
+		loginBcryptSlots <- struct{}{}
+		ok := req.CurrentPassword != "" && curHash != "" && checkPassword(req.CurrentPassword, curHash)
+		<-loginBcryptSlots
+		if !ok {
+			if s.loginLimit.failed(ip, acct) {
+				log.Printf("Web login lockout: too many wrong current passwords on change-password for %q [%q] from %s",
+					username, session.AgencyID, ip)
+			}
+			log.Printf("Password change refused: wrong current password for %q [%q] from %s", username, session.AgencyID, ip)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"current password is incorrect"}`))
+			return
+		}
 	}
 
 	if len(req.NewPassword) < 12 {
@@ -3161,6 +3201,17 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL string
 		return
 	}
 	installDir := filepath.Dir(execPath)
+	// The new binary is staged next to the running one. A server whose
+	// program folder it cannot write (a package or platform install, a
+	// read-only /opt) is updated the way it was installed.
+	if !(osDirProbe{}).writable(installDir) {
+		s.setUpdateStatus("error", 0, "", "The server cannot write its program folder ("+installDir+
+			"), so it cannot update itself. Update it the way it was installed.")
+		return
+	}
+	// The dashboard files being served (web_dir, default ./web in the
+	// working directory), not necessarily web/ next to the binary.
+	webDir := s.config.webDir()
 
 	// Stage 1: Download binary
 	s.setUpdateStatus("downloading", 10, "Downloading new binary...", "")
@@ -3229,7 +3280,7 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL string
 		s.setUpdateStatus("downloading", 30, "Downloading web files...", "")
 		log.Printf("Downloading web files from: %s", webURL)
 
-		tmpWebDir = filepath.Join(installDir, "web.new")
+		tmpWebDir = filepath.Clean(webDir) + ".new"
 		if err := downloadAndExtractTarGz(webURL, tmpWebDir); err != nil {
 			os.Remove(tmpBinary)
 			s.setUpdateStatus("error", 30, "", "Failed to download web files: "+err.Error())
@@ -3247,7 +3298,6 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL string
 	currentBinary := filepath.Join(installDir, "ptt-server")
 	copyFile(currentBinary, filepath.Join(backupDir, "ptt-server"))
 
-	webDir := filepath.Join(installDir, "web")
 	if _, err := os.Stat(webDir); err == nil {
 		copyDir(webDir, filepath.Join(backupDir, "web"))
 	}
@@ -3269,15 +3319,8 @@ func (s *Server) performUpdate(binaryURL, binaryName, webURL, checksumURL string
 	exec.Command("setcap", "cap_net_bind_service=+ep", currentBinary).Run()
 
 	if tmpWebDir != "" {
-		entries, _ := os.ReadDir(tmpWebDir)
-		for _, entry := range entries {
-			src := filepath.Join(tmpWebDir, entry.Name())
-			dst := filepath.Join(webDir, entry.Name())
-			if entry.IsDir() {
-				copyDir(src, dst)
-			} else {
-				copyFile(src, dst)
-			}
+		if err := installWebTree(tmpWebDir, webDir); err != nil {
+			log.Printf("Update: web files not fully installed: %v", err)
 		}
 		os.RemoveAll(tmpWebDir)
 	}
@@ -3475,6 +3518,41 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// installWebTree moves every file under src to the same place under dst,
+// replacing what is there. Each file is renamed into place, so the service
+// user needs write access to the folders only, not to the files themselves:
+// with install.sh the web/ folders belong to the user who cloned the
+// repository and are group-writable for the service user, while the files in
+// them are whatever git last checked out. A rename that fails (another file
+// system) falls back to a copy. The first error is returned; the rest of the
+// files are still tried.
+func installWebTree(src, dst string) error {
+	var first error
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if err := os.Rename(path, target); err != nil {
+			if cerr := copyFile(path, target); cerr != nil && first == nil {
+				first = fmt.Errorf("%s: %w", rel, cerr)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return first
 }
 
 func copyDir(src, dst string) error {

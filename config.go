@@ -39,8 +39,10 @@ type Config struct {
 	// TrustedProxies: addresses/CIDRs the proxy connects from (default loopback).
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// Managed names the platform that installs and updates this server
-	// ("infratak"). A managed server never replaces its own binary or
-	// downloads helpers; the platform's own update does that.
+	// ("infratak"). A managed server never replaces its own binary (the
+	// platform's update does that). The transcription helper still comes
+	// from the matching GitHub release unless TranscribeHelperDir names a
+	// folder of bundled builds (the Docker image sets it).
 	Managed string `json:"managed,omitempty"`
 	// WebDir is where the dashboard files are; default ./web.
 	WebDir string `json:"web_dir,omitempty"`

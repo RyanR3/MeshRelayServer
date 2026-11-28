@@ -384,7 +384,7 @@ func TestPasswordChangeRevokesSessions(t *testing.T) {
 
 	// Self-service change: this session continues, the other one ends.
 	addTestSession(s, "chief-2", "chief", "agency_admin", "fire")
-	rec = doReq(h, "POST", "/api/admin/change-password", "fireadmin", `{"new_password":"a-much-longer-password"}`)
+	rec = doReq(h, "POST", "/api/admin/change-password", "fireadmin", `{"current_password":"initial-password-chief","new_password":"a-much-longer-password"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("change: %d %s", rec.Code, rec.Body.String())
 	}

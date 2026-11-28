@@ -2,6 +2,7 @@
 let ws = null;
 let reconnectInterval = null;
 let reconnectAttempts = 0;
+let dashboardStarted = false; // startDashboard() has run its one-time start-up
 
 // Currently editing user
 let editingUsername = '';
@@ -807,9 +808,21 @@ function connectWebSocket() {
         updateConnectionStatus(false);
         addLog('Disconnected from server', 'warning');
 
+        // The server refuses /ws until a forced password change is done:
+        // don't retry (and never reload, which would wipe the form) while it
+        // is showing. changeAdminPassword() reconnects afterwards.
+        if (forcedPasswordChangeShowing()) {
+            stopReconnecting();
+            return;
+        }
+
         // Attempt to reconnect every 3 seconds, reload page after 5 failures
         if (!reconnectInterval) {
             reconnectInterval = setInterval(() => {
+                if (forcedPasswordChangeShowing()) {
+                    stopReconnecting();
+                    return;
+                }
                 reconnectAttempts++;
                 if (reconnectAttempts > 5) {
                     clearInterval(reconnectInterval);
@@ -826,6 +839,14 @@ function connectWebSocket() {
         console.error('WebSocket error:', error);
         addLog('Connection error', 'error');
     };
+}
+
+function stopReconnecting() {
+    if (reconnectInterval) {
+        clearInterval(reconnectInterval);
+        reconnectInterval = null;
+    }
+    reconnectAttempts = 0;
 }
 
 // Update connection status indicator
@@ -3234,6 +3255,13 @@ function checkSession() {
         })
         .then(data => {
             if (!data) return false;
+            // A forced password change comes first, for every role (the
+            // console sends such a session here): the server refuses
+            // everything else, so nothing else may start until it is done.
+            if (data.must_change_password) {
+                showForcePasswordChange();
+                return false;
+            }
             // Dispatch accounts use the /command console; the dashboard's
             // APIs are closed to them.
             if (data.role === 'dispatch') {
@@ -3243,9 +3271,6 @@ function checkSession() {
             currentRole = data.role || '';
             currentAgencyId = data.agency_id || '';
             pttPort = data.ptt_port || 5000;
-            if (data.must_change_password) {
-                showForcePasswordChange();
-            }
             applyRoleUI();
             return true;
         })
@@ -3285,7 +3310,15 @@ function applyRoleUI() {
     }
 }
 
+function forcedPasswordChangeShowing() {
+    const modal = document.getElementById('changeAdminPasswordModal');
+    return !!modal && modal.style.display === 'flex';
+}
+
 function showForcePasswordChange() {
+    // Already open: leave the fields and the cursor alone (every refused
+    // request lands here again).
+    if (forcedPasswordChangeShowing()) return;
     // Hide the entire dashboard — only password change is allowed
     const layout = document.querySelector('.app-layout');
     if (layout) layout.style.display = 'none';
@@ -3324,11 +3357,15 @@ function changeAdminPassword() {
             errorEl.style.display = 'block';
             return;
         }
-        // Password changed — dismiss modal, restore dashboard, re-check session
+        // Password changed — dismiss modal, restore dashboard, then start it
+        // (first login) or pick up where it was (a change forced later).
         document.getElementById('changeAdminPasswordModal').style.display = 'none';
+        document.getElementById('adminNewPassword').value = '';
+        document.getElementById('adminConfirmPassword').value = '';
+        errorEl.style.display = 'none';
         const layout = document.querySelector('.app-layout');
         if (layout) layout.style.display = 'flex';
-        checkSession();
+        startDashboard();
     })
     .catch(() => {
         errorEl.textContent = 'Connection error';
@@ -3833,11 +3870,19 @@ window.fetch = function(url, options = {}) {
     });
 };
 
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
-    // Check session first, then initialize
-    checkSession().then(valid => {
+// Check the session, then run the dashboard's one-time start-up. Called on
+// page load and again after a password change; a session that must still
+// change its password starts nothing (the server would refuse it all).
+function startDashboard() {
+    return checkSession().then(valid => {
         if (!valid) return;
+        if (dashboardStarted) {
+            // Started before the change was forced: only the WebSocket,
+            // which stopped retrying while the form was up, needs restarting.
+            if (!ws || ws.readyState === WebSocket.CLOSED) connectWebSocket();
+            return;
+        }
+        dashboardStarted = true;
 
         connectWebSocket();
         fetchServerIdentity();
@@ -3874,10 +3919,16 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('editNewPassword').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') saveUserEdits();
         });
-        document.getElementById('adminConfirmPassword').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') changeAdminPassword();
-        });
     });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+    // The password form works before (and without) the rest of the start-up.
+    document.getElementById('adminConfirmPassword').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') changeAdminPassword();
+    });
+    startDashboard();
 });
 
 

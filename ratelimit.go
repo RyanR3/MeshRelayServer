@@ -10,9 +10,11 @@ package main
 // failures count, so a phone that reconnects a hundred times an hour with the
 // right password is never slowed down.
 //
-// Dashboard: 10 wrong passwords per account or 30 per address in 15 minutes
-// lock that account/address for 15 minutes (HTTP 429).
-// Phones: 10 per account or 30 per address in 5 minutes lock for 5 minutes.
+// Dashboard: 10 wrong passwords from one address in 15 minutes lock that
+// address for 15 minutes (HTTP 429); 50 against one account in 15 minutes put
+// the account under guard (see signInGuard) for 15 minutes.
+// Phones: the same 10 per address / 50 per account, with 5-minute windows and
+// locks. (The limits are set where the guards are made, in server.go.)
 // Pending phone challenges expire after 30 s and are capped, so a flood of
 // challenge requests cannot grow memory without bound.
 

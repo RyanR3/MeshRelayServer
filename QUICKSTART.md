@@ -16,9 +16,11 @@ ssh user@YOUR_SERVER_IP
 
 ## ☐ Step 3: Install Go
 
+`sudo ./install.sh` does steps 3 to 7 for you, including Go. To do it by hand, install at
+least the Go version on the `toolchain` line of `go.mod` from https://go.dev/dl/ (the
+`golang-go` package of Ubuntu 22.04 or Debian 12 is too old), then check:
+
 ```bash
-sudo apt update
-sudo apt install golang-go
 go version
 ```
 

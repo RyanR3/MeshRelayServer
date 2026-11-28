@@ -13,16 +13,13 @@ scp -r /path/to/PTTServer user@your-ubuntu-server:/home/user/
 
 ## Step 2: Install Go on Ubuntu Server
 
-SSH into your Ubuntu server and install Go:
+`sudo ./install.sh` (see README.md) installs a suitable Go by itself and does the
+remaining steps. By hand: install at least the Go version on the `toolchain` line of
+`go.mod` from https://go.dev/dl/ (distribution packages such as `golang-go` on Ubuntu 22.04
+or Debian 12 are too old), then:
 
 ```bash
 ssh user@your-ubuntu-server
-
-# Update packages
-sudo apt update
-
-# Install Go
-sudo apt install golang-go
 
 # Verify installation
 go version

@@ -98,7 +98,7 @@ This allows PTT to work:
 
 TECHNICAL DETAILS:
 ------------------
-Language: Go 1.21
+Language: Go (version: the toolchain line in go.mod)
 Dependencies: gorilla/mux, gorilla/websocket
 Size: ~5-10 MB compiled binary
 Memory: ~10-50 MB + ~10KB per client

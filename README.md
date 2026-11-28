@@ -10,11 +10,25 @@ cd MeshRelayServer
 sudo ./install.sh
 ```
 
+`install.sh` builds the server from source. It uses the Go already on the machine when it is
+at least the version on the `toolchain` line of `go.mod`; otherwise it downloads that Go
+release from go.dev for this machine (checked against go.dev's published SHA-256) into
+`/usr/local/lib/meshrelay-server/`, without touching any Go the system already has. The
+machine needs internet access for that and for the Go modules.
+
+Clone as your normal user, somewhere the service user `ptt` can reach. A home folder works:
+where `ptt` cannot pass through a parent folder (Ubuntu's home folders are `750`),
+`install.sh` grants `ptt` alone the right to pass through it with an ACL (installing the
+`acl` package if needed) instead of opening the folder to everyone. `/opt/MeshRelayServer`
+owned by your user works as well.
+
 Dashboard: `http://your-server-ip:8080`
 Login: `admin`, with the one-time password printed in the server log on first start
 (`journalctl -u ptt-server | grep -A1 'INITIAL ADMIN PASSWORD'`). You set a new one at first sign-in.
 
 ### Update
+
+As the user who cloned the repository:
 
 ```bash
 cd MeshRelayServer
@@ -22,7 +36,25 @@ git pull
 sudo ./install.sh
 ```
 
-Your config, users, and agencies are preserved on update.
+Your config, users, and agencies are preserved on update. The checkout stays yours; the
+server's own files (`config.json`, `users.json`, `web_admins.json`, recordings, ...) and the
+binary belong to `ptt`, and `install.sh` leaves them as they are.
+
+**Installed with `install.sh` from v4.10.1 or earlier?** That version gave the whole folder
+to `ptt`, so `git pull` as yourself fails ("dubious ownership"). Update once with:
+
+```bash
+cd MeshRelayServer
+sudo -u ptt git pull
+sudo ./install.sh
+```
+
+`install.sh` hands the checkout back to you (the server's files stay with `ptt`); after
+that, the normal `git pull && sudo ./install.sh` works.
+
+The dashboard's own updater (Settings) replaces the binary and `web/`. After using it,
+`git status` shows the changed `web/` files; run `git checkout -- web` before the next
+`git pull` (`install.sh` rebuilds the binary from the checkout anyway).
 
 ## Ways to run it
 
@@ -87,13 +119,14 @@ Every setting can come from `MESHRELAY_*` environment variables (see `infratak.g
 If you prefer to set up manually instead of using `install.sh`:
 
 ```bash
-# Install Go
-sudo apt update && sudo apt install golang-go
+# Install Go: at least the version on the `toolchain` line of go.mod, from
+# https://go.dev/dl/ (distribution packages such as Ubuntu 22.04's golang-go
+# are too old).
 
 # Build
 cd MeshRelayServer
 go mod download
-go build -o ptt-server
+go build -ldflags "-X main.Version=$(git describe --tags --always)" -o ptt-server
 
 # Run
 ./ptt-server
@@ -116,6 +149,86 @@ Edit `config.json`:
   "log_level": "INFO"      // Logging level (DEBUG, INFO, WARN, ERROR)
 }
 ```
+
+### Behind a reverse proxy
+
+To put the dashboard behind your own reverse proxy (Caddy, nginx) that terminates HTTPS,
+add to `config.json`:
+
+```json
+{
+  "web_bind": "127.0.0.1",
+  "web_port": 8080,
+  "trust_proxy": true
+}
+```
+
+- `web_bind`: the address the dashboard listens on. Empty (the default) means every
+  interface; `127.0.0.1` lets only the proxy on the same machine reach it. The PTT port
+  (UDP) is not affected.
+- `trust_proxy`: use the proxy's `X-Forwarded-For` (the last entry) as the browser's
+  address, for the log and the sign-in limits, and its `X-Forwarded-Proto: https` to mark
+  the session cookie `Secure`. The headers are used only on connections that come from a
+  trusted proxy address; from anyone else they are ignored.
+- `trusted_proxies`: the addresses or CIDRs the proxy connects from, for example
+  `["10.0.0.5", "192.168.10.0/24"]`. Default: loopback only (`127.0.0.0/8`, `::1`).
+
+Leave `tls_cert_file` / `tls_key_file` unset; the proxy does HTTPS. The proxy must pass
+the `Host` header through unchanged and allow WebSocket upgrades (the dashboard checks that
+a WebSocket's `Origin` matches its `Host`). Caddy does both by default:
+
+```
+meshrelay.example.org {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name meshrelay.example.org;
+    # ssl_certificate / ssl_certificate_key ...
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+(nginx's `$proxy_add_x_forwarded_for` works too: the server reads the last entry, the one
+the proxy added.) Restart the server after changing `config.json`.
+
+### Where the server keeps its files
+
+Relative paths in `config.json` (`users_file`, `web_admins_file`, `agencies_file`, ...),
+`tls/`, `server_identity.key` and the activity log are all in the server's working directory
+(`WorkingDirectory` of the service; the install folder with `install.sh`). These settings
+move the rest:
+
+- `recording_dir`: radio recordings (and their transcripts). Default `recordings` in the
+  working directory. `recording_retention_days`: days to keep them (default 30).
+- `transcribe_dir`: the speech-to-text helper, model and its settings. When unset:
+  `transcribe/` next to the binary if that folder exists or the binary's folder is
+  writable (the `install.sh` layout), otherwise `transcribe/` in the working directory.
+  The folder in use is logged at start-up ("Transcription folder: ..."). Set it when the
+  binary sits in a folder the service cannot write.
+- `transcribe_helper_dir`: a folder of speech-to-text helper builds shipped with the server
+  (named like the release assets, e.g. `mrtranscribe-linux-amd64`), used instead of
+  downloading the helper from the GitHub release. The Docker image sets it.
+- `web_dir`: the dashboard files. Default `web` in the working directory.
+- `managed`: the name of a platform that installs and updates this server (for example
+  `infratak`). The dashboard then does not offer its own update and says who updates the
+  server instead.
+
+Each can also come from a `MESHRELAY_*` environment variable (see `infratak.go`).
 
 `adhoc_group_audio_tag` (default `false`): send ad-hoc group audio channel-tagged to members who are on another channel; leave it off until the phone apps play tagged audio for groups they have not selected.
 
@@ -214,12 +327,15 @@ Not moved, to set up again by hand:
 
 | | Minimum | Recommended |
 |---|---|---|
-| **OS** | Ubuntu 20.04 / Debian 11 | Ubuntu 22.04+ |
+| **OS** | Ubuntu 22.04 / Debian 12 / Raspberry Pi OS 64-bit (Debian 12 based), x86-64 or ARM64 | Ubuntu 24.04 |
 | **CPU** | 1 vCPU | 2 vCPU |
 | **RAM** | 512 MB | 1 GB |
 | **Disk** | 1 GB | 5 GB |
 | **Network** | 1 Mbps up | 10 Mbps up |
 | **Ports** | UDP 5000, TCP 8080 | |
+
+`install.sh` needs a Debian-family system with systemd. Those are the systems it is tested
+on; older releases may work but are not tested.
 
 The server is lightweight — a $4-6/mo VPS (DigitalOcean, Vultr, Linode) handles 100+ concurrent PTT users comfortably. Each connected client uses ~10 KB of memory. CPU usage stays under 5% at idle and scales with active audio traffic.
 
@@ -265,6 +381,9 @@ The Android app will need modifications to support server mode:
 - `GET /api/channels` - Channel information
 - `GET /api/config` - Current configuration
 - `POST /api/config` - Update configuration
+- `POST /api/admin/change-password` - Change your own dashboard password:
+  `{"current_password": "...", "new_password": "..."}`. `current_password` may be left
+  out only during the forced change at first sign-in. Ends the account's other sessions.
 
 ### WebSocket
 
@@ -351,8 +470,10 @@ sudo ufw allow 5000/udp
 ### Building from Source
 
 ```bash
-go build -o ptt-server
+go build -ldflags "-X main.Version=$(git describe --tags --always)" -o ptt-server
 ```
+
+The version comes from the git tag only; a build without `-X main.Version` reports `dev`.
 
 ### Running in Development
 

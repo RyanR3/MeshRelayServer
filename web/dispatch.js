@@ -123,6 +123,12 @@ async function checkSession() {
             window.location.href = '/login.html?next=/command';
             return;
         }
+        // The server refuses the console (its WebSocket, the map files) until
+        // a forced password change is done; the dashboard shows that form.
+        if (data.must_change_password) {
+            window.location.replace('/');
+            return;
+        }
         currentAgency = data.agency_id || '';
         currentUsername = data.username || '';
         document.getElementById('dispatch-agency-label').textContent = currentAgency ? '' : 'All agencies';

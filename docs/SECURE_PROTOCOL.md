@@ -159,8 +159,11 @@ exceptions for the apps in use today:
 A short request of either kind is answered in full within a budget per
 source address (an IPv4 address or an IPv6 /64: 32 at once, then 2 per
 second) and for the whole server (2000 at once, then 500 per second). Past
-the budget a short challenge request gets no answer (the app asks again
-2 s later) and a short hello gets the 18-byte `0x45` cookie; a hello that
+the budget a short challenge request gets no answer. The apps treat that like
+a lost packet: they wait for the challenge (2 s in the Android app, 3 s in
+the other clients) and ask again, up to three times; if all three go
+unanswered, that sign-in attempt fails and the app's normal reconnect
+back-off tries again later. A short hello gets the 18-byte `0x45` cookie; a hello that
 returns the cookie has shown it receives at that address and is always
 answered.
 

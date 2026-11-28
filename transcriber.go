@@ -14,8 +14,9 @@ package main
 // The helper and the model are not part of the server binary. A super admin
 // installs them from the dashboard: the helper comes from this release's
 // GitHub assets (checked against SHA256SUMS like a server update), the model
-// from Hugging Face (checked against the SHA-256 below). Files live in
-// <install dir>/transcribe/.
+// from Hugging Face (checked against the SHA-256 below). Files live in the
+// folder transcribeDirFor picks: transcribe_dir when set, otherwise
+// transcribe/ next to the binary or in the working directory.
 //
 // One helper process loads the model once and handles one recording at a time
 // at low CPU priority, so voice relay is never starved; it exits after a few
@@ -123,11 +124,17 @@ type Transcriber struct {
 }
 
 func NewTranscriber(s *Server, dir string) *Transcriber {
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
 	if dir == "" {
-		dir = "transcribe"
-		if exe, err := os.Executable(); err == nil {
-			dir = filepath.Join(filepath.Dir(exe), "transcribe")
-		}
+		dir = transcribeDirFor("", exeDir, osDirProbe{})
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		log.Printf("Transcription folder: %s", abs)
+	} else {
+		log.Printf("Transcription folder: %s", dir)
 	}
 	t := &Transcriber{s: s, dir: dir, queue: make(chan trJob, trQueueSize)}
 	if data, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil {
@@ -136,6 +143,68 @@ func NewTranscriber(s *Server, dir string) *Transcriber {
 	go t.worker()
 	return t
 }
+
+// dirProbe answers the two questions transcribeDirFor asks of the disk.
+type dirProbe interface {
+	isDir(path string) bool
+	exists(path string) bool
+	writable(dir string) bool // a file can be created in dir
+}
+
+type osDirProbe struct{}
+
+func (osDirProbe) isDir(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+func (osDirProbe) exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func (osDirProbe) writable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".write-test-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
+	return true
+}
+
+// transcribeDirFor picks the transcription folder:
+//
+//  1. transcribe_dir from the config, when set;
+//  2. <binary folder>/transcribe when it already exists and is usable:
+//     writable, or holding an installed settings.json (an existing install
+//     keeps its model, helper and settings there); or, when it does not
+//     exist, when the binary folder is writable (install.sh: binary and data
+//     share one folder);
+//  3. otherwise "transcribe" in the working directory, where every other
+//     relative state path (users.json, recordings/, tls/, the identity key)
+//     already resolves. That is the data folder on installs whose binary
+//     sits in a read-only folder (systemd ProtectSystem=strict, /opt).
+func transcribeDirFor(configured, exeDir string, p dirProbe) string {
+	if configured != "" {
+		return configured
+	}
+	if exeDir != "" {
+		next := filepath.Join(exeDir, "transcribe")
+		if p.isDir(next) {
+			if p.writable(next) || p.exists(filepath.Join(next, "settings.json")) {
+				return next
+			}
+		} else if p.writable(exeDir) {
+			return next
+		}
+	}
+	return "transcribe"
+}
+
+// unwritableDirHint is added to errors about a folder the server cannot write.
+const unwritableDirHint = ` — set "transcribe_dir" in config.json to a folder the server can write (for example a "transcribe" folder in its data folder) and restart the server`
 
 func (t *Transcriber) helperPath() string { return filepath.Join(t.dir, trHelperFile) }
 
@@ -507,7 +576,11 @@ func helperAssets() []string {
 func (t *Transcriber) runInstall(modelName string) {
 	m := findTranscribeModel(modelName)
 	if err := os.MkdirAll(t.dir, 0o750); err != nil {
-		t.setInstall("error", 0, "", "cannot create "+t.dir+": "+err.Error())
+		t.setInstall("error", 0, "", "cannot create "+t.dir+": "+err.Error()+unwritableDirHint)
+		return
+	}
+	if !(osDirProbe{}).writable(t.dir) {
+		t.setInstall("error", 0, "", "cannot write to "+t.dir+unwritableDirHint)
 		return
 	}
 
@@ -590,7 +663,7 @@ func (t *Transcriber) runInstall(modelName string) {
 	err = t.saveSettings()
 	t.mu.Unlock()
 	if err != nil {
-		t.setInstall("error", 95, "", "failed to save settings: "+err.Error())
+		t.setInstall("error", 95, "", "failed to save settings: "+err.Error()+unwritableDirHint)
 		return
 	}
 	t.gen.Add(1)
