@@ -43,12 +43,16 @@ type lmrAgencyView struct {
 	// Recipient-facing.
 	OwnerName string `json:"owner_name,omitempty"`
 
-	// ATAK marker (lmr_atak.go). ATAKTAK is the caller's own agency's TAK
-	// link state while the marker is switched on.
+	// ATAK marker (lmr_atak.go), for the caller's own agency while the marker
+	// is switched on: its own TAK link (takLinkState), the master TAK
+	// connection (takMasterLinkState: states only, no address) and where the
+	// marker goes now ("own", "master", "both", "none").
 	ShowInATAK bool     `json:"show_in_atak"`
 	Lat        *float64 `json:"lat,omitempty"`
 	Lon        *float64 `json:"lon,omitempty"`
 	ATAKTAK    string   `json:"atak_tak,omitempty"`
+	ATAKMaster string   `json:"atak_master,omitempty"`
+	ATAKSent   string   `json:"atak_sent,omitempty"`
 }
 
 // handleGetMyLMRBridges lists the bridges this agency owns or has been granted.
@@ -102,7 +106,8 @@ func (s *Server) handleGetMyLMRBridges(w http.ResponseWriter, r *http.Request) {
 	if mine != "" {
 		for i := range out {
 			if out[i].ShowInATAK {
-				out[i].ATAKTAK = s.takLinkState(mine)
+				st := s.lmrAtakDelivery(mine)
+				out[i].ATAKTAK, out[i].ATAKMaster, out[i].ATAKSent = st.TAK, st.Master, st.Sent
 			}
 		}
 	}

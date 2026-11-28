@@ -79,6 +79,72 @@
     $('takm-password').value = 'pw-not-kept'; saveTakMaster(); await wait(200);
     ok(window.__takMasterBody && window.__takMasterBody.host === 'tak.example.org' && window.__takMasterBody.password === 'pw-not-kept' &&
        $('takm-password').value === '', 'master save PUT, password field cleared');
+
+    // LMR bridges, super admin: switches and toggles re-render the list once,
+    // never twice, and an older reload answering late does not win.
+    navigateTo('lmr-bridges'); await wait(300);
+    const superCards = () => document.querySelectorAll('#lmr-bridges-list .ma-patch-existing').length;
+    const superBuilders = () => document.querySelectorAll('#lmr-bridges-list .ma-patch-builder').length;
+    ok(superCards() === 2 && superBuilders() === 1, 'LMR super list: ' + superCards() + ' bridges, ' + superBuilders() + ' builder');
+    document.querySelector('#lmr-bridges-list .lmr-name').value = 'typed name';
+    toggleLmrBridge('b1'); toggleLmrBridge('b1'); await wait(300);
+    ok(superCards() === 2 && superBuilders() === 1, 'LMR super list after two quick toggles: ' + superCards() + ' bridges, ' + superBuilders() + ' builder');
+    ok(document.querySelector('#lmr-bridges-list .lmr-name').value === 'typed name', 'open builder keeps what was typed');
+    const sw1 = () => document.querySelector('#lmr-bridges-list .lmr-atak[data-bridge="b1"] .lmr-atak-on');
+    window.__listDelays = [200, 10];          // the first reload answers last
+    sw1().checked = false; lmrAtakSave(sw1()); await wait(30);
+    sw1().checked = true; lmrAtakSave(sw1()); await wait(400);
+    ok(superCards() === 2 && superBuilders() === 1, 'LMR super list after two quick ATAK switches: ' + superCards() + ' bridges');
+    ok(sw1().checked === true && window.__lmr[0].show_in_atak === true, 'the newest answer wins (switch on, as saved last)');
+    const b1State = document.querySelector('#lmr-bridges-list .lmr-atak[data-bridge="b1"]').textContent;
+    ok(/Fire Dept: sent through the master TAK server\./.test(b1State) && /EMS: sent to its own TAK server\. Same server as the master, sent once\./.test(b1State)
+       && !/no TAK connection/.test(b1State), 'super admin ATAK state: ' + b1State.replace(/\s+/g, ' '));
+
+    // Mutual aid, super admin: the same list pattern.
+    navigateTo('mutual-aid'); await wait(200);
+    const maCards = () => document.querySelectorAll('#ma-patches .ma-patch-existing').length;
+    fetchMutualAid(); fetchMutualAid(); await wait(200);
+    ok(maCards() === 1 && document.querySelectorAll('#ma-patches .ma-patch-builder').length === 1, 'mutual aid list after reloads: ' + maCards());
+
+    // LMR bridges, agency admin view (rendered directly; the harness signs in
+    // as super admin): pause and guests, twice quickly each.
+    fetchAgencyLmrBridges(); await wait(200);
+    const agencyCards = () => document.querySelectorAll('#lmr-agency-list .ma-patch-card').length;
+    ok(agencyCards() === 2, 'LMR agency list: ' + agencyCards());
+    window.__listDelays = [150, 10];
+    lmrToggle('a1', false); await wait(20); lmrToggle('a1', true); await wait(300);
+    ok(agencyCards() === 2 && !document.querySelector('#lmr-agency-list .lmr-paused'), 'agency list after pause+resume: ' + agencyCards() + ' cards, not paused');
+    lmrGuests('a1', false); lmrGuests('a1', true); await wait(200);
+    ok(agencyCards() === 2, 'agency list after two guest switches: ' + agencyCards());
+    const a1State = document.querySelector('#lmr-agency-list .lmr-atak[data-bridge="a1"] .lmr-atak-state').textContent;
+    ok(a1State === 'Marker is being sent through the master TAK server.', 'agency ATAK state (master only): ' + a1State);
+
+    // The agency admin's ATAK line for every combination of its own TAK link
+    // and the master.
+    const line = (tak, master, sent) => {
+        const d = document.createElement('div');
+        d.innerHTML = lmrAtakAgencyState({ show_in_atak: true, enabled: true, atak_tak: tak, atak_master: master, atak_sent: sent });
+        return d.textContent;
+    };
+    const own = 'your agency has no TAK connection set up';
+    [
+        ['connected', 'not_shared', 'own', 'Marker is being sent to your TAK server.'],
+        ['connected', 'none', 'own', 'Marker is being sent to your TAK server.'],
+        ['none', 'connected', 'master', 'Marker is being sent through the master TAK server.'],
+        ['none', 'connecting', 'none', 'Marker not being sent: ' + own + '; the master TAK server is not connected right now (sent when it connects).'],
+        ['none', 'off', 'none', 'Marker not being sent: ' + own + '; the master TAK connection is switched off.'],
+        ['none', 'not_shared', 'none', 'Marker not being sent: ' + own + '; your agency does not share with the master TAK server.'],
+        ['connected', 'same_server', 'own', 'Marker is being sent to your TAK server. The master TAK server is the same server, so it is sent once.'],
+        ['down', 'same_server', 'none', 'Marker not being sent: your TAK connection is down (sent again when it reconnects); the master TAK server is the same server as yours, so the marker goes on your own connection only.'],
+        ['connected', 'connected', 'both', 'Marker is being sent to both your TAK server and the master TAK server.'],
+        ['down', 'connected', 'master', 'Marker is being sent through the master TAK server, but not to your TAK server: your TAK connection is down (sent again when it reconnects).'],
+        ['off', 'connected', 'master', 'Marker is being sent through the master TAK server, but not to your TAK server: your TAK connection is switched off.'],
+        ['connected', 'connecting', 'own', 'Marker is being sent to your TAK server, but not through the master TAK server: the master TAK server is not connected right now (sent when it connects).'],
+        ['none', 'none', 'none', 'Marker not being sent: ' + own + '.']
+    ].forEach(([tak, master, sent, want]) => {
+        const got = line(tak, master, sent);
+        ok(got === want, 'ATAK line ' + tak + '/' + master + '/' + sent + ': ' + got);
+    });
     ok(window.__errors.length === 0, 'no script errors: ' + window.__errors.join(' | '));
   }
   run().catch(e => { ok(false, 'harness threw: ' + e.message); }).finally(() => {

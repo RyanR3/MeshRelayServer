@@ -300,7 +300,7 @@ func TestLMRBridgeATAKAPI(t *testing.T) {
 		t.Fatalf("owner list: %s", rec.Body.String())
 	}
 	rec = doReq(h, "GET", "/api/lmr-bridges", "super", "")
-	if !strings.Contains(rec.Body.String(), `"atak_marker":[{"agency_id":"fire","name":"FIRE","tak":"none"},{"agency_id":"ems","name":"EMS","tak":"none"}]`) {
+	if !strings.Contains(rec.Body.String(), `"atak_marker":[{"agency_id":"fire","name":"FIRE","tak":"none","master":"none","sent":"none"},{"agency_id":"ems","name":"EMS","tak":"none","master":"none","sent":"none"}]`) {
 		t.Fatalf("super list: %s", rec.Body.String())
 	}
 

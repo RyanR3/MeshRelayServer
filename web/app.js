@@ -400,16 +400,18 @@ function removeTakMaster() {
 function loadTakMasterGroups() {
     const list = document.getElementById('takm-groups-list');
     list.innerHTML = '<span style="color:#8B949E;font-size:12px;">Loading…</span>';
+    const latest = latestLoad('tak-master-groups');
     fetch('/api/tak-master/groups')
         .then(r => r.json())
         .then(d => {
+            if (!latest()) return;
             if (d.error) { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(d.error)}</span>`; return; }
             const groups = d.groups || [];
             if (!groups.length) { list.innerHTML = '<span style="color:#8B949E;font-size:12px;">This TAK account is not in any groups.</span>'; return; }
             list.innerHTML = groups.map(g => `<label><input type="checkbox" value="${escapeHtml(g.name)}" ${g.active ? 'checked' : ''}>
                 <span>${escapeHtml(g.name)}${g.description ? `<small>${escapeHtml(g.description)}</small>` : ''}</span></label>`).join('');
         })
-        .catch(err => { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(err.message)}</span>`; });
+        .catch(err => { if (latest()) list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(err.message)}</span>`; });
 }
 
 function saveTakMasterGroups() {
@@ -474,16 +476,18 @@ function loadTakGroups() {
     const list = document.getElementById('tak-groups-list');
     const agency = takAgencyId();
     list.innerHTML = '<span style="color:#8B949E;font-size:12px;">Loading…</span>';
+    const latest = latestLoad('tak-groups');
     fetch('/api/my-agency/tak/groups' + (agency ? '?agency=' + encodeURIComponent(agency) : ''))
         .then(r => r.json())
         .then(d => {
+            if (!latest()) return;
             if (d.error) { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(d.error)}</span>`; return; }
             const groups = d.groups || [];
             if (!groups.length) { list.innerHTML = '<span style="color:#8B949E;font-size:12px;">This TAK account is not in any groups.</span>'; return; }
             list.innerHTML = groups.map(g => `<label><input type="checkbox" value="${escapeHtml(g.name)}" ${g.active ? 'checked' : ''}>
                 <span>${escapeHtml(g.name)}${g.description ? `<small>${escapeHtml(g.description)}</small>` : ''}</span></label>`).join('');
         })
-        .catch(err => { list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(err.message)}</span>`; });
+        .catch(err => { if (latest()) list.innerHTML = `<span style="color:#F85149;font-size:12px;">${escapeHtml(err.message)}</span>`; });
 }
 
 function saveTakGroups() {
@@ -1250,9 +1254,11 @@ function fetchUsers() {
             url += '?agency=' + encodeURIComponent(filter.value);
         }
     }
+    const latest = latestLoad('users');
     fetch(url)
         .then(r => r.json())
         .then(users => {
+            if (!latest()) return;
             allUsers = users || [];
             currentUsersPage = 1;
             renderUsersPage();
@@ -2341,6 +2347,31 @@ function showQRCodeWithData(username, password, agencyId) {
 
 // --- Mutual Aid ---
 
+// Lists rebuilt from a fetch. Two loads can be in flight at once (a save
+// handler reloads the list while the dashboard socket or a poll asks for the
+// same page), and their answers can arrive in either order: latestLoad(key)
+// numbers each load and tells the caller whether it is still the newest, so
+// an older answer never replaces a newer one.
+const loadSeqs = {};
+function latestLoad(key) {
+    const n = (loadSeqs[key] || 0) + 1;
+    loadSeqs[key] = n;
+    return () => loadSeqs[key] === n;
+}
+
+// Builder-and-list containers (Mutual Aid and LMR bridges, super admin):
+// open "new" builders stay as they are, with what was typed; everything else
+// in wrap is replaced by one fresh section built from existingHtml. When no
+// builder is open, addBuilder() puts an empty one above the list.
+function renderBuilderList(wrap, existingHtml, addBuilder) {
+    const builders = Array.from(wrap.querySelectorAll(':scope > .ma-patch-builder'));
+    const section = document.createElement('div');
+    section.className = 'ma-existing-section';
+    section.innerHTML = existingHtml;
+    wrap.replaceChildren(...builders, section);
+    if (!builders.length) addBuilder();
+}
+
 // ===== Mutual Aid — drag-and-drop patch builder =====
 //
 // Left column lists every agency as a draggable card. Right column holds one or
@@ -2352,10 +2383,12 @@ const maBuilders = {};                // builderId -> Set(agencyId)
 
 function fetchMutualAid() {
     // Load agencies (left pool) and existing links in parallel.
+    const latest = latestLoad('mutual-aid');
     Promise.all([
         fetch('/api/agencies').then(r => r.json()).catch(() => []),
         fetch('/api/mutual-aid').then(r => r.json()).catch(() => [])
     ]).then(([agencies, links]) => {
+        if (!latest()) return;
         agenciesList = agencies || [];
         renderAgencyPool(agenciesList);
         renderPatches(links || []);
@@ -2384,8 +2417,6 @@ function renderPatches(links) {
     const wrap = document.getElementById('ma-patches');
     if (!wrap) return;
 
-    // Preserve any open new-patch builders, then render existing links after them.
-    const openBuilders = wrap.querySelectorAll('.ma-patch-builder');
     let existingHtml = '';
     if (links.length) {
         existingHtml = '<div class="ma-existing-label">Active Patches</div>' + links.map(link => {
@@ -2405,18 +2436,9 @@ function renderPatches(links) {
         }).join('');
     }
 
-    // If no open builders exist, start with one empty builder so the user can begin.
-    if (openBuilders.length === 0) {
-        wrap.innerHTML = '';
-        addPatchBuilder();
-        wrap.insertAdjacentHTML('beforeend', existingHtml);
-    } else {
-        // Keep builders, replace only the existing-patches section.
-        let old = wrap.querySelector('.ma-existing-section');
-        if (old) old.remove();
-        wrap.insertAdjacentHTML('beforeend',
-            `<div class="ma-existing-section">${existingHtml}</div>`);
-    }
+    // Keep open builders (with what was typed), replace everything else; with
+    // none open, start one empty builder so the user can begin.
+    renderBuilderList(wrap, existingHtml, addPatchBuilder);
 }
 
 function addPatchBuilder() {
@@ -2578,7 +2600,9 @@ let zelloBridgesPoll = null;
 let zelloRenderKey = ''; // signature of the last full render (to avoid clobbering)
 
 function fetchZelloBridges() {
+    const latest = latestLoad('zello-bridges');
     fetch('/api/zello-bridges').then(r => r.json()).then(bridges => {
+        if (!latest()) return;
         renderZelloBridges(bridges);
     }).catch(err => console.error('Failed to fetch zello bridges:', err));
 
@@ -2593,10 +2617,11 @@ function fetchZelloBridges() {
         if (!page || !page.classList.contains('active')) {
             clearInterval(zelloBridgesPoll); zelloBridgesPoll = null; return;
         }
+        const latestPoll = latestLoad('zello-bridges');
         fetch('/api/zello-bridges')
             .then(r => r.json())
             .then(b => {
-                if (!Array.isArray(b)) return;
+                if (!latestPoll() || !Array.isArray(b)) return;
                 const key = b.map(x => `${x.id}:${x.status}:${x.enabled}`).join('|');
                 if (key === zelloRenderKey) {
                     updateZelloStatusInPlace(b);   // no structural change → don't rebuild
@@ -3027,9 +3052,10 @@ function deleteZelloBridge(id) {
 // --- Guest Events ---
 
 function fetchGuestEvents() {
+    const latest = latestLoad('guest-events');
     fetch('/api/guest-events')
     .then(r => r.json())
-    .then(events => renderGuestEventsTable(events))
+    .then(events => { if (latest()) renderGuestEventsTable(events); })
     .catch(err => console.error('Failed to fetch guest events:', err));
 }
 
@@ -3320,9 +3346,11 @@ function logout() {
 // --- Agency Management ---
 
 function fetchAgencies() {
+    const latest = latestLoad('agencies');
     fetch('/api/agencies')
         .then(r => r.json())
         .then(agencies => {
+            if (!latest()) return;
             agenciesList = agencies;
             renderAgenciesTable(agencies);
             populateAgencyFilters();
@@ -3869,10 +3897,12 @@ const lmrBuilders = {};                // builderId -> Set(agencyId)
 const lmrEditSets = {};                // bridgeId  -> Set(agencyId) for live edits
 
 function fetchLmrBridges() {
+    const latest = latestLoad('lmr-bridges');
     Promise.all([
         fetch('/api/agencies').then(r => r.json()).catch(() => []),
         fetch('/api/lmr-bridges').then(r => r.json()).catch(() => [])
     ]).then(([agencies, bridges]) => {
+        if (!latest()) return;
         agenciesList = agencies || [];
         renderLmrAgencyPool(agenciesList);
         renderLmrBridges(bridges || []);
@@ -3944,16 +3974,7 @@ function renderLmrBridges(bridges) {
         }).join('');
     }
 
-    const openBuilders = wrap.querySelectorAll('.ma-patch-builder');
-    if (openBuilders.length === 0) {
-        wrap.innerHTML = '';
-        addLmrBuilder();
-        wrap.insertAdjacentHTML('beforeend', existingHtml);
-    } else {
-        const old = wrap.querySelector('.ma-existing-section');
-        if (old) old.remove();
-        wrap.insertAdjacentHTML('beforeend', `<div class="ma-existing-section">${existingHtml}</div>`);
-    }
+    renderBuilderList(wrap, existingHtml, addLmrBuilder);
 }
 
 function addLmrBuilder() {
@@ -4190,12 +4211,14 @@ let maDropped = null;          // the agency currently in the dropzone
 
 function fetchAgencyMutualAid() {
     const arr = v => Array.isArray(v) ? v : [];
+    const latest = latestLoad('agency-mutual-aid');
     Promise.all([
         fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null),
         fetch('/api/mutual-aid/requests').then(r => r.json()).catch(() => []),
         fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
         fetch('/api/my-agency/mutual-aid').then(r => r.json()).catch(() => [])
     ]).then(([discovery, requests, directory, links]) => {
+        if (!latest()) return;
         maDiscovery = discovery;
         maPendingReq = arr(requests).filter(r => r.status === 'pending');
         maDirectoryCache = arr(directory);
@@ -4574,6 +4597,7 @@ let zbBridges = [];
 
 function fetchAgencyZelloBridges() {
     const arr = v => Array.isArray(v) ? v : [];
+    const latest = latestLoad('agency-zello-bridges');
     Promise.all([
         fetch('/api/my-agency/zello-bridges').then(r => r.json()).catch(() => []),
         fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
@@ -4581,6 +4605,7 @@ function fetchAgencyZelloBridges() {
         // from, for the locked Agency field in the create modal.
         fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null)
     ]).then(([bridges, directory, discovery]) => {
+        if (!latest()) return;
         zbDiscovery = discovery;
         zbBridges = arr(bridges);
         zbDirectory = arr(directory);
@@ -4809,21 +4834,86 @@ function zbAddBridge() {
 // ===== LMR Bridges — ATAK marker =====
 //
 // A bridge can be shown on the ATAK map: the server publishes a marker for the
-// channel on the TAK server connection of each agency in the bridge. Same card
+// channel on the TAK server connection of each agency in the bridge, and on
+// the master TAK connection for agencies that share with it (sent once when
+// an agency's own connection is to the master's TAK server). Same card
 // section on the super admin and agency views; only the API path differs.
 
 const lmrAtakDrafts = {};   // bridgeId -> {lat, lon} typed but not saved yet
 
-const LMR_ATAK_NOTE = 'The marker is visible to everyone on the agency\'s TAK server. '
+const LMR_ATAK_NOTE = 'The marker is visible to everyone on the TAK servers it is sent to. '
     + 'Listening still needs a MeshRelay login with access to this channel.';
 
-// Why a marker is or is not going out on one agency's TAK link.
-function lmrAtakTakText(tak) {
-    switch (tak) {
-        case 'connected': return { ok: true, text: 'sent to the TAK server' };
-        case 'down': return { ok: false, text: 'marker not being sent: the TAK connection is down (sent again when it reconnects)' };
-        case 'off': return { ok: false, text: 'marker not being sent: the TAK connection is switched off' };
-        default: return { ok: false, text: 'marker not being sent: no TAK connection is set up' };
+// Wording for the two views: the agency admin reads about "your" TAK server,
+// the super admin about each agency's ("its").
+const LMR_ATAK_WORDS = {
+    agency: {
+        own: 'your TAK server',
+        ownWhy: {
+            none: 'your agency has no TAK connection set up',
+            off: 'your TAK connection is switched off',
+            down: 'your TAK connection is down (sent again when it reconnects)'
+        },
+        masterWhy: {
+            not_shared: 'your agency does not share with the master TAK server',
+            off: 'the master TAK connection is switched off',
+            connecting: 'the master TAK server is not connected right now (sent when it connects)',
+            same_server: 'the master TAK server is the same server as yours, so the marker goes on your own connection only'
+        },
+        sameNote: 'The master TAK server is the same server, so it is sent once.'
+    },
+    super: {
+        own: 'its own TAK server',
+        ownWhy: {
+            none: 'no TAK connection set up',
+            off: 'its TAK connection is switched off',
+            down: 'its TAK connection is down (sent again when it reconnects)'
+        },
+        masterWhy: {
+            not_shared: 'not sharing with the master TAK server',
+            off: 'the master TAK connection is switched off',
+            connecting: 'the master TAK server is not connected right now (sent when it connects)',
+            same_server: 'its TAK server is the master\'s, so the marker goes on its own connection only'
+        },
+        sameNote: 'same server as the master, sent once.'
+    }
+};
+
+// Where one agency's copy of the marker goes. tak: its own TAK link
+// ('connected', 'down', 'off', 'none'); master: the master TAK connection for
+// this agency ('connected', 'connecting', 'off', 'same_server', 'not_shared',
+// 'none'); sent: 'own', 'master', 'both' or 'none' (from the server, which
+// decides delivery the same way). view: 'agency' or 'super'.
+// Returns {ok, text}: ok false when it is not sent, or not sent everywhere
+// it should be.
+function lmrAtakRoute(tak, master, sent, view) {
+    const w = LMR_ATAK_WORDS[view] || LMR_ATAK_WORDS.agency;
+    tak = tak || 'none';
+    master = master || 'none';
+    if (!sent) sent = tak === 'connected' ? 'own' : 'none';   // an older server: own link only
+    const ownWhy = w.ownWhy[tak] || w.ownWhy.none;
+    const masterWhy = w.masterWhy[master] || '';               // 'none' / 'connected': nothing to say
+    const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
+    switch (sent) {
+        case 'both':
+            return { ok: true, text: 'sent to both ' + w.own + ' and the master TAK server.' };
+        case 'own': {
+            if (master === 'same_server') return { ok: true, text: 'sent to ' + w.own + '. ' + cap(w.sameNote) };
+            if (master === 'off' || master === 'connecting') {
+                return { ok: false, text: 'sent to ' + w.own + ', but not through the master TAK server: ' + masterWhy + '.' };
+            }
+            return { ok: true, text: 'sent to ' + w.own + '.' };
+        }
+        case 'master':
+            if (tak === 'down' || tak === 'off') {
+                return { ok: false, text: 'sent through the master TAK server, but not to ' + w.own + ': ' + ownWhy + '.' };
+            }
+            return { ok: true, text: 'sent through the master TAK server.' };
+        default: {
+            const why = [ownWhy];
+            if (masterWhy) why.push(masterWhy);
+            return { ok: false, text: 'not being sent: ' + why.join('; ') + '.' };
+        }
     }
 }
 
@@ -4861,13 +4951,13 @@ function lmrAtakStateLine(ok, text) {
     return `<div class="lmr-atak-state ${ok === null ? '' : (ok ? 'lmr-atak-ok' : 'lmr-atak-warn')}">${escapeHtml(text)}</div>`;
 }
 
-// Agency view: the caller's own TAK link (atak_tak).
+// Agency view: the caller's own agency (atak_tak, atak_master, atak_sent).
 function lmrAtakAgencyState(b) {
     if (!b.show_in_atak) return lmrAtakStateLine(null, 'Off: no marker is sent.');
     if (b.enabled === false) return lmrAtakStateLine(false, 'Marker not being sent: the bridge is paused.');
-    const t = lmrAtakTakText(b.atak_tak);
-    let text = t.ok ? 'Marker is being sent to your agency\'s TAK server.' : t.text.charAt(0).toUpperCase() + t.text.slice(1) + ' for your agency.';
-    if ((b.shared_with || []).length) text += ' Agencies you share this bridge with get it on their own TAK connections.';
+    const t = lmrAtakRoute(b.atak_tak, b.atak_master, b.atak_sent, 'agency');
+    let text = 'Marker ' + (t.text.startsWith('not ') ? t.text : 'is being ' + t.text);
+    if ((b.shared_with || []).length) text += ' Agencies you share this bridge with get it through their own TAK setup.';
     return lmrAtakStateLine(t.ok, text);
 }
 
@@ -4876,7 +4966,7 @@ function lmrAtakSuperState(b) {
     if (!b.show_in_atak) return lmrAtakStateLine(null, 'Off: no marker is sent.');
     if (b.enabled === false) return lmrAtakStateLine(false, 'Marker not being sent: the bridge is disabled.');
     const rows = (b.atak_marker || []).map(a => {
-        const t = lmrAtakTakText(a.tak);
+        const t = lmrAtakRoute(a.tak, a.master, a.sent, 'super');
         return `<div class="lmr-atak-state ${t.ok ? 'lmr-atak-ok' : 'lmr-atak-warn'}">${escapeHtml((a.name || a.agency_id) + ': ' + t.text)}</div>`;
     });
     return rows.join('');
@@ -4976,11 +5066,13 @@ function lmrGuests(id, allowed) {
 
 function fetchAgencyLmrBridges() {
     const arr = v => Array.isArray(v) ? v : [];
+    const latest = latestLoad('agency-lmr-bridges');
     Promise.all([
         fetch('/api/my-agency/lmr-bridges').then(r => r.json()).catch(() => []),
         fetch('/api/agencies/discoverable').then(r => r.json()).catch(() => []),
         fetch('/api/my-agency/discovery').then(r => r.json()).catch(() => null)
     ]).then(([bridges, directory, discovery]) => {
+        if (!latest()) return;
         lmrMyBridges = arr(bridges);
         lmrDiscovery = discovery;
         lmrDirectory = arr(directory);
@@ -5287,9 +5379,11 @@ function createMyLmrBridge() {
 let agencyChannelsData = [];
 
 function fetchAgencyChannels() {
+    const latest = latestLoad('agency-channels');
     fetch('/api/my-agency/channels')
         .then(r => r.json())
         .then(data => {
+            if (!latest()) return;
             if (data.error) { showStatus('channels-status', data.error, 'error'); return; }
             agencyChannelsData = data || [];
             renderAgencyChannels();
@@ -5500,9 +5594,11 @@ function initMapsPage() {
 }
 
 function fetchMapLayers() {
+    const latest = latestLoad('map-layers');
     fetch('/api/my-agency/maps')
         .then(r => r.json())
         .then(list => {
+            if (!latest()) return;
             if (list.error) { showStatus('maps-status', list.error, 'error'); return; }
             renderMapLayers(list || []);
         })

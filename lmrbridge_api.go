@@ -22,7 +22,8 @@ type lmrBridgeView struct {
 	*LMRBridge
 	AgencyNames []string `json:"agency_names"`
 	Online      bool     `json:"online"`
-	// Where the ATAK marker goes: each agency's TAK link (lmr_atak.go).
+	// Where the ATAK marker goes, per agency: its own TAK link and the
+	// master TAK connection (lmr_atak.go).
 	ATAKMarker []lmrAtakAgencyState `json:"atak_marker,omitempty"`
 }
 
@@ -61,7 +62,9 @@ func (s *Server) handleGetLMRBridges(w http.ResponseWriter, r *http.Request) {
 	// TAK link states are read after s.mu is released (lmr_atak.go locking).
 	for i := range out {
 		for j := range out[i].ATAKMarker {
-			out[i].ATAKMarker[j].TAK = s.takLinkState(out[i].ATAKMarker[j].AgencyID)
+			name := out[i].ATAKMarker[j].Name
+			out[i].ATAKMarker[j] = s.lmrAtakDelivery(out[i].ATAKMarker[j].AgencyID)
+			out[i].ATAKMarker[j].Name = name
 		}
 	}
 

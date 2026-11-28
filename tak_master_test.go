@@ -144,6 +144,22 @@ func (r *masterRig) ownConn(t *testing.T, agency, host string, port int) *pipeTa
 	return p
 }
 
+// masterOff: the master is set up but switched off (no running connection).
+func (r *masterRig) masterOff() {
+	m := r.s.tak()
+	m.mu.Lock()
+	m.master = nil
+	m.mu.Unlock()
+}
+
+// noMaster: no master TAK connection set up at all.
+func (r *masterRig) noMaster() {
+	m := r.s.tak()
+	m.mu.Lock()
+	m.master, m.masterCfg = nil, nil
+	m.mu.Unlock()
+}
+
 // consoleMsgs drains what agency's console got.
 func (r *masterRig) consoleMsgs(agency string) []map[string]interface{} {
 	var out []map[string]interface{}
@@ -859,6 +875,135 @@ func TestTakMasterLMRMarkersRouting(t *testing.T) {
 	r.ownConn(t, "bravo", "tak.example.org", 8089)
 	if _, ok := r.s.lmrDesiredMarkers()[takMasterTarget]["ba"]; ok {
 		t.Fatal("same-server agency's marker also on the master")
+	}
+}
+
+// The dashboard's "where is the marker sent" state (lmrAtakDelivery) for every
+// combination of the agency's own TAK link and the master, checked against
+// where a publisher pass really delivers the marker.
+func TestLMRMarkerDeliveryState(t *testing.T) {
+	setStatus := func(tc *takConn, st string) {
+		tc.mu.Lock()
+		tc.status = st
+		tc.mu.Unlock()
+	}
+	for _, c := range []struct {
+		name         string
+		agency       string
+		setup        func(t *testing.T, r *masterRig) *pipeTak // returns the agency's own connection, if any
+		tak, master  string
+		sent         string
+		onOwn, onMst bool
+	}{
+		{name: "own link only, agency not sharing", agency: "charlie",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { return r.ownConn(t, "charlie", "tak2.example.org", 8089) },
+			tak:   "connected", master: "not_shared", sent: "own", onOwn: true},
+		{name: "own link only, no master set up", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak {
+				r.noMaster()
+				return r.ownConn(t, "alpha", "tak2.example.org", 8089)
+			},
+			tak: "connected", master: "none", sent: "own", onOwn: true},
+		{name: "master only, connected", agency: "bravo",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { return nil },
+			tak:   "none", master: "connected", sent: "master", onMst: true},
+		{name: "master only, connecting", agency: "bravo",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { setStatus(r.master.tc, "connecting"); return nil },
+			tak:   "none", master: "connecting", sent: "none"},
+		{name: "master only, switched off", agency: "bravo",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { r.masterOff(); return nil },
+			tak:   "none", master: "off", sent: "none"},
+		{name: "master only, agency not sharing", agency: "charlie",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { return nil },
+			tak:   "none", master: "not_shared", sent: "none"},
+		{name: "home agency takes part without its switch", agency: "charlie",
+			setup: func(t *testing.T, r *masterRig) *pipeTak {
+				m := r.s.tak()
+				m.mu.Lock()
+				m.masterCfg.HomeAgency = "charlie"
+				m.mu.Unlock()
+				return nil
+			},
+			tak: "none", master: "connected", sent: "master", onMst: true},
+		{name: "both, same TAK server: sent once on its own link", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { return r.ownConn(t, "alpha", "TAK.example.org", 8089) },
+			tak:   "connected", master: "same_server", sent: "own", onOwn: true},
+		{name: "both, same TAK server, own link down", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak {
+				p := r.ownConn(t, "alpha", "tak.example.org", 8089)
+				setStatus(p.tc, "connecting")
+				return p
+			},
+			tak: "down", master: "same_server", sent: "none"},
+		{name: "both, different TAK servers: sent on both", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { return r.ownConn(t, "alpha", "tak2.example.org", 8089) },
+			tak:   "connected", master: "connected", sent: "both", onOwn: true, onMst: true},
+		{name: "both, own link down: through the master", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak {
+				p := r.ownConn(t, "alpha", "tak2.example.org", 8089)
+				setStatus(p.tc, "connecting")
+				return p
+			},
+			tak: "down", master: "connected", sent: "master", onMst: true},
+		{name: "both, master connecting: own link only for now", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak {
+				setStatus(r.master.tc, "connecting")
+				return r.ownConn(t, "alpha", "tak2.example.org", 8089)
+			},
+			tak: "connected", master: "connecting", sent: "own", onOwn: true},
+		{name: "own link switched off, master connected", agency: "alpha",
+			setup: func(t *testing.T, r *masterRig) *pipeTak {
+				m := r.s.tak()
+				m.mu.Lock()
+				m.cfgs["alpha"] = TakConfig{AgencyID: "alpha", Host: "tak.example.org", StreamPort: 8089}
+				m.mu.Unlock()
+				return nil
+			},
+			tak: "off", master: "connected", sent: "master", onMst: true},
+		{name: "neither", agency: "charlie",
+			setup: func(t *testing.T, r *masterRig) *pipeTak { r.noMaster(); return nil },
+			tak:   "none", master: "none", sent: "none"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newMasterRig(t)
+			own := c.setup(t, r)
+			r.s.lmrBridges = map[string]*LMRBridge{
+				"b1": {ID: "b1", Agencies: []string{c.agency}, Channel: 100, Enabled: true, ShowInATAK: true, Lat: f64(41), Lon: f64(-74)},
+			}
+			st := r.s.lmrAtakDelivery(c.agency)
+			if st.TAK != c.tak || st.Master != c.master || st.Sent != c.sent {
+				t.Fatalf("state %+v, want tak %q master %q sent %q", st, c.tak, c.master, c.sent)
+			}
+			p := r.s.lmrMarkers()
+			p.now = func() time.Time { return lmrTestNow }
+			p.pass()
+			if own != nil {
+				if sh, _ := countMarker(own.take(t), "b1"); (sh == 1) != c.onOwn {
+					t.Fatalf("own connection got %d markers, want sent=%v", sh, c.onOwn)
+				}
+			}
+			if sh, _ := countMarker(r.master.take(t), "b1"); (sh == 1) != c.onMst {
+				t.Fatalf("master got %d markers, want sent=%v", sh, c.onMst)
+			}
+		})
+	}
+}
+
+// The agency admin's bridge list carries the delivery state for its own
+// agency, and nothing about the master beyond a state word.
+func TestLMRMarkerDeliveryStateInAgencyList(t *testing.T) {
+	r := newMasterRig(t)
+	addTestSession(r.s, "bravoadmin", "chief", "agency_admin", "bravo")
+	r.s.lmrBridges = map[string]*LMRBridge{
+		"b1": {ID: "b1", Agencies: []string{"bravo"}, Channel: 100, Enabled: true, ShowInATAK: true, Lat: f64(41), Lon: f64(-74), Username: "gw"},
+	}
+	rec := doReq(r.s.webHandler(), "GET", "/api/my-agency/lmr-bridges", "bravoadmin", "")
+	body := rec.Body.String()
+	if !strings.Contains(body, `"atak_tak":"none","atak_master":"connected","atak_sent":"master"`) {
+		t.Fatalf("agency list: %s", body)
+	}
+	if strings.Contains(body, "tak.example.org") {
+		t.Fatalf("master address shown to an agency admin: %s", body)
 	}
 }
 

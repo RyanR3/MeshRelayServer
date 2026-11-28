@@ -379,11 +379,74 @@ func (s *Server) takLinkState(agency string) string {
 	return "down"
 }
 
-// lmrAtakAgencyState is one row of "where is this marker being sent".
+// takMasterLinkState says whether the master TAK connection carries an
+// agency's markers, matching what lmrDesiredMarkers and takDeliver do:
+//
+//	"none"        no master TAK connection is set up
+//	"not_shared"  set up, but the agency does not take part (switch off, not the home agency)
+//	"off"         the agency takes part, the master connection is switched off
+//	"same_server" the agency's own connection goes to the master's TAK server,
+//	              so its markers go out once, on its own connection
+//	"connecting"  the master runs but is not connected now
+//	"connected"   the master carries the agency's markers
+//
+// Only states, never the master's address. Takes the TAK manager's lock, s.mu
+// and connection locks, one at a time; the caller must hold none of them.
+func (s *Server) takMasterLinkState(agency string) string {
+	m := s.tak()
+	m.mu.Lock()
+	configured, mc, own := m.masterCfg != nil, m.master, m.conns[agency]
+	m.mu.Unlock()
+	switch {
+	case !configured:
+		return "none"
+	case !s.agencySharesMaster(agency):
+		return "not_shared"
+	case mc == nil:
+		return "off"
+	case own != nil && takSameServer(own, mc):
+		return "same_server"
+	}
+	mc.mu.Lock()
+	up := mc.status == "connected" && mc.conn != nil
+	mc.mu.Unlock()
+	if up {
+		return "connected"
+	}
+	return "connecting"
+}
+
+// lmrAtakAgencyState is one row of "where is this marker being sent" for one
+// agency in the bridge: its own TAK link, the master's, and where the marker
+// goes right now.
 type lmrAtakAgencyState struct {
 	AgencyID string `json:"agency_id"`
 	Name     string `json:"name"`
-	TAK      string `json:"tak"` // takLinkState
+	TAK      string `json:"tak"`    // own connection: takLinkState
+	Master   string `json:"master"` // takMasterLinkState
+	Sent     string `json:"sent"`   // "own", "master", "both" or "none"
+}
+
+// lmrAtakSent combines the two link states into where the marker goes now.
+func lmrAtakSent(own, master string) string {
+	o, m := own == "connected", master == "connected"
+	switch {
+	case o && m:
+		return "both"
+	case o:
+		return "own"
+	case m:
+		return "master"
+	}
+	return "none"
+}
+
+// lmrAtakDelivery: where agency's copy of a shown marker goes. Same locking
+// as takLinkState.
+func (s *Server) lmrAtakDelivery(agency string) lmrAtakAgencyState {
+	st := lmrAtakAgencyState{AgencyID: agency, TAK: s.takLinkState(agency), Master: s.takMasterLinkState(agency)}
+	st.Sent = lmrAtakSent(st.TAK, st.Master)
+	return st
 }
 
 // --- API --------------------------------------------------------------------------
@@ -457,7 +520,9 @@ func (s *Server) handleLMRBridgeATAK(w http.ResponseWriter, r *http.Request) {
 	states := make([]lmrAtakAgencyState, 0, len(agencies))
 	for _, a := range agencies {
 		if isSuper || a == mine {
-			states = append(states, lmrAtakAgencyState{AgencyID: a, TAK: s.takLinkState(a)})
+			st := s.lmrAtakDelivery(a)
+			st.Name = nonEmpty(s.agencyDisplayName(a), a)
+			states = append(states, st)
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
